@@ -36,17 +36,21 @@ export default function App() {
   // DEAL CRUD
   const saveDeal = async (form) => {
     try {
+      const company = (form.company || "").trim();
+      if (!company) { showToast("Company name is required"); return; }
       const clean = {
-        company: form.company,
+        company,
         stage: form.stage || "prospecting",
         last_activity_at: new Date().toISOString(),
       };
-      if (form.contact_id) clean.contact_id = form.contact_id;
-      if (form.contact_name) clean.contact_name = form.contact_name;
-      if (form.contact_role) clean.contact_role = form.contact_role;
-      if (form.value && Number(form.value) > 0) clean.value = Number(form.value);
-      if (form.notes) clean.notes = form.notes;
-      if (form.next_action) clean.next_action = form.next_action;
+      // Only send optional string fields when they have real content
+      for (const k of ["contact_id", "contact_name", "contact_role", "notes", "next_action"]) {
+        const v = (form[k] || "").trim();
+        if (v) clean[k] = v;
+      }
+      // value is numeric — never send an empty string; only send a valid positive number
+      const value = Number(form.value);
+      if (form.value !== "" && form.value != null && !Number.isNaN(value) && value > 0) clean.value = value;
       if (form.id) {
         await api("deals", "PATCH", clean, `?id=eq.${form.id}`);
       } else {
@@ -75,14 +79,14 @@ export default function App() {
   // CONTACT CRUD
   const saveContact = async (form) => {
     try {
-      const clean = { name: form.name };
-      if (form.role) clean.role = form.role;
-      if (form.company) clean.company = form.company;
-      if (form.email) clean.email = form.email;
-      if (form.phone) clean.phone = form.phone;
-      if (form.linkedin) clean.linkedin = form.linkedin;
-      if (form.source) clean.source = form.source;
-      if (form.notes) clean.notes = form.notes;
+      const name = (form.name || "").trim();
+      if (!name) { showToast("Name is required"); return; }
+      const clean = { name };
+      // Only send optional string fields when they have real content
+      for (const k of ["role", "company", "email", "phone", "linkedin", "source", "notes"]) {
+        const v = (form[k] || "").trim();
+        if (v) clean[k] = v;
+      }
       if (form.tags && form.tags.length > 0) clean.tags = form.tags;
       if (form.id) {
         await api("contacts", "PATCH", clean, `?id=eq.${form.id}`);
@@ -357,7 +361,7 @@ function DealForm({ deal, contacts, onSave, onClose }) {
         <div className="field-full"><label className="label">Next Action</label><input className="input" value={f.next_action} onChange={e=>set("next_action",e.target.value)} placeholder="What needs to happen next?" /></div>
         <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={f.notes} onChange={e=>set("notes",e.target.value)} /></div>
       </div>
-      <div className="modal-actions"><button onClick={onClose} className="btn-sec">Cancel</button><button onClick={()=>f.company&&onSave(f)} className="btn-primary" disabled={!f.company}>{isEdit?"Save":"Add Deal"}</button></div>
+      <div className="modal-actions"><button onClick={onClose} className="btn-sec">Cancel</button><button onClick={()=>f.company.trim()&&onSave(f)} className="btn-primary" disabled={!f.company.trim()}>{isEdit?"Save":"Add Deal"}</button></div>
     </div></div>
   );
 }
@@ -381,7 +385,7 @@ function ContactForm({ contact, onSave, onClose }) {
         <div className="field-full"><label className="label">Tags</label><div className="tags-select">{TAG_OPTIONS.map(t=><button key={t} onClick={()=>toggleTag(t)} className={`tag-btn ${f.tags.includes(t)?"active":""}`}>{t}</button>)}</div></div>
         <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={f.notes} onChange={e=>set("notes",e.target.value)} /></div>
       </div>
-      <div className="modal-actions"><button onClick={onClose} className="btn-sec">Cancel</button><button onClick={()=>f.name&&onSave(f)} className="btn-primary" disabled={!f.name}>{isEdit?"Save":"Add Contact"}</button></div>
+      <div className="modal-actions"><button onClick={onClose} className="btn-sec">Cancel</button><button onClick={()=>f.name.trim()&&onSave(f)} className="btn-primary" disabled={!f.name.trim()}>{isEdit?"Save":"Add Contact"}</button></div>
     </div></div>
   );
 }
