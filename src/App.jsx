@@ -160,6 +160,35 @@ export default function App() {
     } catch { showToast("Error deleting enabler"); }
   };
 
+  const generateDealSummary = async (deal, dealActivities) => {
+    setSummarizing(true);
+    try {
+      const activityText = dealActivities.length > 0
+        ? dealActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${a.description}`).join("\n")
+        : "No activities logged yet.";
+      const prompt = `You are a sales analyst summarizing a deal for a BD pipeline tool.
+
+Deal: ${deal.company} (Stage: ${STAGES.find((s) => s.id === deal.stage)?.label || deal.stage})
+${deal.value > 0 ? `Value: $${Number(deal.value).toLocaleString()}\n` : ""}${deal.contact_name ? `Primary contact: ${deal.contact_name}${deal.contact_role ? ` (${deal.contact_role})` : ""}\n` : ""}${deal.next_action ? `Next action: ${deal.next_action}\n` : ""}${deal.notes ? `Notes: ${deal.notes}\n` : ""}
+Activity history:
+${activityText}
+
+Write a concise status summary covering:
+1. Relationship status
+2. Key interactions
+3. What was discussed
+4. Deal stage context
+5. Next steps
+6. Any risks or blockers
+
+Keep it tight and scannable. No preamble.`;
+      const summary = await generateSummary(prompt);
+      await api("deals", "PATCH", { ai_summary: summary, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${deal.id}`);
+      await loadData(); showToast("Summary generated");
+    } catch { showToast("Error generating summary"); }
+    setSummarizing(false);
+  };
+
   const generateEnablerSummary = async (enabler, enablerActivities) => {
     setSummarizing(true);
     try {
@@ -308,6 +337,8 @@ Keep it tight and scannable. No preamble.`;
             onEdit={(d) => setModal({ type: "deal", data: d })}
             onDelete={deleteDeal}
             onAddActivity={addActivity}
+            onGenerateSummary={generateDealSummary}
+            summarizing={summarizing}
             onBack={() => { setView("pipeline"); setDealSheetId(null); }}
           />
         ) : null;
@@ -590,7 +621,7 @@ const TIMELINE_TABS = [
   { id: "note", label: "Notes" },
 ];
 
-function DealSheet({ deal, activities, onEdit, onDelete, onAddActivity, onBack }) {
+function DealSheet({ deal, activities, onEdit, onDelete, onAddActivity, onGenerateSummary, summarizing, onBack }) {
   const stage = STAGES.find(s => s.id === deal.stage);
   const [filter, setFilter] = useState("all");
   const [qDesc, setQDesc] = useState("");
@@ -630,6 +661,21 @@ function DealSheet({ deal, activities, onEdit, onDelete, onAddActivity, onBack }
         </div>
         {deal.next_action && <div className="next-box sheet-next"><span className="next-label">Next:</span> {deal.next_action}</div>}
         {deal.notes && <div className="detail-notes sheet-notes">{deal.notes}</div>}
+      </div>
+
+      <div className="ai-summary">
+        <div className="ai-summary-header">
+          <div className="section-label">AI Summary</div>
+          <button onClick={() => onGenerateSummary(deal, activities)} className="btn-copy" disabled={summarizing}>{summarizing ? "Generating..." : "Generate Summary"}</button>
+        </div>
+        {deal.ai_summary ? (
+          <>
+            <div className="ai-summary-text">{deal.ai_summary}</div>
+            <div className="ai-summary-updated">Last updated: {formatDate(deal.ai_summary_updated_at)}</div>
+          </>
+        ) : (
+          <div className="empty-small">No summary yet. Generate one from the activity history.</div>
+        )}
       </div>
 
       <div className="quickadd">
