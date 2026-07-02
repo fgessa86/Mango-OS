@@ -19,6 +19,15 @@ export const ACT_TYPES = [
   { id: "demo", label: "Demo", icon: "\u{1F5A5}" },
 ];
 
+export const ENABLER_TYPES = [
+  { id: "vc", label: "VC", color: "#8B5CF6" },
+  { id: "government", label: "Government", color: "#3B82F6" },
+  { id: "research", label: "Research", color: "#06B6D4" },
+  { id: "strategic_partner", label: "Strategic Partner", color: "#F59E0B" },
+  { id: "accelerator", label: "Accelerator", color: "#10B981" },
+  { id: "connector", label: "Connector", color: "#EC4899" },
+];
+
 export const TAG_OPTIONS = [
   "Decision Maker", "Technical Buyer", "Champion", "Influencer",
   "Gatekeeper", "End User", "C-Suite", "Government",
