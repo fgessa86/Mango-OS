@@ -16,6 +16,7 @@ export default function App() {
   const [contactSearch, setContactSearch] = useState("");
   const [contactTagFilter, setContactTagFilter] = useState("");
   const [toast, setToast] = useState(null);
+  const [dealSheetId, setDealSheetId] = useState(null);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
 
@@ -32,6 +33,13 @@ export default function App() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Kick back to pipeline if the open deal sheet's deal was deleted elsewhere
+  useEffect(() => {
+    if (view === "deal-sheet" && dealSheetId && deals.length > 0 && !deals.find((d) => d.id === dealSheetId)) {
+      setView("pipeline"); setDealSheetId(null);
+    }
+  }, [deals, view, dealSheetId]);
 
   // DEAL CRUD
   const saveDeal = async (form) => {
@@ -65,6 +73,7 @@ export default function App() {
       await api("activities", "DELETE", null, `?deal_id=eq.${id}`);
       await api("deals", "DELETE", null, `?id=eq.${id}`);
       await loadData(); setModal(null); showToast("Deal deleted");
+      setView("pipeline"); setDealSheetId(null);
     } catch { showToast("Error deleting deal"); }
   };
 
@@ -200,11 +209,28 @@ export default function App() {
         </nav>
       </header>
 
-      <div className="stats-bar">
-        {[[activeDeals.length,"Active Deals"],[totalValue > 0 ? `$${(totalValue/1000).toFixed(0)}K` : "N/A","Pipeline Value"],[contacts.length,"Contacts"],[deals.filter(d=>isToday(d.last_activity_at)).length,"Touched Today"],[deals.filter(d=>d.stage==="won").length,"Won"]].map(([v,l],i) => (
-          <div key={i} className="stat"><div className="stat-value">{v}</div><div className="stat-label">{l}</div></div>
-        ))}
-      </div>
+      {view !== "deal-sheet" && (
+        <div className="stats-bar">
+          {[[activeDeals.length,"Active Deals"],[totalValue > 0 ? `$${(totalValue/1000).toFixed(0)}K` : "N/A","Pipeline Value"],[contacts.length,"Contacts"],[deals.filter(d=>isToday(d.last_activity_at)).length,"Touched Today"],[deals.filter(d=>d.stage==="won").length,"Won"]].map(([v,l],i) => (
+            <div key={i} className="stat"><div className="stat-value">{v}</div><div className="stat-label">{l}</div></div>
+          ))}
+        </div>
+      )}
+
+      {/* DEAL SHEET */}
+      {view === "deal-sheet" && dealSheetId && (() => {
+        const sheetDeal = deals.find((d) => d.id === dealSheetId);
+        return sheetDeal ? (
+          <DealSheet
+            deal={sheetDeal}
+            activities={activities.filter((a) => a.deal_id === sheetDeal.id)}
+            onEdit={(d) => setModal({ type: "deal", data: d })}
+            onDelete={deleteDeal}
+            onAddActivity={addActivity}
+            onBack={() => { setView("pipeline"); setDealSheetId(null); }}
+          />
+        ) : null;
+      })()}
 
       {/* PIPELINE */}
       {view === "pipeline" && (
@@ -225,7 +251,7 @@ export default function App() {
                   <div className="col-body">
                     {sd.map((deal) => (
                       <div key={deal.id} draggable onDragStart={(e) => e.dataTransfer.setData("dealId", deal.id)}
-                        onClick={() => setModal({type:"deal-detail",data:deal})}
+                        onClick={() => { setDealSheetId(deal.id); setView("deal-sheet"); }}
                         className="deal-card" style={{borderLeftColor: stage.color}}>
                         <div className="card-company">{deal.company}</div>
                         {deal.contact_name && <div className="card-contact">{deal.contact_name}{deal.contact_role ? ` . ${deal.contact_role}` : ""}</div>}
@@ -336,7 +362,6 @@ export default function App() {
       {/* MODALS */}
       {modal?.type === "deal" && <DealForm deal={modal.data} contacts={contacts} onSave={saveDeal} onClose={() => setModal(null)} />}
       {modal?.type === "contact" && <ContactForm contact={modal.data} onSave={saveContact} onClose={() => setModal(null)} />}
-      {modal?.type === "deal-detail" && <DealDetail deal={modal.data} activities={activities.filter(a => a.deal_id === modal.data.id)} contacts={contacts} onMove={moveDeal} onEdit={(d) => setModal({type:"deal",data:d})} onDelete={deleteDeal} onActivity={(id) => setModal({type:"activity",data:{deal_id:id}})} onClose={() => setModal(null)} />}
       {modal?.type === "contact-detail" && <ContactDetail contact={modal.data} deals={deals} activities={activities.filter(a => a.contact_id === modal.data.id)} onEdit={(c) => setModal({type:"contact",data:c})} onDelete={deleteContact} onActivity={(id) => setModal({type:"activity",data:{contact_id:id}})} onClose={() => setModal(null)} />}
       {modal?.type === "activity" && <ActivityForm data={modal.data} deals={deals} contacts={contacts} onSave={addActivity} onClose={() => setModal(null)} />}
     </div>
@@ -390,22 +415,6 @@ function ContactForm({ contact, onSave, onClose }) {
   );
 }
 
-function DealDetail({ deal, activities, contacts, onMove, onEdit, onDelete, onActivity, onClose }) {
-  const stage = STAGES.find(s=>s.id===deal.stage);
-  return (
-    <div className="overlay" onClick={onClose}><div className="modal" onClick={e=>e.stopPropagation()}>
-      <div className="modal-header"><div><div className="modal-title">{deal.company}</div>{deal.contact_name && <div className="modal-sub">{deal.contact_name}{deal.contact_role?` . ${deal.contact_role}`:""}</div>}</div><button onClick={onClose} className="close-btn">✕</button></div>
-      <div className="badges">{stage && <span className="badge" style={{background:stage.color+"22",color:stage.color,border:`1px solid ${stage.color}44`}}>{stage.label}</span>}{deal.value>0&&<span className="badge val-badge">${Number(deal.value).toLocaleString()}</span>}<span className="badge date-badge">Created {formatDate(deal.created_at)}</span></div>
-      {deal.notes && <div className="detail-notes">{deal.notes}</div>}
-      {deal.next_action && <div className="next-box"><span className="next-label">Next:</span> {deal.next_action}</div>}
-      <div className="section"><div className="section-label">Move to</div><div className="tags-select">{STAGES.filter(s=>s.id!==deal.stage).map(s=><button key={s.id} onClick={()=>{onMove(deal.id,s.id);onClose();}} className="tag-btn" style={{borderColor:s.color+"66",color:s.color}}>{s.label}</button>)}</div></div>
-      <div className="detail-actions"><button onClick={()=>onActivity(deal.id)} className="btn-sec">+ Activity</button><button onClick={()=>onEdit(deal)} className="btn-sec">Edit</button><button onClick={()=>{if(confirm("Delete?"))onDelete(deal.id)}} className="btn-sec btn-danger">Delete</button></div>
-      <div className="section-label">Activity History</div>
-      <div className="activity-list">{activities.length===0?<div className="empty-small">No activities yet</div>:activities.slice().reverse().map(a=><div key={a.id} className="activity-item"><span>{ACT_TYPES.find(t=>t.id===a.type)?.icon||"."}</span><div><div className="act-desc">{a.description}</div><div className="act-date">{formatDate(a.created_at)}</div></div></div>)}</div>
-    </div></div>
-  );
-}
-
 function ContactDetail({ contact, deals, activities, onEdit, onDelete, onActivity, onClose }) {
   const cd = deals.filter(d=>d.contact_id===contact.id);
   return (
@@ -436,5 +445,96 @@ function ActivityForm({ data, deals, contacts, onSave, onClose }) {
       <textarea className="input textarea" value={desc} onChange={e=>setDesc(e.target.value)} placeholder="What happened?" />
       <div className="modal-actions"><button onClick={onClose} className="btn-sec">Cancel</button><button onClick={()=>desc&&onSave(dealId||null,contactId||null,{type,description:desc})} className="btn-primary" disabled={!desc}>Log</button></div>
     </div></div>
+  );
+}
+
+const TIMELINE_TABS = [
+  { id: "all", label: "All" },
+  { id: "call", label: "Calls" },
+  { id: "email", label: "Emails" },
+  { id: "meeting", label: "Meetings" },
+  { id: "note", label: "Notes" },
+];
+
+function DealSheet({ deal, activities, onEdit, onDelete, onAddActivity, onBack }) {
+  const stage = STAGES.find(s => s.id === deal.stage);
+  const [filter, setFilter] = useState("all");
+  const [qDesc, setQDesc] = useState("");
+  const [qType, setQType] = useState("call");
+  const [posting, setPosting] = useState(false);
+
+  const submitQuickAdd = async () => {
+    const text = qDesc.trim();
+    if (!text || posting) return;
+    setPosting(true);
+    try {
+      await onAddActivity(deal.id, deal.contact_id || null, { type: qType, description: text });
+      setQDesc("");
+    } finally { setPosting(false); }
+  };
+
+  const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
+
+  return (
+    <div className="deal-sheet">
+      <button onClick={onBack} className="sheet-back">← Back to Pipeline</button>
+
+      <div className="sheet-top">
+        <div className="sheet-top-row">
+          <div>
+            <div className="sheet-company">{deal.company}</div>
+            <div className="sheet-meta-row">
+              {stage && <span className="badge" style={{background:stage.color+"22",color:stage.color,border:`1px solid ${stage.color}44`}}>{stage.label}</span>}
+              {deal.value > 0 && <span className="badge val-badge">${Number(deal.value).toLocaleString()}</span>}
+            </div>
+            {deal.contact_name && <div className="sheet-contact">{deal.contact_name}{deal.contact_role ? ` . ${deal.contact_role}` : ""}</div>}
+          </div>
+          <div className="sheet-actions">
+            <button onClick={() => onEdit(deal)} className="btn-sec">Edit</button>
+            <button onClick={() => { if (confirm("Delete this deal?")) onDelete(deal.id); }} className="btn-sec btn-danger">Delete</button>
+          </div>
+        </div>
+        {deal.next_action && <div className="next-box sheet-next"><span className="next-label">Next:</span> {deal.next_action}</div>}
+        {deal.notes && <div className="detail-notes sheet-notes">{deal.notes}</div>}
+      </div>
+
+      <div className="quickadd">
+        <div className="section-label">Quick Add</div>
+        <div className="quickadd-row">
+          <input
+            className="input quickadd-input"
+            placeholder="Log an update..."
+            value={qDesc}
+            onChange={e => setQDesc(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") submitQuickAdd(); }}
+          />
+          <select className="input quickadd-type" value={qType} onChange={e => setQType(e.target.value)}>
+            {ACT_TYPES.map(t => <option key={t.id} value={t.id}>{t.icon} {t.label}</option>)}
+          </select>
+          <button onClick={submitQuickAdd} className="btn-primary" disabled={!qDesc.trim() || posting}>Add</button>
+        </div>
+      </div>
+
+      <div className="timeline">
+        <div className="section-label">Activity Timeline</div>
+        <div className="timeline-tabs">
+          {TIMELINE_TABS.map(t => (
+            <button key={t.id} onClick={() => setFilter(t.id)} className={`tag-btn ${filter === t.id ? "active" : ""}`}>{t.label}</button>
+          ))}
+        </div>
+        <div className="timeline-list">
+          {filtered.length === 0 && <div className="empty-small">No activities yet</div>}
+          {filtered.map(a => (
+            <div key={a.id} className="timeline-item">
+              <span className="timeline-icon">{ACT_TYPES.find(t => t.id === a.type)?.icon || "."}</span>
+              <div>
+                <div className="act-desc">{a.description}</div>
+                <div className="act-date">{formatDate(a.created_at)}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }

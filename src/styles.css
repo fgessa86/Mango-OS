@@ -150,6 +150,30 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .mb { margin-bottom: 10px; }
 .mb-sm { margin-bottom: 8px; }
 
+/* Deal Sheet */
+.deal-sheet { padding: 0 16px 24px; max-width: 900px; margin: 0 auto; }
+.sheet-back { background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 6px 0; margin-bottom: 12px; }
+.sheet-back:hover { color: var(--text); }
+.sheet-top { background: var(--surface); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+.sheet-top-row { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px; }
+.sheet-company { font-size: 26px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; }
+.sheet-meta-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.sheet-contact { font-size: 13px; color: #94A3B8; margin-top: 6px; }
+.sheet-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.sheet-next { margin-top: 14px; margin-bottom: 0; }
+.sheet-notes { margin-top: 10px; margin-bottom: 0; }
+
+.quickadd { background: var(--surface); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+.quickadd-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.quickadd-input { flex: 1 1 240px; }
+.quickadd-type { flex: 0 0 auto; width: auto; }
+
+.timeline { background: var(--surface); border-radius: 10px; padding: 16px; }
+.timeline-tabs { display: flex; gap: 6px; margin: 8px 0 12px; flex-wrap: wrap; }
+.timeline-list { display: flex; flex-direction: column; gap: 2px; }
+.timeline-item { display: flex; gap: 10px; padding: 8px 6px; border-left: 2px solid var(--border); margin-left: 4px; }
+.timeline-icon { font-size: 14px; }
+
 @media (max-width: 768px) {
   .kanban { flex-direction: column; }
   .column { min-width: 100%; }
