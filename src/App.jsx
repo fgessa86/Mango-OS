@@ -36,12 +36,21 @@ export default function App() {
   // DEAL CRUD
   const saveDeal = async (form) => {
     try {
+      const clean = {
+        company: form.company,
+        stage: form.stage || "prospecting",
+        last_activity_at: new Date().toISOString(),
+      };
+      if (form.contact_id) clean.contact_id = form.contact_id;
+      if (form.contact_name) clean.contact_name = form.contact_name;
+      if (form.contact_role) clean.contact_role = form.contact_role;
+      if (form.value && Number(form.value) > 0) clean.value = Number(form.value);
+      if (form.notes) clean.notes = form.notes;
+      if (form.next_action) clean.next_action = form.next_action;
       if (form.id) {
-        const { id, ...rest } = form;
-        await api("deals", "PATCH", { ...rest, last_activity_at: new Date().toISOString() }, `?id=eq.${id}`);
+        await api("deals", "PATCH", clean, `?id=eq.${form.id}`);
       } else {
-        const { id, ...rest } = form;
-        await api("deals", "POST", { ...rest, last_activity_at: new Date().toISOString() });
+        await api("deals", "POST", clean);
       }
       await loadData(); setModal(null); showToast(form.id ? "Deal updated" : "Deal added");
     } catch { showToast("Error saving deal"); }
@@ -66,12 +75,19 @@ export default function App() {
   // CONTACT CRUD
   const saveContact = async (form) => {
     try {
+      const clean = { name: form.name };
+      if (form.role) clean.role = form.role;
+      if (form.company) clean.company = form.company;
+      if (form.email) clean.email = form.email;
+      if (form.phone) clean.phone = form.phone;
+      if (form.linkedin) clean.linkedin = form.linkedin;
+      if (form.source) clean.source = form.source;
+      if (form.notes) clean.notes = form.notes;
+      if (form.tags && form.tags.length > 0) clean.tags = form.tags;
       if (form.id) {
-        const { id, ...rest } = form;
-        await api("contacts", "PATCH", rest, `?id=eq.${id}`);
+        await api("contacts", "PATCH", clean, `?id=eq.${form.id}`);
       } else {
-        const { id, ...rest } = form;
-        await api("contacts", "POST", rest);
+        await api("contacts", "POST", clean);
       }
       await loadData(); setModal(null); showToast(form.id ? "Contact updated" : "Contact added");
     } catch { showToast("Error saving contact"); }
