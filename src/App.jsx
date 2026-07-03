@@ -1,11 +1,20 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "./supabase";
 import { generateSummary, summarizeImage } from "./anthropic";
-import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES } from "./constants";
-import { formatDate, formatFull, daysAgo, isToday, isThisWeek } from "./utils";
+import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES } from "./constants";
+import { formatDate, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import "./styles.css";
 
 const PHOTO_NOTE_PROMPT = "This is a photo of handwritten meeting notes. Please transcribe and summarize the key points, action items, and any decisions made. Be concise.";
+
+const sortTodos = (list) => list.slice().sort((a, b) => {
+  const p = PRIORITIES.findIndex((x) => x.id === a.priority) - PRIORITIES.findIndex((x) => x.id === b.priority);
+  if (p !== 0) return p;
+  const ad = a.due_date ? new Date(a.due_date).getTime() : Infinity;
+  const bd = b.due_date ? new Date(b.due_date).getTime() : Infinity;
+  if (ad !== bd) return ad - bd;
+  return new Date(a.created_at) - new Date(b.created_at);
+});
 
 // Normalizes any browser-decodable image (jpg, png, webp, heic on Safari, etc.) to a JPEG
 // base64 payload, since Claude's vision API only accepts jpeg/png/gif/webp.
@@ -34,6 +43,8 @@ export default function App() {
   const [enablers, setEnablers] = useState([]);
   const [dealContacts, setDealContacts] = useState([]);
   const [enablerContacts, setEnablerContacts] = useState([]);
+  const [todos, setTodos] = useState([]);
+  const [taskFilter, setTaskFilter] = useState("all");
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
   const [reportCopied, setReportCopied] = useState(null);
@@ -51,16 +62,17 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec] = await Promise.all([
+      const [d, c, a, en, dc, ec, td] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
         api("enablers", "GET", null, "?select=*&order=name.asc"),
         api("deal_contacts", "GET", null, "?select=*,contacts(*)&order=created_at.asc"),
         api("enabler_contacts", "GET", null, "?select=*,contacts(*)&order=created_at.asc"),
+        api("todos", "GET", null, "?select=*&order=created_at.desc"),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
-      setDealContacts(dc || []); setEnablerContacts(ec || []);
+      setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -112,6 +124,7 @@ export default function App() {
     try {
       await api("activities", "DELETE", null, `?deal_id=eq.${id}`);
       await api("deal_contacts", "DELETE", null, `?deal_id=eq.${id}`);
+      await api("todos", "DELETE", null, `?deal_id=eq.${id}`);
       await api("deals", "DELETE", null, `?id=eq.${id}`);
       await loadData(); setModal(null); showToast("Deal deleted");
       setView("pipeline"); setDealSheetId(null);
@@ -182,6 +195,7 @@ export default function App() {
     try {
       await api("activities", "DELETE", null, `?enabler_id=eq.${id}`);
       await api("enabler_contacts", "DELETE", null, `?enabler_id=eq.${id}`);
+      await api("todos", "DELETE", null, `?enabler_id=eq.${id}`);
       await api("enablers", "DELETE", null, `?id=eq.${id}`);
       await loadData(); setModal(null); showToast("Enabler deleted");
       setView("enablers"); setEnablerSheetId(null);
@@ -278,6 +292,43 @@ Keep it tight and scannable. No preamble.`;
     setSummarizing(false);
   };
 
+  const saveDealSummary = async (id, text) => {
+    try {
+      await api("deals", "PATCH", { ai_summary: text, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${id}`);
+      await loadData(); showToast("Summary saved");
+    } catch { showToast("Error saving summary"); }
+  };
+
+  const saveEnablerSummary = async (id, text) => {
+    try {
+      await api("enablers", "PATCH", { ai_summary: text, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${id}`);
+      await loadData(); showToast("Summary saved");
+    } catch { showToast("Error saving summary"); }
+  };
+
+  // TODOS
+  const saveTodo = async (form) => {
+    try {
+      const title = (form.title || "").trim();
+      if (!title) { showToast("Title is required"); return; }
+      const clean = { title, priority: form.priority || "medium", status: "open" };
+      if (form.due_date) clean.due_date = form.due_date;
+      if (form.contact_id) clean.contact_id = form.contact_id;
+      if (form.deal_id) clean.deal_id = form.deal_id;
+      if (form.enabler_id) clean.enabler_id = form.enabler_id;
+      await api("todos", "POST", clean);
+      await loadData(); showToast("To-do added");
+    } catch { showToast("Error adding to-do"); }
+  };
+
+  const toggleTodo = async (todo) => {
+    try {
+      const completing = todo.status !== "completed";
+      await api("todos", "PATCH", { status: completing ? "completed" : "open", completed_at: completing ? new Date().toISOString() : null }, `?id=eq.${todo.id}`);
+      await loadData();
+    } catch { showToast("Error updating to-do"); }
+  };
+
   // ACTIVITY
   const addActivity = async (dealId, contactId, activity, enablerId = null) => {
     try {
@@ -361,6 +412,13 @@ Keep it tight and scannable. No preamble.`;
     const mt = !enablerTypeFilter || en.type === enablerTypeFilter;
     return ms && mt;
   });
+  const openTodos = sortTodos(todos.filter((t) => t.status === "open"));
+  const filteredTasks = openTodos.filter((t) => {
+    if (taskFilter === "high") return t.priority === "high";
+    if (taskFilter === "due_today") return t.due_date && isToday(t.due_date);
+    if (taskFilter === "overdue") return isOverdue(t.due_date);
+    return true;
+  });
 
   if (loading) return <div className="app loading-screen"><div className="loading-text">Loading Mango OS...</div></div>;
 
@@ -374,7 +432,7 @@ Keep it tight and scannable. No preamble.`;
           <div><div className="title">Mango OS</div><div className="subtitle">Pipeline Command Center</div></div>
         </div>
         <nav className="nav">
-          {[["pipeline","Pipeline"],["contacts","Contacts"],["enablers","Enablers"],["reports","Reports"],["boss","Boss View"]].map(([k,l]) => (
+          {[["pipeline","Pipeline"],["contacts","Contacts"],["enablers","Enablers"],["tasks","Tasks"],["reports","Reports"],["boss","Boss View"]].map(([k,l]) => (
             <button key={k} onClick={() => setView(k)} className={`nav-tab ${view === k ? "active" : ""}`}>{l}</button>
           ))}
         </nav>
@@ -382,7 +440,7 @@ Keep it tight and scannable. No preamble.`;
 
       {view !== "deal-sheet" && view !== "enabler-sheet" && (
         <div className="stats-bar">
-          {[[activeDeals.length,"Active Deals"],[totalValue > 0 ? `$${(totalValue/1000).toFixed(0)}K` : "N/A","Pipeline Value"],[contacts.length,"Contacts"],[enablers.length,"Enablers"],[deals.filter(d=>isToday(d.last_activity_at)).length,"Touched Today"],[deals.filter(d=>d.stage==="won").length,"Won"]].map(([v,l],i) => (
+          {[[activeDeals.length,"Active Deals"],[totalValue > 0 ? `$${(totalValue/1000).toFixed(0)}K` : "N/A","Pipeline Value"],[contacts.length,"Contacts"],[enablers.length,"Enablers"],[openTodos.length,"Open Tasks"],[deals.filter(d=>isToday(d.last_activity_at)).length,"Touched Today"],[deals.filter(d=>d.stage==="won").length,"Won"]].map(([v,l],i) => (
             <div key={i} className="stat"><div className="stat-value">{v}</div><div className="stat-label">{l}</div></div>
           ))}
         </div>
@@ -396,13 +454,17 @@ Keep it tight and scannable. No preamble.`;
             deal={sheetDeal}
             activities={activities.filter((a) => a.deal_id === sheetDeal.id)}
             people={dealContacts.filter((dc) => dc.deal_id === sheetDeal.id)}
+            todos={todos.filter((t) => t.deal_id === sheetDeal.id)}
             contacts={contacts}
             onEdit={(d) => setModal({ type: "deal", data: d })}
             onDelete={deleteDeal}
             onAddActivity={addActivity}
             onAddPerson={(contactId, role) => addDealContact(sheetDeal.id, contactId, role)}
             onRemovePerson={removeDealContact}
+            onAddTodo={(form) => saveTodo({ ...form, deal_id: sheetDeal.id })}
+            onToggleTodo={toggleTodo}
             onGenerateSummary={generateDealSummary}
+            onSaveSummary={saveDealSummary}
             summarizing={summarizing}
             showToast={showToast}
             onBack={() => { setView("pipeline"); setDealSheetId(null); }}
@@ -418,13 +480,17 @@ Keep it tight and scannable. No preamble.`;
             enabler={sheetEnabler}
             activities={activities.filter((a) => a.enabler_id === sheetEnabler.id)}
             people={enablerContacts.filter((ec) => ec.enabler_id === sheetEnabler.id)}
+            todos={todos.filter((t) => t.enabler_id === sheetEnabler.id)}
             contacts={contacts}
             onEdit={(en) => setModal({ type: "enabler", data: en })}
             onDelete={deleteEnabler}
             onAddActivity={addActivity}
             onAddPerson={(contactId, role) => addEnablerContact(sheetEnabler.id, contactId, role)}
             onRemovePerson={removeEnablerContact}
+            onAddTodo={(form) => saveTodo({ ...form, enabler_id: sheetEnabler.id })}
+            onToggleTodo={toggleTodo}
             onGenerateSummary={generateEnablerSummary}
+            onSaveSummary={saveEnablerSummary}
             summarizing={summarizing}
             showToast={showToast}
             onBack={() => { setView("enablers"); setEnablerSheetId(null); }}
@@ -542,6 +608,38 @@ Keep it tight and scannable. No preamble.`;
         </div>
       )}
 
+      {/* TASKS */}
+      {view === "tasks" && (
+        <div className="section-pad">
+          <TaskQuickAdd deals={activeDeals} enablers={enablers} onAdd={saveTodo} />
+          <div className="timeline-tabs mb">
+            {TASK_FILTER_TABS.map(t => (
+              <button key={t.id} onClick={() => setTaskFilter(t.id)} className={`tag-btn ${taskFilter === t.id ? "active" : ""}`}>{t.label}</button>
+            ))}
+          </div>
+          {filteredTasks.length === 0 ? (
+            <div className="empty-state">No tasks match.</div>
+          ) : (
+            <div className="todo-list">
+              {filteredTasks.map((t) => {
+                const linkedDeal = t.deal_id ? deals.find((d) => d.id === t.deal_id) : null;
+                const linkedEnabler = t.enabler_id ? enablers.find((en) => en.id === t.enabler_id) : null;
+                return (
+                  <TodoRow
+                    key={t.id}
+                    todo={t}
+                    contacts={contacts}
+                    onToggle={toggleTodo}
+                    linkLabel={linkedDeal ? linkedDeal.company : linkedEnabler ? linkedEnabler.name : null}
+                    onLinkClick={linkedDeal ? () => { setDealSheetId(linkedDeal.id); setView("deal-sheet"); } : linkedEnabler ? () => { setEnablerSheetId(linkedEnabler.id); setView("enabler-sheet"); } : null}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* REPORTS */}
       {view === "reports" && (
         <div className="section-pad reports">
@@ -590,6 +688,38 @@ Keep it tight and scannable. No preamble.`;
               ))}
             </div>
           </div>
+          <div className="section-label boss-section-label">Key Summaries</div>
+          <div className="key-summaries">
+            {[...activeDeals.filter(d => d.ai_summary).map(d => ({ id: d.id, name: d.company, summary: d.ai_summary })),
+              ...enablers.filter(en => en.ai_summary).map(en => ({ id: en.id, name: en.name, summary: en.ai_summary }))]
+              .map(item => (
+                <div key={item.id} className="key-summary-card">
+                  <div className="key-summary-header">{item.name}</div>
+                  <div className="key-summary-text">{item.summary}</div>
+                </div>
+              ))}
+            {activeDeals.filter(d => d.ai_summary).length === 0 && enablers.filter(en => en.ai_summary).length === 0 && (
+              <div className="empty-small">No summaries yet.</div>
+            )}
+          </div>
+
+          <div className="section-label boss-section-label">Action Items</div>
+          <div className="action-items">
+            {sortTodos(todos.filter(t => t.status === "open")).slice(0, 10).map(t => {
+              const linkedDeal = t.deal_id ? deals.find(d => d.id === t.deal_id) : null;
+              const linkedEnabler = t.enabler_id ? enablers.find(en => en.id === t.enabler_id) : null;
+              return (
+                <div key={t.id} className="action-item-row">
+                  <PriorityBadge priority={t.priority} />
+                  <span className="action-item-title">{t.title}</span>
+                  {(linkedDeal || linkedEnabler) && <span className="action-item-link">{linkedDeal ? linkedDeal.company : linkedEnabler.name}</span>}
+                  {t.due_date && <span className="todo-due">Due {formatDate(t.due_date)}</span>}
+                </div>
+              );
+            })}
+            {todos.filter(t => t.status === "open").length === 0 && <div className="empty-small">No open action items.</div>}
+          </div>
+
           <div className="center"><button onClick={() => copyReport("eow")} className="btn-copy btn-copy-lg">{reportCopied === "eow" ? "Copied!" : "Copy Weekly Report"}</button></div>
         </div>
       )}
@@ -692,7 +822,14 @@ const TIMELINE_TABS = [
   { id: "note", label: "Notes" },
 ];
 
-function DealSheet({ deal, activities, people, contacts, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onGenerateSummary, summarizing, showToast, onBack }) {
+const TASK_FILTER_TABS = [
+  { id: "all", label: "All" },
+  { id: "high", label: "High Priority" },
+  { id: "due_today", label: "Due Today" },
+  { id: "overdue", label: "Overdue" },
+];
+
+function DealSheet({ deal, activities, people, todos, contacts, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onAddTodo, onToggleTodo, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
   const stage = STAGES.find(s => s.id === deal.stage);
   const [filter, setFilter] = useState("all");
   const [personFilter, setPersonFilter] = useState(null);
@@ -727,20 +864,13 @@ function DealSheet({ deal, activities, people, contacts, onEdit, onDelete, onAdd
         {deal.notes && <div className="detail-notes sheet-notes">{deal.notes}</div>}
       </div>
 
-      <div className="ai-summary">
-        <div className="ai-summary-header">
-          <div className="section-label">AI Summary</div>
-          <button onClick={() => onGenerateSummary(deal, activities)} className="btn-copy" disabled={summarizing}>{summarizing ? "Generating..." : "Generate Summary"}</button>
-        </div>
-        {deal.ai_summary ? (
-          <>
-            <div className="ai-summary-text">{deal.ai_summary}</div>
-            <div className="ai-summary-updated">Last updated: {formatDate(deal.ai_summary_updated_at)}</div>
-          </>
-        ) : (
-          <div className="empty-small">No summary yet. Generate one from the activity history.</div>
-        )}
-      </div>
+      <SummaryCard
+        entity={deal}
+        activities={activities}
+        onGenerateSummary={onGenerateSummary}
+        onSaveSummary={onSaveSummary}
+        summarizing={summarizing}
+      />
 
       <PeopleSection
         people={peopleNorm}
@@ -752,6 +882,8 @@ function DealSheet({ deal, activities, people, contacts, onEdit, onDelete, onAdd
         onAdd={onAddPerson}
         onRemove={onRemovePerson}
       />
+
+      <TodoSection todos={todos} contacts={contacts} onAdd={onAddTodo} onToggle={onToggleTodo} />
 
       <QuickAdd
         dealId={deal.id}
@@ -807,7 +939,7 @@ function EnablerForm({ enabler, contacts, onSave, onClose }) {
   );
 }
 
-function EnablerSheet({ enabler, activities, people, contacts, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onGenerateSummary, summarizing, showToast, onBack }) {
+function EnablerSheet({ enabler, activities, people, todos, contacts, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onAddTodo, onToggleTodo, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
   const type = ENABLER_TYPES.find(t => t.id === enabler.type);
   const [filter, setFilter] = useState("all");
   const [personFilter, setPersonFilter] = useState(null);
@@ -840,20 +972,13 @@ function EnablerSheet({ enabler, activities, people, contacts, onEdit, onDelete,
         {enabler.notes && <div className="detail-notes sheet-notes">{enabler.notes}</div>}
       </div>
 
-      <div className="ai-summary">
-        <div className="ai-summary-header">
-          <div className="section-label">AI Summary</div>
-          <button onClick={() => onGenerateSummary(enabler, activities)} className="btn-copy" disabled={summarizing}>{summarizing ? "Generating..." : "Generate Summary"}</button>
-        </div>
-        {enabler.ai_summary ? (
-          <>
-            <div className="ai-summary-text">{enabler.ai_summary}</div>
-            <div className="ai-summary-updated">Last updated: {formatDate(enabler.ai_summary_updated_at)}</div>
-          </>
-        ) : (
-          <div className="empty-small">No summary yet. Generate one from the activity history.</div>
-        )}
-      </div>
+      <SummaryCard
+        entity={enabler}
+        activities={activities}
+        onGenerateSummary={onGenerateSummary}
+        onSaveSummary={onSaveSummary}
+        summarizing={summarizing}
+      />
 
       <PeopleSection
         people={peopleNorm}
@@ -865,6 +990,8 @@ function EnablerSheet({ enabler, activities, people, contacts, onEdit, onDelete,
         onAdd={onAddPerson}
         onRemove={onRemovePerson}
       />
+
+      <TodoSection todos={todos} contacts={contacts} onAdd={onAddTodo} onToggle={onToggleTodo} />
 
       <QuickAdd
         enablerId={enabler.id}
@@ -1076,6 +1203,194 @@ function QuickAdd({ dealId = null, enablerId = null, contactId, onAddActivity, s
           <button onClick={clearPhoto} className="btn-sec" disabled={photoLoading}>Cancel</button>
         </div>
       )}
+    </div>
+  );
+}
+
+function PriorityBadge({ priority }) {
+  const p = PRIORITIES.find(x => x.id === priority) || PRIORITIES[PRIORITIES.length - 1];
+  return <span className="badge priority-badge" style={{background:p.color+"22",color:p.color,border:`1px solid ${p.color}44`}}>{p.label}</span>;
+}
+
+function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, summarizing }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(entity.ai_summary || "");
+
+  useEffect(() => {
+    const mostRecent = activities.length > 0 ? Math.max(...activities.map(a => new Date(a.created_at).getTime())) : 0;
+    const summaryTime = entity.ai_summary_updated_at ? new Date(entity.ai_summary_updated_at).getTime() : 0;
+    if (!entity.ai_summary || mostRecent > summaryTime) {
+      onGenerateSummary(entity, activities);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entity.id]);
+
+  const startEdit = () => { setDraft(entity.ai_summary || ""); setEditing(true); };
+  const save = async () => { await onSaveSummary(entity.id, draft); setEditing(false); };
+
+  return (
+    <div className="ai-summary">
+      <div className="ai-summary-header">
+        <div className="section-label">AI Summary</div>
+        {!editing && entity.ai_summary && !summarizing && <button onClick={startEdit} className="icon-btn" title="Edit summary">✎ Edit</button>}
+      </div>
+      {summarizing ? (
+        <div className="empty-small">Updating summary...</div>
+      ) : editing ? (
+        <>
+          <textarea className="input textarea ai-summary-edit" value={draft} onChange={e => setDraft(e.target.value)} />
+          <div className="ai-summary-edit-actions">
+            <button onClick={() => setEditing(false)} className="btn-sec">Cancel</button>
+            <button onClick={save} className="btn-primary">Save</button>
+          </div>
+        </>
+      ) : entity.ai_summary ? (
+        <>
+          <div className="ai-summary-text" onClick={startEdit} title="Click to edit">{entity.ai_summary}</div>
+          <div className="ai-summary-updated">Last updated: {formatDate(entity.ai_summary_updated_at)}</div>
+        </>
+      ) : (
+        <div className="empty-small">No summary yet.</div>
+      )}
+      {!editing && (
+        <button onClick={() => onGenerateSummary(entity, activities)} className="link-btn" disabled={summarizing}>Regenerate</button>
+      )}
+    </div>
+  );
+}
+
+function TodoForm({ contacts, onSave, onCancel }) {
+  const [title, setTitle] = useState("");
+  const [priority, setPriority] = useState("medium");
+  const [dueDate, setDueDate] = useState("");
+  const [contactId, setContactId] = useState("");
+
+  const submit = () => {
+    const t = title.trim();
+    if (!t) return;
+    onSave({ title: t, priority, due_date: dueDate || null, contact_id: contactId || null });
+  };
+
+  return (
+    <div className="todo-form">
+      <input className="input" placeholder="To-do title..." value={title} onChange={e => setTitle(e.target.value)} />
+      <div className="todo-form-row">
+        <select className="input" value={priority} onChange={e => setPriority(e.target.value)}>
+          {PRIORITIES.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+        </select>
+        <input className="input" type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} />
+        {contacts.length > 0 && (
+          <select className="input" value={contactId} onChange={e => setContactId(e.target.value)}>
+            <option value="">No contact</option>
+            {contacts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        )}
+        <button onClick={onCancel} className="btn-sec">Cancel</button>
+        <button onClick={submit} className="btn-primary" disabled={!title.trim()}>Add</button>
+      </div>
+    </div>
+  );
+}
+
+function TodoRow({ todo, contacts, onToggle, linkLabel, onLinkClick }) {
+  const contact = todo.contact_id ? contacts.find(c => c.id === todo.contact_id) : null;
+  const overdue = todo.status !== "completed" && isOverdue(todo.due_date);
+  return (
+    <div className={`todo-row ${todo.status === "completed" ? "todo-done" : ""}`}>
+      <input type="checkbox" checked={todo.status === "completed"} onChange={() => onToggle(todo)} className="todo-checkbox" />
+      <div className="todo-main">
+        <div className="todo-title-row">
+          <span className="todo-title">{todo.title}</span>
+          <PriorityBadge priority={todo.priority} />
+          {overdue && <span className="badge overdue-badge">Overdue</span>}
+        </div>
+        <div className="todo-meta-row">
+          {todo.due_date && <span className="todo-due">Due {formatDate(todo.due_date)}</span>}
+          {contact && <span className="todo-contact">{contact.name}</span>}
+          {linkLabel && (onLinkClick
+            ? <button onClick={onLinkClick} className="task-link">{linkLabel}</button>
+            : <span className="task-link-static">{linkLabel}</span>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TodoSection({ todos, contacts, onAdd, onToggle }) {
+  const [showForm, setShowForm] = useState(false);
+  const [showCompleted, setShowCompleted] = useState(false);
+  const open = sortTodos(todos.filter(t => t.status !== "completed"));
+  const completed = todos.filter(t => t.status === "completed").slice().sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at));
+
+  return (
+    <div className="todo-section">
+      <div className="ai-summary-header">
+        <div className="section-label">To-Dos</div>
+        <button onClick={() => setShowForm(s => !s)} className="btn-copy">{showForm ? "Cancel" : "+ Add To-Do"}</button>
+      </div>
+      {showForm && (
+        <TodoForm
+          contacts={contacts}
+          onCancel={() => setShowForm(false)}
+          onSave={async (form) => { await onAdd(form); setShowForm(false); }}
+        />
+      )}
+      {open.length === 0 ? (
+        <div className="empty-small">No open to-dos.</div>
+      ) : (
+        <div className="todo-list">
+          {open.map(t => <TodoRow key={t.id} todo={t} contacts={contacts} onToggle={onToggle} />)}
+        </div>
+      )}
+      {completed.length > 0 && (
+        <div className="todo-completed-toggle">
+          <button onClick={() => setShowCompleted(s => !s)} className="link-btn">{showCompleted ? "Hide completed" : `Show completed (${completed.length})`}</button>
+          {showCompleted && (
+            <div className="todo-list todo-list-completed">
+              {completed.map(t => <TodoRow key={t.id} todo={t} contacts={contacts} onToggle={onToggle} />)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TaskQuickAdd({ deals, enablers, onAdd }) {
+  const [title, setTitle] = useState("");
+  const [priority, setPriority] = useState("medium");
+  const [link, setLink] = useState("");
+
+  const submit = () => {
+    const t = title.trim();
+    if (!t) return;
+    const form = { title: t, priority };
+    if (link.startsWith("deal:")) form.deal_id = link.slice(5);
+    else if (link.startsWith("enabler:")) form.enabler_id = link.slice(8);
+    onAdd(form);
+    setTitle(""); setPriority("medium"); setLink("");
+  };
+
+  return (
+    <div className="quickadd">
+      <div className="quickadd-row">
+        <input
+          className="input quickadd-input"
+          placeholder="New task..."
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") submit(); }}
+        />
+        <select className="input quickadd-type" value={priority} onChange={e => setPriority(e.target.value)}>
+          {PRIORITIES.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+        </select>
+        <select className="input task-link-select" value={link} onChange={e => setLink(e.target.value)}>
+          <option value="">No link</option>
+          {deals.length > 0 && <optgroup label="Deals">{deals.map(d => <option key={d.id} value={`deal:${d.id}`}>{d.company}</option>)}</optgroup>}
+          {enablers.length > 0 && <optgroup label="Enablers">{enablers.map(en => <option key={en.id} value={`enabler:${en.id}`}>{en.name}</option>)}</optgroup>}
+        </select>
+        <button onClick={submit} className="btn-primary" disabled={!title.trim()}>Add</button>
+      </div>
     </div>
   );
 }

@@ -10,3 +10,9 @@ export const isThisWeek = (d) => {
   start.setHours(0, 0, 0, 0);
   return new Date(d) >= start;
 };
+export const isOverdue = (d) => {
+  if (!d) return false;
+  const due = new Date(d); due.setHours(0, 0, 0, 0);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return due < today;
+};

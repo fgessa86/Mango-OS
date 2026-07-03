@@ -29,6 +29,12 @@ export const ENABLER_TYPES = [
   { id: "connector", label: "Connector", color: "#EC4899" },
 ];
 
+export const PRIORITIES = [
+  { id: "high", label: "High", color: "#EF4444" },
+  { id: "medium", label: "Medium", color: "#F59E0B" },
+  { id: "low", label: "Low", color: "#7B8A9E" },
+];
+
 export const TAG_OPTIONS = [
   "Decision Maker", "Technical Buyer", "Champion", "Influencer",
   "Gatekeeper", "End User", "C-Suite", "Government",
