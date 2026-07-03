@@ -1,9 +1,30 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "./supabase";
-import { generateSummary } from "./anthropic";
+import { generateSummary, summarizeImage } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES } from "./constants";
 import { formatDate, formatFull, daysAgo, isToday, isThisWeek } from "./utils";
 import "./styles.css";
+
+const PHOTO_NOTE_PROMPT = "This is a photo of handwritten meeting notes. Please transcribe and summarize the key points, action items, and any decisions made. Be concise.";
+
+// Normalizes any browser-decodable image (jpg, png, webp, heic on Safari, etc.) to a JPEG
+// base64 payload, since Claude's vision API only accepts jpeg/png/gif/webp.
+const fileToJpegBase64 = (file) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width; canvas.height = img.height;
+      canvas.getContext("2d").drawImage(img, 0, 0);
+      resolve(canvas.toDataURL("image/jpeg", 0.85).split(",")[1]);
+    };
+    img.onerror = () => reject(new Error("Could not decode image"));
+    img.src = reader.result;
+  };
+  reader.onerror = () => reject(new Error("Could not read file"));
+  reader.readAsDataURL(file);
+});
 
 export default function App() {
   const [view, setView] = useState("pipeline");
@@ -11,6 +32,8 @@ export default function App() {
   const [contacts, setContacts] = useState([]);
   const [activities, setActivities] = useState([]);
   const [enablers, setEnablers] = useState([]);
+  const [dealContacts, setDealContacts] = useState([]);
+  const [enablerContacts, setEnablerContacts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
   const [reportCopied, setReportCopied] = useState(null);
@@ -28,13 +51,16 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en] = await Promise.all([
+      const [d, c, a, en, dc, ec] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
         api("enablers", "GET", null, "?select=*&order=name.asc"),
+        api("deal_contacts", "GET", null, "?select=*,contacts(*)&order=created_at.asc"),
+        api("enabler_contacts", "GET", null, "?select=*,contacts(*)&order=created_at.asc"),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
+      setDealContacts(dc || []); setEnablerContacts(ec || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -85,6 +111,7 @@ export default function App() {
   const deleteDeal = async (id) => {
     try {
       await api("activities", "DELETE", null, `?deal_id=eq.${id}`);
+      await api("deal_contacts", "DELETE", null, `?deal_id=eq.${id}`);
       await api("deals", "DELETE", null, `?id=eq.${id}`);
       await loadData(); setModal(null); showToast("Deal deleted");
       setView("pipeline"); setDealSheetId(null);
@@ -154,10 +181,44 @@ export default function App() {
   const deleteEnabler = async (id) => {
     try {
       await api("activities", "DELETE", null, `?enabler_id=eq.${id}`);
+      await api("enabler_contacts", "DELETE", null, `?enabler_id=eq.${id}`);
       await api("enablers", "DELETE", null, `?id=eq.${id}`);
       await loadData(); setModal(null); showToast("Enabler deleted");
       setView("enablers"); setEnablerSheetId(null);
     } catch { showToast("Error deleting enabler"); }
+  };
+
+  // PEOPLE (deal_contacts / enabler_contacts junction tables)
+  const addDealContact = async (dealId, contactId, role) => {
+    try {
+      const clean = { deal_id: dealId, contact_id: contactId };
+      if ((role || "").trim()) clean.role_in_deal = role.trim();
+      await api("deal_contacts", "POST", clean);
+      await loadData(); showToast("Person added");
+    } catch { showToast("Error adding person — maybe already linked"); }
+  };
+
+  const removeDealContact = async (id) => {
+    try {
+      await api("deal_contacts", "DELETE", null, `?id=eq.${id}`);
+      await loadData(); showToast("Person removed");
+    } catch { showToast("Error removing person"); }
+  };
+
+  const addEnablerContact = async (enablerId, contactId, role) => {
+    try {
+      const clean = { enabler_id: enablerId, contact_id: contactId };
+      if ((role || "").trim()) clean.role_in_org = role.trim();
+      await api("enabler_contacts", "POST", clean);
+      await loadData(); showToast("Person added");
+    } catch { showToast("Error adding person — maybe already linked"); }
+  };
+
+  const removeEnablerContact = async (id) => {
+    try {
+      await api("enabler_contacts", "DELETE", null, `?id=eq.${id}`);
+      await loadData(); showToast("Person removed");
+    } catch { showToast("Error removing person"); }
   };
 
   const generateDealSummary = async (deal, dealActivities) => {
@@ -334,11 +395,16 @@ Keep it tight and scannable. No preamble.`;
           <DealSheet
             deal={sheetDeal}
             activities={activities.filter((a) => a.deal_id === sheetDeal.id)}
+            people={dealContacts.filter((dc) => dc.deal_id === sheetDeal.id)}
+            contacts={contacts}
             onEdit={(d) => setModal({ type: "deal", data: d })}
             onDelete={deleteDeal}
             onAddActivity={addActivity}
+            onAddPerson={(contactId, role) => addDealContact(sheetDeal.id, contactId, role)}
+            onRemovePerson={removeDealContact}
             onGenerateSummary={generateDealSummary}
             summarizing={summarizing}
+            showToast={showToast}
             onBack={() => { setView("pipeline"); setDealSheetId(null); }}
           />
         ) : null;
@@ -351,11 +417,16 @@ Keep it tight and scannable. No preamble.`;
           <EnablerSheet
             enabler={sheetEnabler}
             activities={activities.filter((a) => a.enabler_id === sheetEnabler.id)}
+            people={enablerContacts.filter((ec) => ec.enabler_id === sheetEnabler.id)}
+            contacts={contacts}
             onEdit={(en) => setModal({ type: "enabler", data: en })}
             onDelete={deleteEnabler}
             onAddActivity={addActivity}
+            onAddPerson={(contactId, role) => addEnablerContact(sheetEnabler.id, contactId, role)}
+            onRemovePerson={removeEnablerContact}
             onGenerateSummary={generateEnablerSummary}
             summarizing={summarizing}
+            showToast={showToast}
             onBack={() => { setView("enablers"); setEnablerSheetId(null); }}
           />
         ) : null;
@@ -621,24 +692,17 @@ const TIMELINE_TABS = [
   { id: "note", label: "Notes" },
 ];
 
-function DealSheet({ deal, activities, onEdit, onDelete, onAddActivity, onGenerateSummary, summarizing, onBack }) {
+function DealSheet({ deal, activities, people, contacts, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onGenerateSummary, summarizing, showToast, onBack }) {
   const stage = STAGES.find(s => s.id === deal.stage);
   const [filter, setFilter] = useState("all");
-  const [qDesc, setQDesc] = useState("");
-  const [qType, setQType] = useState("call");
-  const [posting, setPosting] = useState(false);
+  const [personFilter, setPersonFilter] = useState(null);
 
-  const submitQuickAdd = async () => {
-    const text = qDesc.trim();
-    if (!text || posting) return;
-    setPosting(true);
-    try {
-      await onAddActivity(deal.id, deal.contact_id || null, { type: qType, description: text });
-      setQDesc("");
-    } finally { setPosting(false); }
-  };
-
-  const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
+  const peopleNorm = people.map(p => ({ id: p.id, contact_id: p.contact_id, role: p.role_in_deal, contact: p.contacts }));
+  const filtered = activities
+    .filter(a => filter === "all" || a.type === filter)
+    .filter(a => !personFilter || a.contact_id === personFilter)
+    .slice().reverse();
+  const filteredPersonName = personFilter ? peopleNorm.find(p => p.contact_id === personFilter)?.contact?.name : null;
 
   return (
     <div className="deal-sheet">
@@ -678,25 +742,29 @@ function DealSheet({ deal, activities, onEdit, onDelete, onAddActivity, onGenera
         )}
       </div>
 
-      <div className="quickadd">
-        <div className="section-label">Quick Add</div>
-        <div className="quickadd-row">
-          <input
-            className="input quickadd-input"
-            placeholder="Log an update..."
-            value={qDesc}
-            onChange={e => setQDesc(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter") submitQuickAdd(); }}
-          />
-          <select className="input quickadd-type" value={qType} onChange={e => setQType(e.target.value)}>
-            {ACT_TYPES.map(t => <option key={t.id} value={t.id}>{t.icon} {t.label}</option>)}
-          </select>
-          <button onClick={submitQuickAdd} className="btn-primary" disabled={!qDesc.trim() || posting}>Add</button>
-        </div>
-      </div>
+      <PeopleSection
+        people={peopleNorm}
+        activities={activities}
+        contacts={contacts}
+        roleLabel="Role in Deal"
+        selectedContactId={personFilter}
+        onSelectPerson={(id) => setPersonFilter(p => p === id ? null : id)}
+        onAdd={onAddPerson}
+        onRemove={onRemovePerson}
+      />
+
+      <QuickAdd
+        dealId={deal.id}
+        contactId={deal.contact_id || null}
+        onAddActivity={onAddActivity}
+        showToast={showToast}
+      />
 
       <div className="timeline">
         <div className="section-label">Activity Timeline</div>
+        {filteredPersonName && (
+          <div className="person-filter-badge">Filtered to {filteredPersonName} <button onClick={() => setPersonFilter(null)} className="person-filter-clear">✕</button></div>
+        )}
         <div className="timeline-tabs">
           {TIMELINE_TABS.map(t => (
             <button key={t.id} onClick={() => setFilter(t.id)} className={`tag-btn ${filter === t.id ? "active" : ""}`}>{t.label}</button>
@@ -739,24 +807,17 @@ function EnablerForm({ enabler, contacts, onSave, onClose }) {
   );
 }
 
-function EnablerSheet({ enabler, activities, onEdit, onDelete, onAddActivity, onGenerateSummary, summarizing, onBack }) {
+function EnablerSheet({ enabler, activities, people, contacts, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onGenerateSummary, summarizing, showToast, onBack }) {
   const type = ENABLER_TYPES.find(t => t.id === enabler.type);
   const [filter, setFilter] = useState("all");
-  const [qDesc, setQDesc] = useState("");
-  const [qType, setQType] = useState("call");
-  const [posting, setPosting] = useState(false);
+  const [personFilter, setPersonFilter] = useState(null);
 
-  const submitQuickAdd = async () => {
-    const text = qDesc.trim();
-    if (!text || posting) return;
-    setPosting(true);
-    try {
-      await onAddActivity(null, enabler.contact_id || null, { type: qType, description: text }, enabler.id);
-      setQDesc("");
-    } finally { setPosting(false); }
-  };
-
-  const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
+  const peopleNorm = people.map(p => ({ id: p.id, contact_id: p.contact_id, role: p.role_in_org, contact: p.contacts }));
+  const filtered = activities
+    .filter(a => filter === "all" || a.type === filter)
+    .filter(a => !personFilter || a.contact_id === personFilter)
+    .slice().reverse();
+  const filteredPersonName = personFilter ? peopleNorm.find(p => p.contact_id === personFilter)?.contact?.name : null;
 
   return (
     <div className="deal-sheet">
@@ -794,25 +855,29 @@ function EnablerSheet({ enabler, activities, onEdit, onDelete, onAddActivity, on
         )}
       </div>
 
-      <div className="quickadd">
-        <div className="section-label">Quick Add</div>
-        <div className="quickadd-row">
-          <input
-            className="input quickadd-input"
-            placeholder="Log an update..."
-            value={qDesc}
-            onChange={e => setQDesc(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter") submitQuickAdd(); }}
-          />
-          <select className="input quickadd-type" value={qType} onChange={e => setQType(e.target.value)}>
-            {ACT_TYPES.map(t => <option key={t.id} value={t.id}>{t.icon} {t.label}</option>)}
-          </select>
-          <button onClick={submitQuickAdd} className="btn-primary" disabled={!qDesc.trim() || posting}>Add</button>
-        </div>
-      </div>
+      <PeopleSection
+        people={peopleNorm}
+        activities={activities}
+        contacts={contacts}
+        roleLabel="Role in Org"
+        selectedContactId={personFilter}
+        onSelectPerson={(id) => setPersonFilter(p => p === id ? null : id)}
+        onAdd={onAddPerson}
+        onRemove={onRemovePerson}
+      />
+
+      <QuickAdd
+        enablerId={enabler.id}
+        contactId={enabler.contact_id || null}
+        onAddActivity={onAddActivity}
+        showToast={showToast}
+      />
 
       <div className="timeline">
         <div className="section-label">Activity Timeline</div>
+        {filteredPersonName && (
+          <div className="person-filter-badge">Filtered to {filteredPersonName} <button onClick={() => setPersonFilter(null)} className="person-filter-clear">✕</button></div>
+        )}
         <div className="timeline-tabs">
           {TIMELINE_TABS.map(t => (
             <button key={t.id} onClick={() => setFilter(t.id)} className={`tag-btn ${filter === t.id ? "active" : ""}`}>{t.label}</button>
@@ -831,6 +896,186 @@ function EnablerSheet({ enabler, activities, onEdit, onDelete, onAddActivity, on
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+function PeopleSection({ people, activities, contacts, roleLabel, selectedContactId, onSelectPerson, onAdd, onRemove }) {
+  const [modalOpen, setModalOpen] = useState(false);
+  const linkedIds = new Set(people.map(p => p.contact_id));
+  const available = contacts.filter(c => !linkedIds.has(c.id));
+
+  return (
+    <div className="people-section">
+      <div className="ai-summary-header">
+        <div className="section-label">People</div>
+        <button onClick={() => setModalOpen(true)} className="btn-copy">+ Add Person</button>
+      </div>
+      {people.length === 0 ? (
+        <div className="empty-small">No people linked yet.</div>
+      ) : (
+        <div className="people-grid">
+          {people.map(p => {
+            const c = p.contact || {};
+            const active = selectedContactId === p.contact_id;
+            const count = activities.filter(a => a.contact_id === p.contact_id).length;
+            return (
+              <div key={p.id} className={`person-card ${active ? "active" : ""}`} onClick={() => onSelectPerson(p.contact_id)}>
+                <div className="person-card-top">
+                  <div>
+                    <div className="person-name">{c.name}</div>
+                    {p.role && <div className="person-role">{p.role}</div>}
+                    {c.company && <div className="person-company">{c.company}</div>}
+                  </div>
+                  <button onClick={(e) => { e.stopPropagation(); if (confirm(`Remove ${c.name || "this person"}?`)) onRemove(p.id); }} className="person-remove" title="Remove">✕</button>
+                </div>
+                <div className="person-meta">{count} activit{count === 1 ? "y" : "ies"}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {modalOpen && (
+        <AddPersonModal
+          contacts={available}
+          roleLabel={roleLabel}
+          onSave={async (contactId, role) => { await onAdd(contactId, role); setModalOpen(false); }}
+          onClose={() => setModalOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function AddPersonModal({ contacts, roleLabel, onSave, onClose }) {
+  const [contactId, setContactId] = useState("");
+  const [role, setRole] = useState("");
+  return (
+    <div className="overlay" onClick={onClose}><div className="modal modal-sm" onClick={e=>e.stopPropagation()}>
+      <div className="modal-header"><div className="modal-title">Add Person</div><button onClick={onClose} className="close-btn">✕</button></div>
+      {contacts.length === 0 ? (
+        <div className="empty-small">No available contacts to link. Everyone is already added, or you have no contacts yet.</div>
+      ) : (
+        <>
+          <div className="mb-sm">
+            <label className="label">Contact</label>
+            <select className="input" value={contactId} onChange={e => setContactId(e.target.value)}>
+              <option value="">Select...</option>
+              {contacts.map(c => <option key={c.id} value={c.id}>{c.name}{c.company ? ` (${c.company})` : ""}</option>)}
+            </select>
+          </div>
+          <div className="mb-sm">
+            <label className="label">{roleLabel}</label>
+            <input className="input" value={role} onChange={e => setRole(e.target.value)} placeholder="e.g. Decision Maker" />
+          </div>
+        </>
+      )}
+      <div className="modal-actions">
+        <button onClick={onClose} className="btn-sec">Cancel</button>
+        <button onClick={() => contactId && onSave(contactId, role)} className="btn-primary" disabled={!contactId}>Add</button>
+      </div>
+    </div></div>
+  );
+}
+
+function QuickAdd({ dealId = null, enablerId = null, contactId, onAddActivity, showToast }) {
+  const [qType, setQType] = useState("call");
+  const [qDesc, setQDesc] = useState("");
+  const [posting, setPosting] = useState(false);
+  const [summarizingText, setSummarizingText] = useState(false);
+  const [photoFile, setPhotoFile] = useState(null);
+  const [photoPreview, setPhotoPreview] = useState(null);
+  const [photoLoading, setPhotoLoading] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const submit = async () => {
+    const text = qDesc.trim();
+    if (!text || posting) return;
+    setPosting(true);
+    try {
+      await onAddActivity(dealId, contactId, { type: qType, description: text }, enablerId);
+      setQDesc("");
+    } finally { setPosting(false); }
+  };
+
+  const summarizeTranscript = async () => {
+    const text = qDesc.trim();
+    if (!text || summarizingText) return;
+    setSummarizingText(true);
+    try {
+      const prompt = `Summarize this meeting transcript. Provide key points, decisions made, and action items. Be concise.\n\nTranscript:\n${text}`;
+      setQDesc(await generateSummary(prompt));
+    } catch { showToast("Error summarizing transcript"); }
+    setSummarizingText(false);
+  };
+
+  const pickPhoto = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setPhotoFile(f);
+    const reader = new FileReader();
+    reader.onload = () => setPhotoPreview(reader.result);
+    reader.readAsDataURL(f);
+  };
+
+  const clearPhoto = () => {
+    setPhotoFile(null); setPhotoPreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const summarizePhoto = async () => {
+    if (!photoFile || photoLoading) return;
+    setPhotoLoading(true);
+    try {
+      const base64 = await fileToJpegBase64(photoFile);
+      const text = await summarizeImage(base64, PHOTO_NOTE_PROMPT);
+      await onAddActivity(dealId, contactId, { type: "note", description: text }, enablerId);
+      clearPhoto();
+    } catch { showToast("Error processing photo"); }
+    setPhotoLoading(false);
+  };
+
+  return (
+    <div className="quickadd">
+      <div className="section-label">Quick Add</div>
+      <div className="quickadd-row">
+        {qType === "transcript" ? (
+          <textarea
+            className="input quickadd-textarea"
+            placeholder="Paste meeting transcript..."
+            value={qDesc}
+            onChange={e => setQDesc(e.target.value)}
+          />
+        ) : (
+          <input
+            className="input quickadd-input"
+            placeholder="Log an update..."
+            value={qDesc}
+            onChange={e => setQDesc(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") submit(); }}
+          />
+        )}
+        <select className="input quickadd-type" value={qType} onChange={e => setQType(e.target.value)}>
+          {ACT_TYPES.map(t => <option key={t.id} value={t.id}>{t.icon} {t.label}</option>)}
+        </select>
+        <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" className="photo-input-hidden" onChange={pickPhoto} />
+        <button type="button" onClick={() => fileInputRef.current?.click()} className="btn-sec photo-btn" title="Upload photo of notes">📷</button>
+        <button onClick={submit} className="btn-primary" disabled={!qDesc.trim() || posting}>Add</button>
+      </div>
+
+      {qType === "transcript" && (
+        <div className="quickadd-transcript-actions">
+          <button onClick={summarizeTranscript} className="btn-copy" disabled={!qDesc.trim() || summarizingText}>{summarizingText ? "Summarizing..." : "Summarize with AI"}</button>
+        </div>
+      )}
+
+      {photoPreview && (
+        <div className="photo-preview-row">
+          <img src={photoPreview} alt="Note preview" className="photo-preview-img" />
+          <button onClick={summarizePhoto} className="btn-primary" disabled={photoLoading}>{photoLoading ? "Processing..." : "Summarize"}</button>
+          <button onClick={clearPhoto} className="btn-sec" disabled={photoLoading}>Cancel</button>
+        </div>
+      )}
     </div>
   );
 }

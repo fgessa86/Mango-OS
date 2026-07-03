@@ -17,6 +17,7 @@ export const ACT_TYPES = [
   { id: "note", label: "Note", icon: "\u{1F4DD}" },
   { id: "proposal_sent", label: "Proposal", icon: "\u{1F4C4}" },
   { id: "demo", label: "Demo", icon: "\u{1F5A5}" },
+  { id: "transcript", label: "Paste Transcript", icon: "\u{1F4CB}" },
 ];
 
 export const ENABLER_TYPES = [
