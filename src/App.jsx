@@ -3,6 +3,7 @@ import { api } from "./supabase";
 import { generateSummary, summarizeImage } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
+import MapTab from "./MapTab";
 import "./styles.css";
 
 // SelectWithCustom expects { id, label } options; cities/regions are plain string lists.
@@ -1015,7 +1016,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         </div>
         <div className="header-right">
           <nav className="nav">
-            {[["pipeline","Pipeline"],["network","Network"],["tasks","Tasks"],["reports","Reports"],["boss","Boss View"]].map(([k,l]) => (
+            {[["pipeline","Pipeline"],["network","Network"],["map","Map"],["tasks","Tasks"],["reports","Reports"],["boss","Boss View"]].map(([k,l]) => (
               <button key={k} onClick={() => setView(k)} className={`nav-tab ${view === k ? "active" : ""}`}>{l}</button>
             ))}
           </nav>
@@ -1036,7 +1037,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         </div>
       </header>
 
-      {view !== "deal-sheet" && view !== "institution-sheet" && view !== "person-sheet" && (
+      {view !== "deal-sheet" && view !== "institution-sheet" && view !== "person-sheet" && view !== "map" && (
         <div className="stats-bar">
           {[[activeDeals.length,"Pipeline Deals"],[totalValue > 0 ? `$${(totalValue/1000).toFixed(0)}K` : "N/A","Pipeline Value"],[contacts.length,"People"],[institutions.length,"Institutions"],[openTodos.length,"Open Tasks"]].map(([v,l],i) => (
             <div key={i} className="stat"><div className="stat-value">{v}</div><div className="stat-label">{l}</div></div>
@@ -1226,6 +1227,22 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onOpenPerson={openPerson}
           />
         </div>
+      )}
+
+      {/* MAP */}
+      {view === "map" && (
+        <MapTab
+          institutions={institutions}
+          contacts={contacts}
+          contactRoles={contactRoles}
+          dealEnablers={dealEnablers}
+          enablerContacts={enablerContacts}
+          dealContacts={dealContacts}
+          networkEdges={networkEdges}
+          activities={activities}
+          onOpenInstitution={openInstitution}
+          onOpenPerson={openPerson}
+        />
       )}
 
       {/* TASKS */}
