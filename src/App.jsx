@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "./supabase";
 import { generateSummary, summarizeImage } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES } from "./constants";
-import { formatDate, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
+import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import "./styles.css";
 
 const PHOTO_NOTE_PROMPT = "This is a photo of handwritten meeting notes. Please transcribe and summarize the key points, action items, and any decisions made. Be concise.";
@@ -388,6 +388,18 @@ Keep it tight and scannable. No preamble.`;
     } catch { showToast("Error updating to-do"); }
   };
 
+  const updateTodo = async (id, patch) => {
+    try {
+      await api("todos", "PATCH", patch, `?id=eq.${id}`);
+      await loadData(); showToast("To-do updated");
+    } catch { showToast("Error updating to-do"); }
+  };
+
+  const openTaskLink = (link) => {
+    if (link.type === "deal") { setDealSheetId(link.id); setView("deal-sheet"); }
+    else if (link.type === "enabler") { setEnablerSheetId(link.id); setView("enabler-sheet"); }
+  };
+
   // ACTIVITY
   const addActivity = async (dealId, contactId, activity, enablerId = null) => {
     try {
@@ -478,11 +490,14 @@ Keep it tight and scannable. No preamble.`;
     if (taskFilter === "overdue") return isOverdue(t.due_date);
     return true;
   });
+  // Activities are already loaded ordered by created_at desc, so the first
+  // match is the most recent auto-synced (email/meeting) activity.
+  const lastSyncedActivity = activities.find((a) => a.type === "email" || a.type === "meeting");
 
   if (loading) return <div className="app loading-screen"><div className="loading-text">Loading Mango OS...</div></div>;
 
   return (
-    <div className={`app ${theme === "light" ? "light-mode" : ""}`}>
+    <div className={`app ${theme === "light" ? "light-mode" : "dark-mode"}`}>
       {toast && <div className="toast">{toast}</div>}
 
       <header className="header">
@@ -496,6 +511,10 @@ Keep it tight and scannable. No preamble.`;
               <button key={k} onClick={() => setView(k)} className={`nav-tab ${view === k ? "active" : ""}`}>{l}</button>
             ))}
           </nav>
+          <div className="last-synced" title="Most recent auto-logged email or meeting activity">
+            <span className="last-synced-dot" />
+            Last synced: {lastSyncedActivity ? formatDateTime(lastSyncedActivity.created_at) : "Never"}
+          </div>
           <div className="settings-wrap" ref={settingsRef}>
             <button onClick={() => setSettingsOpen((s) => !s)} className="settings-btn" title="Settings">⚙️</button>
             {settingsOpen && (
@@ -527,6 +546,8 @@ Keep it tight and scannable. No preamble.`;
             people={dealContacts.filter((dc) => dc.deal_id === sheetDeal.id)}
             todos={todos.filter((t) => t.deal_id === sheetDeal.id)}
             contacts={contacts}
+            deals={deals}
+            enablers={enablers}
             onEdit={(d) => setModal({ type: "deal", data: d })}
             onDelete={deleteDeal}
             onAddActivity={addActivity}
@@ -534,6 +555,8 @@ Keep it tight and scannable. No preamble.`;
             onRemovePerson={removeDealContact}
             onAddTodo={(form) => saveTodo({ ...form, deal_id: sheetDeal.id })}
             onToggleTodo={toggleTodo}
+            onUpdateTodo={updateTodo}
+            onNavigate={openTaskLink}
             onGenerateSummary={generateDealSummary}
             onSaveSummary={saveDealSummary}
             summarizing={summarizing}
@@ -553,6 +576,8 @@ Keep it tight and scannable. No preamble.`;
             people={enablerContacts.filter((ec) => ec.enabler_id === sheetEnabler.id)}
             todos={todos.filter((t) => t.enabler_id === sheetEnabler.id)}
             contacts={contacts}
+            deals={deals}
+            enablers={enablers}
             onEdit={(en) => setModal({ type: "enabler", data: en })}
             onDelete={deleteEnabler}
             onAddActivity={addActivity}
@@ -560,6 +585,8 @@ Keep it tight and scannable. No preamble.`;
             onRemovePerson={removeEnablerContact}
             onAddTodo={(form) => saveTodo({ ...form, enabler_id: sheetEnabler.id })}
             onToggleTodo={toggleTodo}
+            onUpdateTodo={updateTodo}
+            onNavigate={openTaskLink}
             onGenerateSummary={generateEnablerSummary}
             onSaveSummary={saveEnablerSummary}
             summarizing={summarizing}
@@ -586,6 +613,7 @@ Keep it tight and scannable. No preamble.`;
             onAddActivity={addActivity}
             onAddTodo={(form) => saveTodo({ ...form, contact_id: sheetContact.id })}
             onToggleTodo={toggleTodo}
+            onUpdateTodo={updateTodo}
             onGenerateSummary={generateContactSummary}
             onSaveSummary={saveContactSummary}
             summarizing={summarizing}
@@ -720,20 +748,18 @@ Keep it tight and scannable. No preamble.`;
             <div className="empty-state">No tasks match.</div>
           ) : (
             <div className="todo-list">
-              {filteredTasks.map((t) => {
-                const linkedDeal = t.deal_id ? deals.find((d) => d.id === t.deal_id) : null;
-                const linkedEnabler = t.enabler_id ? enablers.find((en) => en.id === t.enabler_id) : null;
-                return (
-                  <TodoRow
-                    key={t.id}
-                    todo={t}
-                    contacts={contacts}
-                    onToggle={toggleTodo}
-                    linkLabel={linkedDeal ? linkedDeal.company : linkedEnabler ? linkedEnabler.name : null}
-                    onLinkClick={linkedDeal ? () => { setDealSheetId(linkedDeal.id); setView("deal-sheet"); } : linkedEnabler ? () => { setEnablerSheetId(linkedEnabler.id); setView("enabler-sheet"); } : null}
-                  />
-                );
-              })}
+              {filteredTasks.map((t) => (
+                <TodoRow
+                  key={t.id}
+                  todo={t}
+                  contacts={contacts}
+                  deals={deals}
+                  enablers={enablers}
+                  onToggle={toggleTodo}
+                  onUpdate={updateTodo}
+                  onNavigate={openTaskLink}
+                />
+              ))}
             </div>
           )}
         </div>
@@ -894,7 +920,7 @@ const TASK_FILTER_TABS = [
   { id: "overdue", label: "Overdue" },
 ];
 
-function DealSheet({ deal, activities, people, todos, contacts, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onAddTodo, onToggleTodo, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
+function DealSheet({ deal, activities, people, todos, contacts, deals, enablers, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
   const stage = STAGES.find(s => s.id === deal.stage);
   const [filter, setFilter] = useState("all");
   const [personFilter, setPersonFilter] = useState(null);
@@ -948,7 +974,7 @@ function DealSheet({ deal, activities, people, todos, contacts, onEdit, onDelete
         onRemove={onRemovePerson}
       />
 
-      <TodoSection todos={todos} contacts={contacts} onAdd={onAddTodo} onToggle={onToggleTodo} />
+      <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
 
       <QuickAdd
         dealId={deal.id}
@@ -1004,7 +1030,7 @@ function EnablerForm({ enabler, contacts, onSave, onClose }) {
   );
 }
 
-function EnablerSheet({ enabler, activities, people, todos, contacts, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onAddTodo, onToggleTodo, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
+function EnablerSheet({ enabler, activities, people, todos, contacts, deals, enablers, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
   const type = ENABLER_TYPES.find(t => t.id === enabler.type);
   const [filter, setFilter] = useState("all");
   const [personFilter, setPersonFilter] = useState(null);
@@ -1056,7 +1082,7 @@ function EnablerSheet({ enabler, activities, people, todos, contacts, onEdit, on
         onRemove={onRemovePerson}
       />
 
-      <TodoSection todos={todos} contacts={contacts} onAdd={onAddTodo} onToggle={onToggleTodo} />
+      <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
 
       <QuickAdd
         enablerId={enabler.id}
@@ -1092,7 +1118,7 @@ function EnablerSheet({ enabler, activities, people, todos, contacts, onEdit, on
   );
 }
 
-function ContactSheet({ contact, activities, todos, deals, enablers, dealContacts, enablerContacts, onEdit, onDelete, onAddActivity, onAddTodo, onToggleTodo, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenDeal, onOpenEnabler, onBack }) {
+function ContactSheet({ contact, activities, todos, deals, enablers, dealContacts, enablerContacts, onEdit, onDelete, onAddActivity, onAddTodo, onToggleTodo, onUpdateTodo, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenDeal, onOpenEnabler, onBack }) {
   const [filter, setFilter] = useState("all");
   const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
 
@@ -1178,7 +1204,16 @@ function ContactSheet({ contact, activities, todos, deals, enablers, dealContact
         )}
       </div>
 
-      <TodoSection todos={todos} contacts={[]} onAdd={onAddTodo} onToggle={onToggleTodo} />
+      <TodoSection
+        todos={todos}
+        contacts={[]}
+        deals={deals}
+        enablers={enablers}
+        onAdd={onAddTodo}
+        onToggle={onToggleTodo}
+        onUpdate={onUpdateTodo}
+        onNavigate={(link) => (link.type === "deal" ? onOpenDeal(link.id) : onOpenEnabler(link.id))}
+      />
 
       <QuickAdd
         contactId={contact.id}
@@ -1475,31 +1510,81 @@ function TodoForm({ contacts, onSave, onCancel }) {
   );
 }
 
-function TodoRow({ todo, contacts, onToggle, linkLabel, onLinkClick }) {
+function TodoRow({ todo, contacts, deals = [], enablers = [], onToggle, onUpdate, onNavigate }) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(todo.title);
+  const [priority, setPriority] = useState(todo.priority);
+  const [dueDate, setDueDate] = useState(todo.due_date || "");
+  const [link, setLink] = useState(todo.deal_id ? `deal:${todo.deal_id}` : todo.enabler_id ? `enabler:${todo.enabler_id}` : "");
+
   const contact = todo.contact_id ? contacts.find(c => c.id === todo.contact_id) : null;
+  const linkedDeal = todo.deal_id ? deals.find(d => d.id === todo.deal_id) : null;
+  const linkedEnabler = todo.enabler_id ? enablers.find(en => en.id === todo.enabler_id) : null;
   const overdue = todo.status !== "completed" && isOverdue(todo.due_date);
+
+  const startEdit = () => {
+    setTitle(todo.title); setPriority(todo.priority); setDueDate(todo.due_date || "");
+    setLink(todo.deal_id ? `deal:${todo.deal_id}` : todo.enabler_id ? `enabler:${todo.enabler_id}` : "");
+    setEditing(true);
+  };
+
+  const save = () => {
+    const t = title.trim();
+    if (!t || !onUpdate) return;
+    const patch = { title: t, priority, due_date: dueDate || null, deal_id: null, enabler_id: null };
+    if (link.startsWith("deal:")) patch.deal_id = link.slice(5);
+    else if (link.startsWith("enabler:")) patch.enabler_id = link.slice(8);
+    onUpdate(todo.id, patch);
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="todo-row todo-row-editing">
+        <input type="checkbox" checked={todo.status === "completed"} onChange={() => onToggle(todo)} className="todo-checkbox" />
+        <div className="todo-main">
+          <input className="input todo-edit-title" value={title} onChange={e => setTitle(e.target.value)} placeholder="To-do title..." />
+          <div className="todo-form-row">
+            <select className="input" value={priority} onChange={e => setPriority(e.target.value)}>
+              {PRIORITIES.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
+            <input className="input" type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} />
+            <select className="input task-link-select" value={link} onChange={e => setLink(e.target.value)}>
+              <option value="">No link</option>
+              {deals.length > 0 && <optgroup label="Deals">{deals.map(d => <option key={d.id} value={`deal:${d.id}`}>{d.company}</option>)}</optgroup>}
+              {enablers.length > 0 && <optgroup label="Enablers">{enablers.map(en => <option key={en.id} value={`enabler:${en.id}`}>{en.name}</option>)}</optgroup>}
+            </select>
+            <button onClick={() => setEditing(false)} className="btn-sec">Cancel</button>
+            <button onClick={save} className="btn-primary" disabled={!title.trim()}>Save</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`todo-row ${todo.status === "completed" ? "todo-done" : ""}`}>
       <input type="checkbox" checked={todo.status === "completed"} onChange={() => onToggle(todo)} className="todo-checkbox" />
       <div className="todo-main">
         <div className="todo-title-row">
           <span className="todo-title">{todo.title}</span>
+          {onUpdate && <button onClick={startEdit} className="icon-btn" title="Edit task">✎</button>}
           <PriorityBadge priority={todo.priority} />
           {overdue && <span className="badge overdue-badge">Overdue</span>}
         </div>
         <div className="todo-meta-row">
           {todo.due_date && <span className="todo-due">Due {formatDate(todo.due_date)}</span>}
           {contact && <span className="todo-contact">{contact.name}</span>}
-          {linkLabel && (onLinkClick
-            ? <button onClick={onLinkClick} className="task-link">{linkLabel}</button>
-            : <span className="task-link-static">{linkLabel}</span>)}
+          {(linkedDeal || linkedEnabler) && (onNavigate
+            ? <button onClick={() => onNavigate(linkedDeal ? { type: "deal", id: linkedDeal.id } : { type: "enabler", id: linkedEnabler.id })} className="task-link">{linkedDeal ? linkedDeal.company : linkedEnabler.name}</button>
+            : <span className="task-link-static">{linkedDeal ? linkedDeal.company : linkedEnabler.name}</span>)}
         </div>
       </div>
     </div>
   );
 }
 
-function TodoSection({ todos, contacts, onAdd, onToggle }) {
+function TodoSection({ todos, contacts, deals = [], enablers = [], onAdd, onToggle, onUpdate, onNavigate }) {
   const [showForm, setShowForm] = useState(false);
   const [showCompleted, setShowCompleted] = useState(false);
   const open = sortTodos(todos.filter(t => t.status !== "completed"));
@@ -1522,7 +1607,7 @@ function TodoSection({ todos, contacts, onAdd, onToggle }) {
         <div className="empty-small">No open to-dos.</div>
       ) : (
         <div className="todo-list">
-          {open.map(t => <TodoRow key={t.id} todo={t} contacts={contacts} onToggle={onToggle} />)}
+          {open.map(t => <TodoRow key={t.id} todo={t} contacts={contacts} deals={deals} enablers={enablers} onToggle={onToggle} onUpdate={onUpdate} onNavigate={onNavigate} />)}
         </div>
       )}
       {completed.length > 0 && (
@@ -1530,7 +1615,7 @@ function TodoSection({ todos, contacts, onAdd, onToggle }) {
           <button onClick={() => setShowCompleted(s => !s)} className="link-btn">{showCompleted ? "Hide completed" : `Show completed (${completed.length})`}</button>
           {showCompleted && (
             <div className="todo-list todo-list-completed">
-              {completed.map(t => <TodoRow key={t.id} todo={t} contacts={contacts} onToggle={onToggle} />)}
+              {completed.map(t => <TodoRow key={t.id} todo={t} contacts={contacts} deals={deals} enablers={enablers} onToggle={onToggle} onUpdate={onUpdate} onNavigate={onNavigate} />)}
             </div>
           )}
         </div>
