@@ -51,13 +51,33 @@ export const DEAL_ENABLER_RELATIONSHIPS = [
 ];
 
 export const NETWORK_EDGE_RELATIONSHIPS = [
+  { id: "works_at", label: "Works At" },
+  { id: "board_member", label: "Board Member" },
+  { id: "advisor", label: "Advisor" },
   { id: "knows", label: "Knows" },
   { id: "can_introduce", label: "Can Introduce" },
-  { id: "active_relationship", label: "Active Relationship" },
-  { id: "competitor_presence", label: "Competitor Presence" },
-  { id: "internal_connection", label: "Internal Connection" },
-  { id: "institutional", label: "Institutional" },
+  { id: "reports_to", label: "Reports To" },
+  { id: "subsidiary", label: "Subsidiary" },
+  { id: "parent", label: "Parent" },
+  { id: "board_overlap", label: "Board Overlap" },
+  { id: "partnership", label: "Partnership" },
+  { id: "competitor_to", label: "Competitor To" },
+  { id: "regulates", label: "Regulates" },
+  { id: "funds", label: "Funds" },
+  { id: "invested_in", label: "Invested In" },
+  { id: "custom", label: "Custom" },
 ];
+
+// Relationship types where a free-text "role/title" makes sense (connecting a
+// person to an organization, e.g. "CEO", "Board Member").
+export const PERSON_ORG_RELATIONSHIPS = ["works_at", "board_member", "advisor", "reports_to"];
+
+export const SAUDI_CITIES = [
+  "Riyadh", "Jeddah", "Dammam", "Dhahran", "Al Khobar",
+  "Mecca", "Medina", "Tabuk", "Abha",
+];
+
+export const REGIONS = ["Central", "Western", "Eastern", "Northern", "Southern"];
 
 export const STRENGTHS = [
   { id: "strong", label: "Strong", color: "#22C55E" },

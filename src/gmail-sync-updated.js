@@ -1,8 +1,8 @@
 /**
- * Mango OS — Gmail → Supabase activity sync (Google Apps Script)
+ * Mango OS, Gmail to Supabase activity sync (Google Apps Script)
  *
  * NOTE: This is a from-scratch reference implementation, not a patch to an
- * existing script — none was available to extend. It follows the schema and
+ * existing script (none was available to extend). It follows the schema and
  * conventions of the Mango OS React app (see src/supabase.js, src/constants.js)
  * so field names and tables line up, but the actual sender-matching heuristics
  * here are a reasonable default, not a guaranteed match for whatever matching
@@ -12,7 +12,7 @@
  *   1. Scans recent Gmail threads for messages.
  *   2. Matches the sender's email/domain against Supabase contacts, deals,
  *      and enablers (enablers use the exact same domain-matching pattern as
- *      deals — this is the piece that's new).
+ *      deals, this is the piece that's new).
  *   3. Logs a matched email as an "email" activity, linked to whichever of
  *      contact_id / deal_id / enabler_id it matched.
  *   4. Labels processed threads so they're never logged twice.
@@ -20,7 +20,7 @@
  * SETUP:
  *   1. In the Apps Script editor: Project Settings > Script Properties, add
  *      SUPABASE_URL and SUPABASE_KEY (the same values as src/supabase.js).
- *      Do not hardcode the key in source — script properties keep it out of
+ *      Do not hardcode the key in source: script properties keep it out of
  *      any copy/paste or version history of this file.
  *   2. Run `setup()` once to create the Gmail label and a time-driven trigger
  *      (defaults to every 15 minutes). Re-running it is safe / idempotent.
@@ -112,7 +112,7 @@ function logActivityForMessage_(config, message, deals, contacts, enablers) {
 }
 
 // Normalizes a company/enabler name to bare alphanumerics and checks whether
-// the sender's domain root contains it (or vice versa) — e.g. "BECO Capital"
+// the sender's domain root contains it (or vice versa), e.g. "BECO Capital"
 // -> "becocapital", matched against domain root "becocapital" from
 // jp@becocapital.com.
 function matchByDomain_(records, domain, nameGetter) {

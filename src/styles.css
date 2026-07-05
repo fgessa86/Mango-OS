@@ -1,11 +1,11 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 :root { --bg: #0F1419; --surface: #1A2332; --card: #111820; --border: #1e293b; --accent: #F5A623; --text: #E8ECF1; --muted: #7B8A9E; --dim: #64748B; --faint: #475569; --dark: #334155; --btn-sec-bg: #243044; --btn-sec-text: #CBD5E1; }
 .app.light-mode, body.light-mode { --bg: #F5F7FA; --surface: #FFFFFF; --card: #F0F2F5; --border: #E2E8F0; --accent: #F5A623; --text: #1A202C; --muted: #64748B; --dim: #94A3B8; --faint: #94A3B8; --dark: #E2E8F0; --btn-sec-bg: #E2E8F0; --btn-sec-text: #1A202C; }
-/* Explicit pin for the manual "Dark Mode" choice — matches :root exactly so it survives
+/* Explicit pin for the manual "Dark Mode" choice, matches :root exactly so it survives
    the prefers-color-scheme fallback below regardless of the OS setting. */
 .app.dark-mode, body.dark-mode { --bg: #0F1419; --surface: #1A2332; --card: #111820; --border: #1e293b; --accent: #F5A623; --text: #E8ECF1; --muted: #7B8A9E; --dim: #64748B; --faint: #475569; --dark: #334155; --btn-sec-bg: #243044; --btn-sec-text: #CBD5E1; }
 /* Fallback for contexts where the app renders before/without an explicit theme class
-   (e.g. pre-hydration) and the OS/browser prefers light — keeps text readable instead
+   (e.g. pre-hydration) and the OS/browser prefers light, keeps text readable instead
    of defaulting to light-on-dark colors against a light background. */
 @media (prefers-color-scheme: light) {
   :root {
@@ -215,6 +215,7 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .person-role { font-size: 11px; color: var(--muted); }
 .person-company { font-size: 11px; color: var(--accent); }
 .person-meta { font-size: 10px; color: var(--faint); margin-top: 6px; }
+.cross-pollination-badge { margin-top: 6px; font-size: 10px; background: rgba(245,166,35,0.12); color: var(--accent); border: 1px solid rgba(245,166,35,0.3); }
 .person-remove { background: none; border: none; color: var(--dim); font-size: 12px; cursor: pointer; padding: 2px 4px; flex-shrink: 0; }
 .person-remove:hover { color: #f87171; }
 .person-filter-badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(245,166,35,0.13); color: var(--accent); font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 8px; margin-bottom: 10px; }
@@ -288,9 +289,19 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .connection-title { font-size: 13px; font-weight: 600; color: var(--text); }
 .connection-notes { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
 .connection-arrow { color: var(--muted); font-size: 14px; flex-shrink: 0; }
+.path-row { background: var(--surface); border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; }
+.path-chain { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.path-notes { font-size: 11px; color: var(--muted); }
 
 .checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); cursor: pointer; }
 .checkbox-label input { width: auto; }
+
+.select-custom-wrap { display: flex; gap: 4px; align-items: center; }
+.select-custom-wrap .input { flex: 1; }
+.select-custom-back { background: none; border: none; color: var(--dim); font-size: 12px; cursor: pointer; padding: 2px 4px; flex-shrink: 0; }
+.select-custom-back:hover { color: #f87171; }
+
+.city-pin { font-size: 10px; color: var(--muted); white-space: nowrap; }
 
 .network-quickadd { background: var(--surface); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
 .network-quickadd-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -307,11 +318,10 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .directory-sub { font-size: 12px; color: var(--muted); }
 .directory-meta { font-size: 10px; color: var(--faint); margin-left: auto; }
 .directory-connections { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
-.org-inline-detail { background: var(--card); border-top: 1px solid var(--border); padding: 12px; }
 
-.bulk-add-modal { max-width: 900px; }
+.bulk-add-modal { max-width: 980px; }
 .bulk-add-table { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
-.bulk-add-row { display: grid; grid-template-columns: 1.2fr 1fr 1fr 1fr 1.3fr 1fr auto; gap: 6px; align-items: center; }
+.bulk-add-row { display: grid; grid-template-columns: 1.1fr 0.9fr 1fr 0.9fr 0.9fr 1.2fr 0.9fr auto; gap: 6px; align-items: center; }
 .bulk-add-head { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 .bulk-add-actions { justify-content: space-between; }
 .bulk-add-actions-right { display: flex; gap: 8px; }
