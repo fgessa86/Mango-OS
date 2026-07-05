@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "./supabase";
 import { generateSummary, summarizeImage } from "./anthropic";
-import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
+import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import "./styles.css";
 
@@ -27,6 +27,61 @@ const optionsWithCustom = (defaults, customOptions, fieldName) => {
 const trackCustom = (fieldName, mergedOptions, onAddCustomOption) => (value) => {
   if (value && !mergedOptions.some((o) => o.id === value)) onAddCustomOption(fieldName, value);
 };
+
+// Legacy enabler.type -> institution type, for enablers that predate having an
+// organizations row to read a real type from.
+const ENABLER_TYPE_TO_INSTITUTION = { vc: "vc", government: "government", research: "research", strategic_partner: "tech_company", accelerator: "tech_company", connector: "tech_company" };
+
+// Folds the deals, enablers, and organizations tables into one "institution"
+// per normalized name. An institution always has a name and may be backed by
+// any combination of an organizations row (its type/city/sector/etc.), a deals
+// row (making it a pipeline Target), and an enablers row (making it an Enabler).
+function buildInstitutions(deals, enablers, organizations) {
+  const map = new Map();
+  const get = (rawName) => {
+    const key = (rawName || "").trim().toLowerCase();
+    if (!key) return null;
+    if (!map.has(key)) map.set(key, { key, name: (rawName || "").trim(), org: null, deal: null, enabler: null });
+    return map.get(key);
+  };
+  organizations.forEach((o) => { const i = get(o.name); if (i) i.org = o; });
+  enablers.forEach((en) => { const i = get(en.name); if (i) i.enabler = en; });
+  deals.forEach((d) => { const i = get(d.company); if (i) i.deal = d; });
+  return [...map.values()].map(finalizeInstitution);
+}
+
+function finalizeInstitution(i) {
+  const { org, deal, enabler } = i;
+  const times = [org?.last_activity_at, deal?.last_activity_at, enabler?.last_activity_at].filter(Boolean).sort();
+  return {
+    ...i,
+    orgId: org?.id || null,
+    dealId: deal?.id || null,
+    enablerId: enabler?.id || null,
+    isTarget: !!deal,
+    isEnabler: !!enabler,
+    type: org ? normalizeTypeKey(org.type) : enabler ? (ENABLER_TYPE_TO_INSTITUTION[enabler.type] || "") : "",
+    city: org?.city || deal?.city || enabler?.city || "",
+    region: org?.region || deal?.region || enabler?.region || "",
+    sector: org?.sector || "",
+    website: org?.website || "",
+    description: org?.description || "",
+    notes: org?.notes || "",
+    stage: deal?.stage || null,
+    lastActivity: times.length ? times[times.length - 1] : null,
+  };
+}
+
+// The primary contact_roles entity for linking a person to an institution: a
+// Target links via its deal (so the person also surfaces on the Pipeline deal
+// sheet), an Enabler via its enabler, otherwise via its organizations row.
+function institutionPrimaryEntity(inst) {
+  if (!inst) return null;
+  if (inst.dealId) return { type: "deal", id: inst.dealId };
+  if (inst.enablerId) return { type: "enabler", id: inst.enablerId };
+  if (inst.orgId) return { type: "organization", id: inst.orgId };
+  return null;
+}
 
 const PHOTO_NOTE_PROMPT = "This is a photo of handwritten meeting notes. Please transcribe and summarize the key points, action items, and any decisions made. Be concise. Do not use em dashes; use commas, periods, colons, or parentheses instead.";
 
@@ -194,15 +249,10 @@ export default function App() {
   const [modal, setModal] = useState(null);
   const [reportCopied, setReportCopied] = useState(null);
   const [dragOver, setDragOver] = useState(null);
-  const [contactSearch, setContactSearch] = useState("");
-  const [contactTagFilter, setContactTagFilter] = useState("");
-  const [enablerSearch, setEnablerSearch] = useState("");
-  const [enablerTypeFilter, setEnablerTypeFilter] = useState("");
   const [toast, setToast] = useState(null);
   const [dealSheetId, setDealSheetId] = useState(null);
-  const [enablerSheetId, setEnablerSheetId] = useState(null);
-  const [contactSheetId, setContactSheetId] = useState(null);
-  const [organizationSheetId, setOrganizationSheetId] = useState(null);
+  const [institutionSheetKey, setInstitutionSheetKey] = useState(null);
+  const [personSheetId, setPersonSheetId] = useState(null);
   const [customOptions, setCustomOptions] = useState([]);
   const [contactRoles, setContactRoles] = useState([]);
   const [summarizing, setSummarizing] = useState(false);
@@ -263,26 +313,12 @@ export default function App() {
     }
   }, [deals, view, dealSheetId]);
 
-  // Kick back to the enablers list if the open enabler sheet's enabler was deleted elsewhere
+  // Kick back to the Network tab if the open person's contact was deleted elsewhere
   useEffect(() => {
-    if (view === "enabler-sheet" && enablerSheetId && enablers.length > 0 && !enablers.find((en) => en.id === enablerSheetId)) {
-      setView("enablers"); setEnablerSheetId(null);
+    if (view === "person-sheet" && personSheetId && contacts.length > 0 && !contacts.find((c) => c.id === personSheetId)) {
+      setView("network"); setPersonSheetId(null);
     }
-  }, [enablers, view, enablerSheetId]);
-
-  // Kick back to the contacts list if the open contact sheet's contact was deleted elsewhere
-  useEffect(() => {
-    if (view === "contact-sheet" && contactSheetId && contacts.length > 0 && !contacts.find((c) => c.id === contactSheetId)) {
-      setView("contacts"); setContactSheetId(null);
-    }
-  }, [contacts, view, contactSheetId]);
-
-  // Kick back to the network directory if the open organization sheet's organization was deleted elsewhere
-  useEffect(() => {
-    if (view === "organization-sheet" && organizationSheetId && organizations.length > 0 && !organizations.find((o) => o.id === organizationSheetId)) {
-      setView("network"); setOrganizationSheetId(null);
-    }
-  }, [organizations, view, organizationSheetId]);
+  }, [contacts, view, personSheetId]);
 
   // CUSTOM DROPDOWN OPTIONS
   // Persists a user-typed "+ Add custom" value so it shows up in that field's
@@ -396,46 +432,11 @@ export default function App() {
       await api("contact_roles", "DELETE", null, `?contact_id=eq.${id}`);
       await api("network_edges", "DELETE", null, `?source_type=eq.contact&source_id=eq.${id}`);
       await api("todos", "DELETE", null, `?contact_id=eq.${id}`);
+      await api("network_edges", "DELETE", null, `?target_type=eq.contact&target_id=eq.${id}`);
       await api("contacts", "DELETE", null, `?id=eq.${id}`);
-      await loadData(); setModal(null); showToast("Contact deleted");
-      setView("contacts"); setContactSheetId(null);
-    } catch { showToast("Error deleting contact"); }
-  };
-
-  // ENABLER CRUD
-  const saveEnabler = async (form) => {
-    try {
-      const name = (form.name || "").trim();
-      if (!name) { showToast("Name is required"); return; }
-      const clean = {
-        name,
-        type: form.type || "vc",
-        last_activity_at: new Date().toISOString(),
-      };
-      // Only send optional string fields when they have real content
-      for (const k of ["contact_id", "contact_name", "notes", "city", "region"]) {
-        const v = (form[k] || "").trim();
-        if (v) clean[k] = v;
-      }
-      if (form.id) {
-        await api("enablers", "PATCH", clean, `?id=eq.${form.id}`);
-      } else {
-        await api("enablers", "POST", clean);
-      }
-      await loadData(); setModal(null); showToast(form.id ? "Enabler updated" : "Enabler added");
-    } catch { showToast("Error saving enabler"); }
-  };
-
-  const deleteEnabler = async (id) => {
-    try {
-      await api("activities", "DELETE", null, `?enabler_id=eq.${id}`);
-      await api("enabler_contacts", "DELETE", null, `?enabler_id=eq.${id}`);
-      await api("contact_roles", "DELETE", null, `?entity_type=eq.enabler&entity_id=eq.${id}`);
-      await api("todos", "DELETE", null, `?enabler_id=eq.${id}`);
-      await api("enablers", "DELETE", null, `?id=eq.${id}`);
-      await loadData(); setModal(null); showToast("Enabler deleted");
-      setView("enablers"); setEnablerSheetId(null);
-    } catch { showToast("Error deleting enabler"); }
+      await loadData(); setModal(null); showToast("Person deleted");
+      setView("network"); setPersonSheetId(null);
+    } catch { showToast("Error deleting person"); }
   };
 
   // PEOPLE (deal_contacts / enabler_contacts junction tables, plus contact_roles
@@ -470,14 +471,6 @@ export default function App() {
     } catch { showToast("Error adding person (maybe already linked)"); }
   };
 
-  const removeEnablerContact = async (id) => {
-    try {
-      const row = enablerContacts.find((ec) => ec.id === id);
-      await api("enabler_contacts", "DELETE", null, `?id=eq.${id}`);
-      if (row) await api("contact_roles", "DELETE", null, `?contact_id=eq.${row.contact_id}&entity_type=eq.enabler&entity_id=eq.${row.enabler_id}`).catch(() => {});
-      await loadData(); showToast("Person removed");
-    } catch { showToast("Error removing person"); }
-  };
 
   // Adds a contact_roles row for any institution kind (deal/enabler/organization)
   // and fans out to the matching legacy table so every existing sheet's People
@@ -517,85 +510,144 @@ export default function App() {
     } catch { showToast("Error removing person"); }
   };
 
-  // Creates a contact plus one or more contact_roles in one go, for the
-  // Network tab's "+ Person" form (a primary role plus any "Add another role" rows).
-  const addPersonWithRoles = async ({ name, email, phone, warmth, roles }) => {
+  // Creates a contact plus one or more contact_roles in one go, for the Network
+  // tab's "+ Person" form (a primary role plus any "Add another role" rows).
+  // Each role's institutionKey is "type:id" for an existing institution, or a
+  // { newName, newType } object to create a fresh organization inline. Also
+  // writes the optional "connected through" and "can help us reach" edges.
+  const addPersonWithRoles = async ({ name, email, phone, warmth, notes, roles, connectedThrough, canReach, relationship }) => {
     try {
-      const created = await persistContact({ name, email, phone, warmth });
+      const created = await persistContact({ name, email, phone, warmth, notes });
       if (!created) throw new Error("Could not create contact");
-      const validRoles = (roles || []).filter((r) => r.institutionKey);
-      for (let i = 0; i < validRoles.length; i++) {
-        const r = validRoles[i];
-        const idx = r.institutionKey.indexOf(":");
-        const entityType = r.institutionKey.slice(0, idx);
-        const entityId = r.institutionKey.slice(idx + 1);
-        await persistPersonRole({ contactId: created.id, entityType, entityId, roleTitle: r.role, isPrimary: i === 0 });
+      const validRoles = (roles || []).filter((r) => r.institutionKey || (r.newName || "").trim());
+      let primaryAssigned = false;
+      for (const r of validRoles) {
+        let entityType, entityId;
+        if (r.newName && r.newName.trim()) {
+          const org = await persistOrganization({ name: r.newName.trim(), type: r.newType || "hospital" });
+          if (!org) continue;
+          entityType = "organization"; entityId = org.id;
+        } else {
+          const idx = r.institutionKey.indexOf(":");
+          entityType = r.institutionKey.slice(0, idx);
+          entityId = r.institutionKey.slice(idx + 1);
+        }
+        await persistPersonRole({ contactId: created.id, entityType, entityId, roleTitle: r.role, isPrimary: !primaryAssigned });
+        primaryAssigned = true;
       }
-      await loadData(); showToast("Person added");
+      const rel = relationship || "knows";
+      if (connectedThrough) {
+        await api("network_edges", "POST", { source_type: "contact", source_id: created.id, target_type: "contact", target_id: connectedThrough, relationship: rel, strength: "medium", direction: "bidirectional" }).catch(() => {});
+      }
+      if (canReach) {
+        const idx = canReach.indexOf(":");
+        await api("network_edges", "POST", { source_type: "contact", source_id: created.id, target_type: canReach.slice(0, idx), target_id: canReach.slice(idx + 1), relationship: rel, strength: "medium", direction: "directed" }).catch(() => {});
+      }
+      const n = validRoles.length;
+      await loadData(); showToast(`${created.name} added${n > 0 ? ` with ${n} role${n === 1 ? "" : "s"}` : ""}.`);
     } catch { showToast("Error adding person"); }
   };
 
-  // ORGANIZATIONS
+  // INSTITUTIONS (organizations rows, plus optional linked deal/enabler)
+  // Every institution is an organizations row. persistOrganization returns the
+  // saved row so callers can link a freshly created org by id.
   const persistOrganization = async (form) => {
     const name = (form.name || "").trim();
     if (!name) throw new Error("Name is required");
-    const clean = { name, type: form.type || "competitor", country: (form.country || "").trim() || "Saudi Arabia" };
+    const clean = { name, type: form.type || "hospital", country: (form.country || "").trim() || "Saudi Arabia" };
     for (const k of ["sector", "description", "website", "notes", "city", "region", "address"]) {
       const v = (form[k] || "").trim();
       if (v) clean[k] = v;
     }
     if (form.id) {
       await api("organizations", "PATCH", clean, `?id=eq.${form.id}`);
-    } else {
-      await api("organizations", "POST", clean);
+      return { id: form.id, ...clean };
     }
+    return (await api("organizations", "POST", clean) || [])[0];
   };
 
-  const saveOrganization = async (form) => {
-    try {
-      await persistOrganization(form);
-      await loadData(); setModal(null); showToast(form.id ? "Organization updated" : "Organization added");
-    } catch { showToast("Error saving organization"); }
+  const createDealForInstitution = async ({ name, city, region }) => {
+    const clean = { company: name, stage: "prospecting", last_activity_at: new Date().toISOString() };
+    if ((city || "").trim()) clean.city = city;
+    if ((region || "").trim()) clean.region = region;
+    return (await api("deals", "POST", clean) || [])[0];
   };
 
-  // Network tab's "+ Institution" form: everything is an institution, but
-  // Target/Enabler types route to the deals/enablers tables (so the Pipeline
-  // and Enablers tabs stay in sync) and every other type routes to organizations.
+  const createEnablerForInstitution = async ({ name, city, region }) => {
+    const clean = { name, type: "strategic_partner", last_activity_at: new Date().toISOString() };
+    if ((city || "").trim()) clean.city = city;
+    if ((region || "").trim()) clean.region = region;
+    return (await api("enablers", "POST", clean) || [])[0];
+  };
+
+  // Removes a deal and its deal-specific junctions, but preserves shared history
+  // by nulling deal_id on activities/todos rather than deleting them. Used when
+  // an institution is un-flagged as a Target ("archived" from the pipeline).
+  const purgeDeal = async (id) => {
+    await api("activities", "PATCH", { deal_id: null }, `?deal_id=eq.${id}`).catch(() => {});
+    await api("todos", "PATCH", { deal_id: null }, `?deal_id=eq.${id}`).catch(() => {});
+    await api("deal_contacts", "DELETE", null, `?deal_id=eq.${id}`).catch(() => {});
+    await api("contact_roles", "DELETE", null, `?entity_type=eq.deal&entity_id=eq.${id}`).catch(() => {});
+    await api("deal_enablers", "DELETE", null, `?deal_id=eq.${id}`).catch(() => {});
+    await api("deals", "DELETE", null, `?id=eq.${id}`);
+  };
+
+  const purgeEnabler = async (id) => {
+    await api("activities", "PATCH", { enabler_id: null }, `?enabler_id=eq.${id}`).catch(() => {});
+    await api("todos", "PATCH", { enabler_id: null }, `?enabler_id=eq.${id}`).catch(() => {});
+    await api("enabler_contacts", "DELETE", null, `?enabler_id=eq.${id}`).catch(() => {});
+    await api("contact_roles", "DELETE", null, `?entity_type=eq.enabler&entity_id=eq.${id}`).catch(() => {});
+    await api("deal_enablers", "DELETE", null, `?enabler_id=eq.${id}`).catch(() => {});
+    await api("enablers", "DELETE", null, `?id=eq.${id}`);
+  };
+
+  // Network tab's "+ Institution" form. Always creates an organizations row, and
+  // creates a linked deal (Target) and/or enabler (Enabler) when those boxes are
+  // checked, keeping the Pipeline in sync.
   const addInstitution = async (form) => {
     const name = (form.name || "").trim();
     if (!name) { showToast("Name is required"); return; }
-    const type = form.type || "competitor";
-    const extraNotes = [form.sector, form.description].filter((v) => (v || "").trim()).join(". ");
     try {
-      if (type === "target") {
-        const clean = { company: name, stage: "prospecting", last_activity_at: new Date().toISOString() };
-        if (form.city) clean.city = form.city;
-        if (form.region) clean.region = form.region;
-        if (extraNotes) clean.notes = extraNotes;
-        await api("deals", "POST", clean);
-      } else if (type === "enabler") {
-        const clean = { name, type: "strategic_partner", last_activity_at: new Date().toISOString() };
-        if (form.city) clean.city = form.city;
-        if (form.region) clean.region = form.region;
-        if (extraNotes) clean.notes = extraNotes;
-        await api("enablers", "POST", clean);
-      } else {
-        await persistOrganization({ name, type, city: form.city, region: form.region, sector: form.sector, description: form.description, website: form.website });
-      }
-      await loadData(); showToast("Institution added. Click to add people.");
+      await persistOrganization({ name, type: form.type, city: form.city, region: form.region, sector: form.sector, description: form.description, website: form.website });
+      if (form.isTarget) await createDealForInstitution({ name, city: form.city, region: form.region });
+      if (form.isEnabler) await createEnablerForInstitution({ name, city: form.city, region: form.region });
+      await loadData(); showToast(`${name} added. Click to add people.`);
     } catch { showToast("Error adding institution"); }
   };
 
-  const deleteOrganization = async (id) => {
+  // Institution Sheet's edit modal. Ensures an organizations row exists, then
+  // reconciles the Target/Enabler checkboxes against the existing linked rows:
+  // checking creates the deal/enabler, unchecking archives it.
+  const saveInstitution = async (form) => {
+    const name = (form.name || "").trim();
+    if (!name) { showToast("Name is required"); return; }
     try {
-      await api("activities", "DELETE", null, `?organization_id=eq.${id}`);
-      await api("network_edges", "DELETE", null, `?source_type=eq.organization&source_id=eq.${id}`);
-      await api("network_edges", "DELETE", null, `?target_type=eq.organization&target_id=eq.${id}`);
-      await api("contact_roles", "DELETE", null, `?entity_type=eq.organization&entity_id=eq.${id}`);
-      await api("organizations", "DELETE", null, `?id=eq.${id}`);
-      await loadData(); showToast("Organization deleted");
-      setView("network"); setOrganizationSheetId(null);
-    } catch { showToast("Error deleting organization"); }
+      await persistOrganization({ id: form.orgId || undefined, name, type: form.type, city: form.city, region: form.region, sector: form.sector, description: form.description, website: form.website, notes: form.notes });
+      if (form.isTarget && !form.dealId) await createDealForInstitution({ name, city: form.city, region: form.region });
+      else if (!form.isTarget && form.dealId) await purgeDeal(form.dealId);
+      else if (form.isTarget && form.dealId) await api("deals", "PATCH", { company: name, ...(form.city ? { city: form.city } : {}), ...(form.region ? { region: form.region } : {}) }, `?id=eq.${form.dealId}`);
+      if (form.isEnabler && !form.enablerId) await createEnablerForInstitution({ name, city: form.city, region: form.region });
+      else if (!form.isEnabler && form.enablerId) await purgeEnabler(form.enablerId);
+      else if (form.isEnabler && form.enablerId) await api("enablers", "PATCH", { name, ...(form.city ? { city: form.city } : {}), ...(form.region ? { region: form.region } : {}) }, `?id=eq.${form.enablerId}`);
+      await loadData(); setModal(null); showToast("Institution updated");
+      setInstitutionSheetKey(name.toLowerCase());
+    } catch { showToast("Error saving institution"); }
+  };
+
+  const deleteInstitution = async (inst) => {
+    try {
+      if (inst.dealId) await purgeDeal(inst.dealId);
+      if (inst.enablerId) await purgeEnabler(inst.enablerId);
+      if (inst.orgId) {
+        await api("activities", "DELETE", null, `?organization_id=eq.${inst.orgId}`);
+        await api("network_edges", "DELETE", null, `?source_type=eq.organization&source_id=eq.${inst.orgId}`);
+        await api("network_edges", "DELETE", null, `?target_type=eq.organization&target_id=eq.${inst.orgId}`);
+        await api("contact_roles", "DELETE", null, `?entity_type=eq.organization&entity_id=eq.${inst.orgId}`);
+        await api("organizations", "DELETE", null, `?id=eq.${inst.orgId}`);
+      }
+      await loadData(); showToast("Institution deleted");
+      setView("network"); setInstitutionSheetKey(null);
+    } catch { showToast("Error deleting institution"); }
   };
 
   const removeNetworkEdge = async (id) => {
@@ -624,12 +676,6 @@ export default function App() {
     } catch { showToast("Error adding connection"); }
   };
 
-  const removeDealEnabler = async (id) => {
-    try {
-      await api("deal_enablers", "DELETE", null, `?id=eq.${id}`);
-      await loadData(); showToast("Connection removed");
-    } catch { showToast("Error removing connection"); }
-  };
 
   // GENERIC POLYMORPHIC EDGES (any entity to any entity, used when the pair
   // isn't a deal/enabler/contact combo with its own dedicated junction table)
@@ -858,9 +904,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Error updating to-do"); }
   };
 
+  // Task/link navigation. Deals open the Pipeline deal sheet; enablers are
+  // institutions, so open by name in the Network institution sheet.
   const openTaskLink = (link) => {
     if (link.type === "deal") { setDealSheetId(link.id); setView("deal-sheet"); }
-    else if (link.type === "enabler") { setEnablerSheetId(link.id); setView("enabler-sheet"); }
+    else if (link.type === "enabler") { const en = enablers.find((e) => e.id === link.id); if (en) openInstitution(en.name); }
   };
 
   // ACTIVITY
@@ -936,16 +984,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
   const activeDeals = deals.filter((d) => !["won","lost"].includes(d.stage));
   const totalValue = activeDeals.reduce((s, d) => s + (Number(d.value) || 0), 0);
-  const filteredContacts = contacts.filter((c) => {
-    const ms = !contactSearch || [c.name, c.company, c.email].some((f) => f?.toLowerCase().includes(contactSearch.toLowerCase()));
-    const mt = !contactTagFilter || (c.tags || []).includes(contactTagFilter);
-    return ms && mt;
-  });
-  const filteredEnablers = enablers.filter((en) => {
-    const ms = !enablerSearch || [en.name, en.contact_name].some((f) => f?.toLowerCase().includes(enablerSearch.toLowerCase()));
-    const mt = !enablerTypeFilter || en.type === enablerTypeFilter;
-    return ms && mt;
-  });
+  const institutions = buildInstitutions(deals, enablers, organizations);
   const openTodos = sortTodos(todos.filter((t) => t.status === "open"));
   const filteredTasks = openTodos.filter((t) => {
     if (taskFilter === "high") return t.priority === "high";
@@ -956,6 +995,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // Activities are already loaded ordered by created_at desc, so the first
   // match is the most recent auto-synced (email/meeting) activity.
   const lastSyncedActivity = activities.find((a) => a.type === "email" || a.type === "meeting");
+
+  // NAVIGATION: institutions are keyed by normalized name; people by contact id.
+  const openInstitution = (name) => { if (name) { setInstitutionSheetKey(name.trim().toLowerCase()); setView("institution-sheet"); } };
+  const openPerson = (id) => { setPersonSheetId(id); setView("person-sheet"); };
 
   if (loading) return <div className="app loading-screen"><div className="loading-text">Loading Mango OS...</div></div>;
 
@@ -970,13 +1013,13 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         </div>
         <div className="header-right">
           <nav className="nav">
-            {[["pipeline","Pipeline"],["contacts","Contacts"],["enablers","Enablers"],["network","Network"],["tasks","Tasks"],["reports","Reports"],["boss","Boss View"]].map(([k,l]) => (
+            {[["pipeline","Pipeline"],["network","Network"],["tasks","Tasks"],["reports","Reports"],["boss","Boss View"]].map(([k,l]) => (
               <button key={k} onClick={() => setView(k)} className={`nav-tab ${view === k ? "active" : ""}`}>{l}</button>
             ))}
           </nav>
           <div className="last-synced" title="Most recent auto-logged email or meeting activity">
             <span className="last-synced-dot" />
-            Last synced: {lastSyncedActivity ? formatDateTime(lastSyncedActivity.created_at) : "Never"}
+            {lastSyncedActivity ? `Synced: ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"}
           </div>
           <div className="settings-wrap" ref={settingsRef}>
             <button onClick={() => setSettingsOpen((s) => !s)} className="settings-btn" title="Settings">⚙️</button>
@@ -991,9 +1034,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         </div>
       </header>
 
-      {view !== "deal-sheet" && view !== "enabler-sheet" && view !== "contact-sheet" && (
+      {view !== "deal-sheet" && view !== "institution-sheet" && view !== "person-sheet" && (
         <div className="stats-bar">
-          {[[activeDeals.length,"Active Deals"],[totalValue > 0 ? `$${(totalValue/1000).toFixed(0)}K` : "N/A","Pipeline Value"],[contacts.length,"Contacts"],[enablers.length,"Enablers"],[openTodos.length,"Open Tasks"],[deals.filter(d=>isToday(d.last_activity_at)).length,"Touched Today"],[deals.filter(d=>d.stage==="won").length,"Won"]].map(([v,l],i) => (
+          {[[activeDeals.length,"Pipeline Deals"],[totalValue > 0 ? `$${(totalValue/1000).toFixed(0)}K` : "N/A","Pipeline Value"],[contacts.length,"People"],[institutions.length,"Institutions"],[openTodos.length,"Open Tasks"]].map(([v,l],i) => (
             <div key={i} className="stat"><div className="stat-value">{v}</div><div className="stat-label">{l}</div></div>
           ))}
         </div>
@@ -1035,50 +1078,30 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         ) : null;
       })()}
 
-      {/* ENABLER SHEET */}
-      {view === "enabler-sheet" && enablerSheetId && (() => {
-        const sheetEnabler = enablers.find((en) => en.id === enablerSheetId);
-        return sheetEnabler ? (
-          <EnablerSheet
-            enabler={sheetEnabler}
-            activities={activities.filter((a) => a.enabler_id === sheetEnabler.id)}
-            people={enablerContacts.filter((ec) => ec.enabler_id === sheetEnabler.id)}
-            todos={todos.filter((t) => t.enabler_id === sheetEnabler.id)}
+      {/* INSTITUTION SHEET */}
+      {view === "institution-sheet" && institutionSheetKey && (() => {
+        const inst = institutions.find((i) => i.key === institutionSheetKey);
+        if (!inst) return null;
+        const instActivities = activities.filter((a) =>
+          (inst.dealId && a.deal_id === inst.dealId) ||
+          (inst.enablerId && a.enabler_id === inst.enablerId) ||
+          (inst.orgId && a.organization_id === inst.orgId));
+        const genSummary = (_e, acts, people) => {
+          if (inst.org) return generateOrganizationSummary(inst.org, acts, people);
+          if (inst.deal) return generateDealSummary(inst.deal, acts);
+          return generateEnablerSummary(inst.enabler, acts);
+        };
+        const saveSummary = (_id, text) => {
+          if (inst.org) return saveOrganizationSummary(inst.org.id, text);
+          if (inst.deal) return saveDealSummary(inst.deal.id, text);
+          return saveEnablerSummary(inst.enabler.id, text);
+        };
+        return (
+          <InstitutionSheet
+            institution={inst}
+            summaryEntity={inst.org || inst.deal || inst.enabler}
+            activities={instActivities}
             contacts={contacts}
-            deals={deals}
-            enablers={enablers}
-            networkEdges={networkEdges}
-            customOptions={customOptions}
-            onAddCustomOption={addCustomOption}
-            dealEnablers={dealEnablers.filter((de) => de.enabler_id === sheetEnabler.id)}
-            onEdit={(en) => setModal({ type: "enabler", data: en })}
-            onDelete={deleteEnabler}
-            onAddActivity={addActivity}
-            onAddPerson={(contactId, role) => addEnablerContact(sheetEnabler.id, contactId, role)}
-            onRemovePerson={(p) => (p.source === "edge" ? removeNetworkEdge(p.id) : removeEnablerContact(p.id))}
-            onAddConnection={(form) => addDealEnabler({ ...form, enabler_id: sheetEnabler.id })}
-            onRemoveConnection={removeDealEnabler}
-            onAddTodo={(form) => saveTodo({ ...form, enabler_id: sheetEnabler.id })}
-            onToggleTodo={toggleTodo}
-            onUpdateTodo={updateTodo}
-            onNavigate={openTaskLink}
-            onGenerateSummary={generateEnablerSummary}
-            onSaveSummary={saveEnablerSummary}
-            summarizing={summarizing}
-            showToast={showToast}
-            onBack={() => { setView("enablers"); setEnablerSheetId(null); }}
-          />
-        ) : null;
-      })()}
-
-      {/* CONTACT SHEET */}
-      {view === "contact-sheet" && contactSheetId && (() => {
-        const sheetContact = contacts.find((c) => c.id === contactSheetId);
-        return sheetContact ? (
-          <ContactSheet
-            contact={sheetContact}
-            activities={activities.filter((a) => a.contact_id === sheetContact.id)}
-            todos={todos.filter((t) => t.contact_id === sheetContact.id)}
             deals={deals}
             enablers={enablers}
             organizations={organizations}
@@ -1086,59 +1109,58 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             enablerContacts={enablerContacts}
             networkEdges={networkEdges}
             contactRoles={contactRoles}
+            customOptions={customOptions}
+            onAddCustomOption={addCustomOption}
+            onEdit={() => setModal({ type: "institution", data: inst })}
+            onDelete={() => deleteInstitution(inst)}
+            onAddActivity={addActivity}
+            onAddPersonRole={addPersonRole}
+            onAddPersonWithRoles={addPersonWithRoles}
+            onRemoveRole={removePersonRole}
+            onRemoveNetworkEdge={removeNetworkEdge}
+            onAddConnection={addConnection}
+            onChangeStage={(stage) => inst.dealId && moveDeal(inst.dealId, stage)}
+            onGenerateSummary={genSummary}
+            onSaveSummary={saveSummary}
+            summarizing={summarizing}
+            showToast={showToast}
+            onOpenInstitution={openInstitution}
+            onOpenPerson={openPerson}
+            onBack={() => { setView("network"); setInstitutionSheetKey(null); }}
+          />
+        );
+      })()}
+
+      {/* PERSON SHEET */}
+      {view === "person-sheet" && personSheetId && (() => {
+        const sheetContact = contacts.find((c) => c.id === personSheetId);
+        return sheetContact ? (
+          <PersonSheet
+            contact={sheetContact}
+            activities={activities.filter((a) => a.contact_id === sheetContact.id)}
+            deals={deals}
+            enablers={enablers}
+            organizations={organizations}
+            contacts={contacts}
+            dealContacts={dealContacts}
+            enablerContacts={enablerContacts}
+            networkEdges={networkEdges}
+            contactRoles={contactRoles}
+            institutions={institutions}
             customOptions={customOptions}
             onAddCustomOption={addCustomOption}
             onEdit={(c) => setModal({ type: "contact", data: c })}
             onDelete={deleteContact}
             onAddActivity={addActivity}
+            onAddRole={addPersonRole}
             onRemoveRole={removePersonRole}
-            onAddTodo={(form) => saveTodo({ ...form, contact_id: sheetContact.id })}
-            onToggleTodo={toggleTodo}
-            onUpdateTodo={updateTodo}
             onGenerateSummary={generateContactSummary}
             onSaveSummary={saveContactSummary}
             summarizing={summarizing}
             showToast={showToast}
-            onOpenDeal={(id) => { setDealSheetId(id); setView("deal-sheet"); }}
-            onOpenEnabler={(id) => { setEnablerSheetId(id); setView("enabler-sheet"); }}
-            onOpenOrganization={(id) => { setOrganizationSheetId(id); setView("organization-sheet"); }}
-            onBack={() => { setView("contacts"); setContactSheetId(null); }}
-          />
-        ) : null;
-      })()}
-
-      {/* ORGANIZATION SHEET */}
-      {view === "organization-sheet" && organizationSheetId && (() => {
-        const sheetOrganization = organizations.find((o) => o.id === organizationSheetId);
-        return sheetOrganization ? (
-          <OrganizationSheet
-            organization={sheetOrganization}
-            activities={activities.filter((a) => a.organization_id === sheetOrganization.id)}
-            contacts={contacts}
-            deals={deals}
-            enablers={enablers}
-            organizations={organizations}
-            dealContacts={dealContacts}
-            enablerContacts={enablerContacts}
-            networkEdges={networkEdges}
-            contactRoles={contactRoles}
-            customOptions={customOptions}
-            onAddCustomOption={addCustomOption}
-            onEdit={(o) => setModal({ type: "organization", data: o })}
-            onDelete={deleteOrganization}
-            onAddActivity={addActivity}
-            onAddConnection={addConnection}
-            onRemoveNetworkEdge={removeNetworkEdge}
-            onRemoveRole={removePersonRole}
-            onGenerateSummary={generateOrganizationSummary}
-            onSaveSummary={saveOrganizationSummary}
-            summarizing={summarizing}
-            showToast={showToast}
-            onOpenContact={(id) => { setContactSheetId(id); setView("contact-sheet"); }}
-            onOpenDeal={(id) => { setDealSheetId(id); setView("deal-sheet"); }}
-            onOpenEnabler={(id) => { setEnablerSheetId(id); setView("enabler-sheet"); }}
-            onOpenOrganization={(id) => { setOrganizationSheetId(id); setView("organization-sheet"); }}
-            onBack={() => { setView("network"); setOrganizationSheetId(null); }}
+            onOpenInstitution={openInstitution}
+            onOpenPerson={openPerson}
+            onBack={() => { setView("network"); setPersonSheetId(null); }}
           />
         ) : null;
       })()}
@@ -1181,100 +1203,25 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         </div>
       )}
 
-      {/* CONTACTS */}
-      {view === "contacts" && (
-        <div className="section-pad">
-          <div className="contacts-toolbar">
-            <div className="search-row">
-              <input className="input" placeholder="Search contacts..." value={contactSearch} onChange={(e) => setContactSearch(e.target.value)} />
-              <select className="input select-filter" value={contactTagFilter} onChange={(e) => setContactTagFilter(e.target.value)}>
-                <option value="">All Tags</option>
-                {TAG_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
-            </div>
-            <button onClick={() => setModal({type:"contact",data:{}})} className="btn-primary">+ New Contact</button>
-          </div>
-          {filteredContacts.length === 0 && <div className="empty-state">{contacts.length === 0 ? "No contacts yet. Add your first contact." : "No contacts match."}</div>}
-          <div className="contacts-grid">
-            {filteredContacts.map((c) => {
-              const cd = deals.filter(d => d.contact_id === c.id);
-              const ca = activities.filter(a => a.contact_id === c.id);
-              const warmth = WARMTH_LEVELS.find(w => w.id === (c.warmth || "unknown"));
-              return (
-                <div key={c.id} className="contact-card" onClick={() => { setContactSheetId(c.id); setView("contact-sheet"); }}>
-                  <div className="contact-top">
-                    <div>
-                      <div className="contact-name">
-                        <span className="warmth-dot" style={{background: warmth?.color}} title={`Warmth: ${warmth?.label}`} />
-                        {c.name}
-                      </div>
-                      {c.role && <div className="contact-role">{c.role}</div>}
-                      {c.company && <div className="contact-company">{c.company}</div>}
-                    </div>
-                    <div className="contact-age">{c.last_contacted_at ? `${daysAgo(c.last_contacted_at)}d ago` : "Never"}</div>
-                  </div>
-                  {c.email && <div className="contact-email">{c.email}</div>}
-                  <div className="tags-row">{(c.tags||[]).map(t => <span key={t} className="tag">{t}</span>)}</div>
-                  <div className="contact-meta">{cd.length} deal{cd.length !== 1 ? "s" : ""} . {ca.length} activities</div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* ENABLERS */}
-      {view === "enablers" && (
-        <div className="section-pad">
-          <div className="contacts-toolbar">
-            <div className="search-row">
-              <input className="input" placeholder="Search enablers..." value={enablerSearch} onChange={(e) => setEnablerSearch(e.target.value)} />
-              <select className="input select-filter" value={enablerTypeFilter} onChange={(e) => setEnablerTypeFilter(e.target.value)}>
-                <option value="">All Types</option>
-                {ENABLER_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
-              </select>
-            </div>
-            <button onClick={() => setModal({type:"enabler",data:{}})} className="btn-primary">+ New Enabler</button>
-          </div>
-          {filteredEnablers.length === 0 && <div className="empty-state">{enablers.length === 0 ? "No enablers yet. Add your first enabler." : "No enablers match."}</div>}
-          <div className="contacts-grid">
-            {filteredEnablers.map((en) => {
-              const et = ENABLER_TYPES.find(t => t.id === en.type);
-              return (
-                <div key={en.id} className="contact-card" onClick={() => { setEnablerSheetId(en.id); setView("enabler-sheet"); }}>
-                  <div className="contact-top">
-                    <div>
-                      <div className="contact-name">{en.name}</div>
-                      {et && <span className="badge enabler-type-badge" style={{background:et.color+"22",color:et.color,border:`1px solid ${et.color}44`}}>{et.label}</span>}
-                      {en.city && <span className="city-pin">📍 {en.city}</span>}
-                    </div>
-                    <div className="contact-age">{en.last_activity_at ? `${daysAgo(en.last_activity_at)}d ago` : "Never"}</div>
-                  </div>
-                  {en.contact_name && <div className="contact-email">{en.contact_name}</div>}
-                  {en.ai_summary && <div className="enabler-summary-preview">{en.ai_summary.slice(0, 120)}{en.ai_summary.length > 120 ? "…" : ""}</div>}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
       {/* NETWORK */}
       {view === "network" && (
         <div className="section-pad">
           <NetworkTab
+            institutions={institutions}
             contacts={contacts}
             deals={deals}
             enablers={enablers}
             organizations={organizations}
+            dealContacts={dealContacts}
+            enablerContacts={enablerContacts}
+            networkEdges={networkEdges}
             contactRoles={contactRoles}
             customOptions={customOptions}
             onAddCustomOption={addCustomOption}
             onAddInstitution={addInstitution}
             onAddPersonWithRoles={addPersonWithRoles}
-            onOpenDeal={(id) => { setDealSheetId(id); setView("deal-sheet"); }}
-            onOpenEnabler={(id) => { setEnablerSheetId(id); setView("enabler-sheet"); }}
-            onOpenOrganization={(id) => { setOrganizationSheetId(id); setView("organization-sheet"); }}
+            onOpenInstitution={openInstitution}
+            onOpenPerson={openPerson}
           />
         </div>
       )}
@@ -1398,8 +1345,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       {/* MODALS */}
       {modal?.type === "deal" && <DealForm deal={modal.data} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveDeal} onClose={() => setModal(null)} />}
       {modal?.type === "contact" && <ContactForm contact={modal.data} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveContact} onClose={() => setModal(null)} />}
-      {modal?.type === "enabler" && <EnablerForm enabler={modal.data} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveEnabler} onClose={() => setModal(null)} />}
-      {modal?.type === "organization" && <OrganizationForm organization={modal.data} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveOrganization} onClose={() => setModal(null)} />}
+      {modal?.type === "institution" && <InstitutionEditModal institution={modal.data} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveInstitution} onClose={() => setModal(null)} />}
     </div>
   );
 }
@@ -1623,261 +1569,135 @@ function DealSheet({ deal, activities, people, todos, contacts, deals, enablers,
   );
 }
 
-function EnablerForm({ enabler, contacts, customOptions, onAddCustomOption, onSave, onClose }) {
-  const isEdit = !!enabler.id;
-  const [f, setF] = useState({ id:enabler.id||"", name:enabler.name||"", type:enabler.type||"vc", contact_id:enabler.contact_id||"", contact_name:enabler.contact_name||"", city:enabler.city||"", region:enabler.region||"", notes:enabler.notes||"" });
-  const set = (k,v) => setF(p => ({...p,[k]:v}));
-  const pickContact = (id) => { const c = contacts.find(x=>x.id===id); if(c){setF(p=>({...p, contact_id:id, contact_name:c.name||""}));} else {set("contact_id","");} };
-  const typeOpts = optionsWithCustom(ENABLER_TYPES, customOptions, "enabler_type");
-  const cityOpts = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
-  const regionOpts = optionsWithCustom(REGION_OPTIONS, customOptions, "region");
-  return (
-    <div className="overlay" onClick={onClose}><div className="modal" onClick={e=>e.stopPropagation()}>
-      <div className="modal-header"><div className="modal-title">{isEdit?"Edit Enabler":"New Enabler"}</div><button onClick={onClose} className="close-btn">✕</button></div>
-      <div className="form-grid">
-        <div className="field-full"><label className="label">Name *</label><input className="input" value={f.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. STV, Monsha'at" /></div>
-        <div className="field"><label className="label">Type</label><SelectWithCustom options={typeOpts} value={f.type} onChange={(v)=>{set("type",v); trackCustom("enabler_type", typeOpts, onAddCustomOption)(v);}} /></div>
-        {contacts.length > 0 && <div className="field"><label className="label">Link to Contact</label><select className="input" value={f.contact_id} onChange={e=>pickContact(e.target.value)}><option value="">Select...</option>{contacts.map(c=><option key={c.id} value={c.id}>{c.name}{c.company?` (${c.company})`:""}</option>)}</select></div>}
-        <div className="field"><label className="label">City</label><SelectWithCustom options={cityOpts} value={f.city} onChange={(v)=>{set("city",v); trackCustom("city", cityOpts, onAddCustomOption)(v);}} placeholder="City name..." /></div>
-        <div className="field"><label className="label">Region</label><SelectWithCustom options={regionOpts} value={f.region} onChange={(v)=>{set("region",v); trackCustom("region", regionOpts, onAddCustomOption)(v);}} placeholder="Region name..." /></div>
-        <div className="field-full"><label className="label">Contact Name</label><input className="input" value={f.contact_name} onChange={e=>set("contact_name",e.target.value)} /></div>
-        <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={f.notes} onChange={e=>set("notes",e.target.value)} /></div>
-      </div>
-      <div className="modal-actions"><button onClick={onClose} className="btn-sec">Cancel</button><button onClick={()=>f.name.trim()&&onSave(f)} className="btn-primary" disabled={!f.name.trim()}>{isEdit?"Save":"Add Enabler"}</button></div>
-    </div></div>
-  );
-}
-
-function EnablerSheet({ enabler, activities, people, todos, contacts, deals, enablers, networkEdges, dealEnablers, customOptions = [], onAddCustomOption = () => {}, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onAddConnection, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
-  const type = ENABLER_TYPES.find(t => t.id === enabler.type);
-  const [filter, setFilter] = useState("all");
-  const [personFilter, setPersonFilter] = useState(null);
-  const [linkModalOpen, setLinkModalOpen] = useState(false);
-
-  const junctionPeople = people.map(p => ({ id: p.id, contact_id: p.contact_id, role: p.role_in_org, contact: p.contacts, source: "junction" }));
-  const edgePeople = networkEdges
-    .filter(ne => ne.source_type === "contact" && ne.target_type === "enabler" && ne.target_id === enabler.id)
-    .map(ne => ({ id: ne.id, contact_id: ne.source_id, role: ne.notes || NETWORK_EDGE_RELATIONSHIPS.find(r => r.id === ne.relationship)?.label, contact: contacts.find(c => c.id === ne.source_id), source: "edge" }))
-    .filter(p => p.contact && !junctionPeople.some(jp => jp.contact_id === p.contact_id));
-  const peopleNorm = [...junctionPeople, ...edgePeople];
-  const filtered = activities
-    .filter(a => filter === "all" || a.type === filter)
-    .filter(a => !personFilter || a.contact_id === personFilter)
-    .slice().reverse();
-  const filteredPersonName = personFilter ? peopleNorm.find(p => p.contact_id === personFilter)?.contact?.name : null;
-
-  return (
-    <div className="deal-sheet">
-      <button onClick={onBack} className="sheet-back">← Back to Enablers</button>
-
-      <div className="sheet-top">
-        <div className="sheet-top-row">
-          <div>
-            <div className="sheet-company">{enabler.name}</div>
-            <div className="sheet-meta-row">
-              {type && <span className="badge" style={{background:type.color+"22",color:type.color,border:`1px solid ${type.color}44`}}>{type.label}</span>}
-            </div>
-            {enabler.contact_name && <div className="sheet-contact">{enabler.contact_name}</div>}
-          </div>
-          <div className="sheet-actions">
-            <button onClick={() => onEdit(enabler)} className="btn-sec">Edit</button>
-            <button onClick={() => { if (confirm("Delete this enabler?")) onDelete(enabler.id); }} className="btn-sec btn-danger">Delete</button>
-          </div>
-        </div>
-        {enabler.notes && <div className="detail-notes sheet-notes">{enabler.notes}</div>}
-      </div>
-
-      <SummaryCard
-        entity={enabler}
-        activities={activities}
-        onGenerateSummary={onGenerateSummary}
-        onSaveSummary={onSaveSummary}
-        summarizing={summarizing}
-      />
-
-      <PeopleSection
-        people={peopleNorm}
-        activities={activities}
-        contacts={contacts}
-        roleLabel="Role in Org"
-        selectedContactId={personFilter}
-        onSelectPerson={(id) => setPersonFilter(p => p === id ? null : id)}
-        onAdd={onAddPerson}
-        onRemove={onRemovePerson}
-      />
-
-      <div className="people-section">
-        <div className="ai-summary-header">
-          <div className="section-label">Connected Targets</div>
-          <button onClick={() => setLinkModalOpen(true)} className="btn-copy">+ Link Target</button>
-        </div>
-        {dealEnablers.length === 0 ? (
-          <div className="empty-small">No deals connected yet.</div>
-        ) : (
-          <div className="people-grid">
-            {dealEnablers.map(de => {
-              const d = deals.find(x => x.id === de.deal_id);
-              const rel = DEAL_ENABLER_RELATIONSHIPS.find(r => r.id === de.relationship);
-              const str = STRENGTHS.find(s => s.id === de.strength);
-              if (!d) return null;
-              return (
-                <div key={de.id} className="person-card" onClick={() => onNavigate({ type: "deal", id: d.id })}>
-                  <div className="person-card-top">
-                    <div className="person-name">{d.company}</div>
-                    <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this connection?")) onRemoveConnection(de.id); }} className="person-remove" title="Remove">✕</button>
-                  </div>
-                  <div className="todo-meta-row mb-sm">
-                    {rel && <span className="badge">{rel.label}</span>}
-                    {str && <span className="badge" style={{background:str.color+"22",color:str.color,border:`1px solid ${str.color}44`}}>{str.label}</span>}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-        {linkModalOpen && (
-          <AddConnectionModal
-            deals={deals}
-            enablers={enablers}
-            fixedEnablerId={enabler.id}
-            customOptions={customOptions}
-            onAddCustomOption={onAddCustomOption}
-            onSave={async (form) => { await onAddConnection(form); setLinkModalOpen(false); }}
-            onClose={() => setLinkModalOpen(false)}
-          />
-        )}
-      </div>
-
-      <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
-
-      <QuickAdd
-        enablerId={enabler.id}
-        contactId={enabler.contact_id || null}
-        customOptions={customOptions}
-        onAddCustomOption={onAddCustomOption}
-        onAddActivity={onAddActivity}
-        showToast={showToast}
-      />
-
-      <div className="timeline">
-        <div className="section-label">Activity Timeline</div>
-        {filteredPersonName && (
-          <div className="person-filter-badge">Filtered to {filteredPersonName} <button onClick={() => setPersonFilter(null)} className="person-filter-clear">✕</button></div>
-        )}
-        <div className="timeline-tabs">
-          {TIMELINE_TABS.map(t => (
-            <button key={t.id} onClick={() => setFilter(t.id)} className={`tag-btn ${filter === t.id ? "active" : ""}`}>{t.label}</button>
-          ))}
-        </div>
-        <div className="timeline-list">
-          {filtered.length === 0 && <div className="empty-small">No activities yet</div>}
-          {filtered.map(a => (
-            <div key={a.id} className="timeline-item">
-              <span className="timeline-icon">{ACT_TYPES.find(t => t.id === a.type)?.icon || "."}</span>
-              <div>
-                <div className="act-desc">{a.description}</div>
-                <div className="act-date">{formatDate(a.created_at)}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ContactSheet({ contact, activities, todos, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {}, onEdit, onDelete, onAddActivity, onRemoveRole, onAddTodo, onToggleTodo, onUpdateTodo, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenDeal, onOpenEnabler, onOpenOrganization, onBack }) {
-  const [filter, setFilter] = useState("all");
-  const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
-
-  const resolveInstitution = (entityType, entityId) => {
+// Resolves the full set of institutions a contact holds a role at, reading
+// contact_roles first and falling back to the legacy junction tables / edges /
+// deals.contact_id for pairs not yet covered by a real contact_roles row.
+function resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles }) {
+  const resolve = (entityType, entityId) => {
     if (entityType === "deal") return deals.find(d => d.id === entityId);
     if (entityType === "enabler") return enablers.find(en => en.id === entityId);
     if (entityType === "organization") return organizations.find(o => o.id === entityId);
     return null;
   };
-  const openInstitution = (entityType, entityId) => {
-    if (entityType === "deal") onOpenDeal(entityId);
-    else if (entityType === "enabler") onOpenEnabler(entityId);
-    else if (entityType === "organization") onOpenOrganization(entityId);
-  };
-
-  // contact_roles is the source of truth going forward, but data linked before
-  // it existed only lives in deal_contacts/enabler_contacts/network_edges/the
-  // legacy deals.contact_id field, so those are included as read-only fallbacks
-  // for any (entity_type, entity_id) pair not already covered by a real role row.
   const roleRows = contactRoles.filter(r => r.contact_id === contact.id);
   const covered = new Set(roleRows.map(r => `${r.entity_type}:${r.entity_id}`));
   const fallbackRows = [
-    ...dealContacts.filter(dc => dc.contact_id === contact.id).map(dc => ({ entity_type: "deal", entity_id: dc.deal_id, role_title: dc.role_in_deal, removable: false })),
-    ...deals.filter(d => d.contact_id === contact.id).map(d => ({ entity_type: "deal", entity_id: d.id, role_title: d.contact_role, removable: false })),
-    ...enablerContacts.filter(ec => ec.contact_id === contact.id).map(ec => ({ entity_type: "enabler", entity_id: ec.enabler_id, role_title: ec.role_in_org, removable: false })),
-    ...networkEdges.filter(ne => ne.source_type === "contact" && ne.source_id === contact.id && ne.target_type === "organization").map(ne => ({ entity_type: "organization", entity_id: ne.target_id, role_title: ne.notes, removable: false })),
+    ...dealContacts.filter(dc => dc.contact_id === contact.id).map(dc => ({ entity_type: "deal", entity_id: dc.deal_id, role_title: dc.role_in_deal })),
+    ...deals.filter(d => d.contact_id === contact.id).map(d => ({ entity_type: "deal", entity_id: d.id, role_title: d.contact_role })),
+    ...enablerContacts.filter(ec => ec.contact_id === contact.id).map(ec => ({ entity_type: "enabler", entity_id: ec.enabler_id, role_title: ec.role_in_org })),
+    ...networkEdges.filter(ne => ne.source_type === "contact" && ne.source_id === contact.id && ne.target_type === "organization").map(ne => ({ entity_type: "organization", entity_id: ne.target_id, role_title: ne.notes })),
   ].filter(r => !covered.has(`${r.entity_type}:${r.entity_id}`));
-  const seenFallback = new Set();
-  const roles = [
+  const seen = new Set();
+  return [
     ...roleRows.map(r => ({ ...r, removable: true })),
-    ...fallbackRows.filter(r => { const k = `${r.entity_type}:${r.entity_id}`; if (seenFallback.has(k)) return false; seenFallback.add(k); return true; }),
+    ...fallbackRows.filter(r => { const k = `${r.entity_type}:${r.entity_id}`; if (seen.has(k)) return false; seen.add(k); return true; }).map(r => ({ ...r, removable: false })),
   ]
-    .map(r => ({ ...r, institution: resolveInstitution(r.entity_type, r.entity_id) }))
-    .filter(r => r.institution);
+    .map(r => ({ ...r, institution: resolve(r.entity_type, r.entity_id) }))
+    .filter(r => r.institution)
+    .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
+}
+
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onEdit, onDelete, onAddActivity, onAddRole, onRemoveRole, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack }) {
+  const [filter, setFilter] = useState("all");
+  const [addingRole, setAddingRole] = useState(false);
+  const [roleInst, setRoleInst] = useState("");
+  const [roleTitle, setRoleTitle] = useState("");
+  const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
+  const warmth = WARMTH_LEVELS.find(w => w.id === (contact.warmth || "unknown"));
+
+  const roles = resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles });
+
+  const instOptions = institutions.map(i => {
+    const pe = institutionPrimaryEntity(i);
+    return pe ? { key: `${pe.type}:${pe.id}`, label: `${i.name}${i.type ? ` (${institutionTypeMeta(i.type, customOptions).label})` : ""}` } : null;
+  }).filter(Boolean);
+
+  const submitRole = async () => {
+    if (!roleInst) return;
+    const idx = roleInst.indexOf(":");
+    await onAddRole({ contactId: contact.id, entityType: roleInst.slice(0, idx), entityId: roleInst.slice(idx + 1), roleTitle });
+    setAddingRole(false); setRoleInst(""); setRoleTitle("");
+  };
+
+  // Connections: every network_edge touching this contact, resolved to the other end.
+  const connections = networkEdges
+    .filter(ne => (ne.source_type === "contact" && ne.source_id === contact.id) || (ne.target_type === "contact" && ne.target_id === contact.id))
+    .map(ne => {
+      const isSource = ne.source_type === "contact" && ne.source_id === contact.id;
+      const otherType = isSource ? ne.target_type : ne.source_type;
+      const otherId = isSource ? ne.target_id : ne.source_id;
+      const rel = NETWORK_EDGE_RELATIONSHIPS.find(r => r.id === ne.relationship)?.label || ne.relationship;
+      if (otherType === "contact") {
+        const other = contacts.find(c => c.id === otherId);
+        return other ? { id: ne.id, label: other.name, rel, onClick: () => onOpenPerson(other.id) } : null;
+      }
+      const other = otherType === "deal" ? deals.find(d => d.id === otherId) : otherType === "enabler" ? enablers.find(e => e.id === otherId) : organizations.find(o => o.id === otherId);
+      if (!other) return null;
+      const name = otherType === "deal" ? other.company : other.name;
+      return { id: ne.id, label: name, rel, onClick: () => onOpenInstitution(name) };
+    })
+    .filter(Boolean);
 
   return (
     <div className="deal-sheet">
-      <button onClick={onBack} className="sheet-back">← Back to Contacts</button>
+      <button onClick={onBack} className="sheet-back">← Back to Network</button>
 
       <div className="sheet-top">
         <div className="sheet-top-row">
           <div>
-            <div className="sheet-company">{contact.name}</div>
-            {(contact.role || contact.company) && (
-              <div className="sheet-contact">{contact.role}{contact.role && contact.company ? " . " : ""}{contact.company}</div>
-            )}
+            <div className="sheet-company"><span className="warmth-dot warmth-dot-lg" style={{background: warmth?.color}} title={`Warmth: ${warmth?.label}`} />{contact.name}</div>
             <div className="contact-details mb-sm">
               {contact.email && <div>📧 {contact.email}</div>}
               {contact.phone && <div>📞 {contact.phone}</div>}
               {contact.linkedin && <div>🔗 {contact.linkedin}</div>}
-              {contact.source && <div className="source-text">Source: {contact.source}</div>}
             </div>
             {(contact.tags || []).length > 0 && <div className="tags-row">{contact.tags.map(t => <span key={t} className="tag">{t}</span>)}</div>}
           </div>
           <div className="sheet-actions">
             <button onClick={() => onEdit(contact)} className="btn-sec">Edit</button>
-            <button onClick={() => { if (confirm("Delete this contact?")) onDelete(contact.id); }} className="btn-sec btn-danger">Delete</button>
+            <button onClick={() => { if (confirm("Delete this person?")) onDelete(contact.id); }} className="btn-sec btn-danger">Delete</button>
           </div>
         </div>
         {contact.notes && <div className="detail-notes sheet-notes">{contact.notes}</div>}
       </div>
 
-      <SummaryCard
-        entity={contact}
-        activities={activities}
-        onGenerateSummary={onGenerateSummary}
-        onSaveSummary={onSaveSummary}
-        summarizing={summarizing}
-      />
+      <SummaryCard entity={contact} activities={activities} onGenerateSummary={onGenerateSummary} onSaveSummary={onSaveSummary} summarizing={summarizing} />
 
       <div className="people-section">
-        <div className="section-label">Institutions</div>
+        <div className="ai-summary-header">
+          <div className="section-label">Roles</div>
+          <button onClick={() => setAddingRole(v => !v)} className="btn-copy">{addingRole ? "Cancel" : "+ Add Role"}</button>
+        </div>
+        {addingRole && (
+          <div className="quickadd-inline-row mb-sm">
+            <select className="input" value={roleInst} onChange={e => setRoleInst(e.target.value)}>
+              <option value="">Select institution...</option>
+              {instOptions.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+            </select>
+            <input className="input" placeholder="Role title (e.g. CEO)" value={roleTitle} onChange={e => setRoleTitle(e.target.value)} />
+            <button onClick={submitRole} className="btn-primary" disabled={!roleInst}>Add</button>
+          </div>
+        )}
         {roles.length === 0 ? (
           <div className="empty-small">Not linked to any institution yet.</div>
         ) : (
           <div className="people-grid">
             {roles.map(r => {
-              const name = r.entity_type === "deal" ? r.institution.company : r.institution.name;
-              const badge = r.entity_type === "deal" ? STAGES.find(s => s.id === r.institution.stage)
-                : r.entity_type === "enabler" ? ENABLER_TYPES.find(t => t.id === r.institution.type)
-                : (ORG_TYPES.find(t => t.id === r.institution.type) || INSTITUTION_TYPES.find(t => t.id === r.institution.type));
+              const badge = institutionTypeMeta(r.entity_type === "enabler" ? (r.institution.type || "enabler") : (r.institution.type || ""), customOptions);
+              const stage = r.entity_type === "deal" ? STAGES.find(s => s.id === r.institution.stage) : null;
               return (
-                <div key={`${r.entity_type}-${r.entity_id}`} className="person-card" onClick={() => openInstitution(r.entity_type, r.entity_id)}>
+                <div key={`${r.entity_type}-${r.entity_id}`} className="person-card" onClick={() => onOpenInstitution(r.institutionName)}>
                   <div className="person-card-top">
                     <div>
-                      <div className="person-name">{name}</div>
+                      <div className="person-name">{r.institutionName}</div>
                       {r.role_title && <div className="person-role">{r.role_title}</div>}
                     </div>
                     {r.removable && onRemoveRole && <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this role?")) onRemoveRole(r); }} className="person-remove" title="Remove">✕</button>}
                   </div>
-                  {badge && <span className="badge" style={{background:badge.color+"22",color:badge.color,border:`1px solid ${badge.color}44`}}>{badge.label}</span>}
+                  <div className="todo-meta-row mb-sm">
+                    {r.institution.type && badge && <span className="badge" style={{background:badge.color+"22",color:badge.color,border:`1px solid ${badge.color}44`}}>{badge.label}</span>}
+                    {stage && <span className="badge" style={{background:stage.color+"22",color:stage.color,border:`1px solid ${stage.color}44`}}>{stage.label}</span>}
+                  </div>
                 </div>
               );
             })}
@@ -1885,26 +1705,23 @@ function ContactSheet({ contact, activities, todos, deals, enablers, organizatio
         )}
       </div>
 
-      <TodoSection
-        todos={todos}
-        contacts={[]}
-        deals={deals}
-        enablers={enablers}
-        customOptions={customOptions}
-        onAddCustomOption={onAddCustomOption}
-        onAdd={onAddTodo}
-        onToggle={onToggleTodo}
-        onUpdate={onUpdateTodo}
-        onNavigate={(link) => (link.type === "deal" ? onOpenDeal(link.id) : onOpenEnabler(link.id))}
-      />
+      <div className="people-section">
+        <div className="section-label">Connections</div>
+        {connections.length === 0 ? (
+          <div className="empty-small">No connections logged yet.</div>
+        ) : (
+          <div className="todo-list">
+            {connections.map(c => (
+              <div key={c.id} className="path-row" onClick={c.onClick} style={{ cursor: "pointer" }}>
+                <div className="path-chain">{c.label}</div>
+                <div className="todo-meta-row"><span className="badge">{c.rel}</span></div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
-      <QuickAdd
-        contactId={contact.id}
-        customOptions={customOptions}
-        onAddCustomOption={onAddCustomOption}
-        onAddActivity={onAddActivity}
-        showToast={showToast}
-      />
+      <QuickAdd contactId={contact.id} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} showToast={showToast} />
 
       <div className="timeline">
         <div className="section-label">Activity Timeline</div>
@@ -2351,35 +2168,6 @@ function TaskQuickAdd({ deals, enablers, customOptions = [], onAddCustomOption =
   );
 }
 
-function AddConnectionModal({ deals, enablers, fixedEnablerId, fixedDealId, customOptions = [], onAddCustomOption = () => {}, onSave, onClose }) {
-  const [enablerId, setEnablerId] = useState(fixedEnablerId || "");
-  const [dealId, setDealId] = useState(fixedDealId || "");
-  const [relationship, setRelationship] = useState("can_introduce");
-  const [strength, setStrength] = useState("medium");
-  const [notes, setNotes] = useState("");
-  const relOpts = optionsWithCustom(DEAL_ENABLER_RELATIONSHIPS, customOptions, "relationship_type");
-  const strengthOpts = optionsWithCustom(STRENGTHS.filter(s=>s.id!=="unknown"), customOptions, "strength");
-
-  return (
-    <div className="overlay" onClick={onClose}><div className="modal modal-sm" onClick={e=>e.stopPropagation()}>
-      <div className="modal-header"><div className="modal-title">Add Connection</div><button onClick={onClose} className="close-btn">✕</button></div>
-      {!fixedEnablerId && (
-        <div className="mb-sm"><label className="label">Enabler</label><select className="input" value={enablerId} onChange={e=>setEnablerId(e.target.value)}><option value="">Select...</option>{enablers.map(en=><option key={en.id} value={en.id}>{en.name}</option>)}</select></div>
-      )}
-      {!fixedDealId && (
-        <div className="mb-sm"><label className="label">Deal</label><select className="input" value={dealId} onChange={e=>setDealId(e.target.value)}><option value="">Select...</option>{deals.map(d=><option key={d.id} value={d.id}>{d.company}</option>)}</select></div>
-      )}
-      <div className="mb-sm"><label className="label">Relationship</label><SelectWithCustom options={relOpts} value={relationship} onChange={(v)=>{setRelationship(v); trackCustom("relationship_type", relOpts, onAddCustomOption)(v);}} /></div>
-      <div className="mb-sm"><label className="label">Strength</label><SelectWithCustom options={strengthOpts} value={strength} onChange={(v)=>{setStrength(v); trackCustom("strength", strengthOpts, onAddCustomOption)(v);}} /></div>
-      <div className="mb-sm"><label className="label">Notes</label><textarea className="input textarea" value={notes} onChange={e=>setNotes(e.target.value)} /></div>
-      <div className="modal-actions">
-        <button onClick={onClose} className="btn-sec">Cancel</button>
-        <button onClick={() => enablerId && dealId && onSave({ enabler_id: enablerId, deal_id: dealId, relationship, strength, notes })} className="btn-primary" disabled={!enablerId || !dealId}>Add</button>
-      </div>
-    </div></div>
-  );
-}
-
 
 // Traverses network_edges outward from a deal (and its matching organization, if any)
 // up to 2 hops, to surface indirect paths in, e.g. "BECO Capital > Sahab > NUPCO".
@@ -2447,48 +2235,6 @@ function findNetworkPaths(deal, rootOrg, networkEdges, organizations, enablers, 
 }
 
 
-function OrganizationForm({ organization, customOptions = [], onAddCustomOption = () => {}, onSave, onClose }) {
-  const isEdit = !!organization.id;
-  const [f, setF] = useState({
-    id: organization.id || "",
-    name: organization.name || "",
-    type: organization.type || "competitor",
-    city: organization.city || "",
-    region: organization.region || "",
-    country: organization.country || "Saudi Arabia",
-    sector: organization.sector || "",
-    address: organization.address || "",
-    description: organization.description || "",
-    website: organization.website || "",
-    notes: organization.notes || "",
-  });
-  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
-  const typeOpts = optionsWithCustom(INSTITUTION_TYPES.filter((t) => t.id !== "target" && t.id !== "enabler"), customOptions, "institution_type");
-  const cityOpts = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
-  const regionOpts = optionsWithCustom(REGION_OPTIONS, customOptions, "region");
-  return (
-    <div className="overlay" onClick={onClose}><div className="modal" onClick={e => e.stopPropagation()}>
-      <div className="modal-header"><div className="modal-title">{isEdit ? "Edit Organization" : "New Organization"}</div><button onClick={onClose} className="close-btn">✕</button></div>
-      <div className="form-grid">
-        <div className="field-full"><label className="label">Name *</label><input className="input" value={f.name} onChange={e=>set("name",e.target.value)} /></div>
-        <div className="field"><label className="label">Type</label><SelectWithCustom options={typeOpts} value={f.type} onChange={(v)=>{set("type",v); trackCustom("institution_type", typeOpts, onAddCustomOption)(v);}} /></div>
-        <div className="field"><label className="label">Sector</label><input className="input" value={f.sector} onChange={e=>set("sector",e.target.value)} /></div>
-        <div className="field"><label className="label">City</label><SelectWithCustom options={cityOpts} value={f.city} onChange={(v)=>{set("city",v); trackCustom("city", cityOpts, onAddCustomOption)(v);}} placeholder="City name..." /></div>
-        <div className="field"><label className="label">Region</label><SelectWithCustom options={regionOpts} value={f.region} onChange={(v)=>{set("region",v); trackCustom("region", regionOpts, onAddCustomOption)(v);}} placeholder="Region name..." /></div>
-        <div className="field-full"><label className="label">Country</label><input className="input" value={f.country} onChange={e=>set("country",e.target.value)} /></div>
-        <div className="field-full"><label className="label">Address</label><input className="input" value={f.address} onChange={e=>set("address",e.target.value)} /></div>
-        <div className="field-full"><label className="label">Website</label><input className="input" value={f.website} onChange={e=>set("website",e.target.value)} placeholder="https://..." /></div>
-        <div className="field-full"><label className="label">Description</label><textarea className="input textarea" value={f.description} onChange={e=>set("description",e.target.value)} /></div>
-        <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={f.notes} onChange={e=>set("notes",e.target.value)} /></div>
-      </div>
-      <div className="modal-actions">
-        <button onClick={onClose} className="btn-sec">Cancel</button>
-        <button onClick={() => f.name.trim() && onSave(f)} className="btn-primary" disabled={!f.name.trim()}>{isEdit ? "Save" : "Add Organization"}</button>
-      </div>
-    </div></div>
-  );
-}
-
 function AddOrgLinkModal({ title, pickLabel, entityOptions, showRole, customOptions = [], onAddCustomOption = () => {}, onSave, onClose }) {
   const [entityId, setEntityId] = useState("");
   const [relationship, setRelationship] = useState("knows");
@@ -2525,479 +2271,10 @@ function AddOrgLinkModal({ title, pickLabel, entityOptions, showRole, customOpti
   );
 }
 
-function OrganizationSheet({
-  organization, activities, contacts, deals, enablers, organizations,
-  dealContacts, enablerContacts, networkEdges, contactRoles,
-  customOptions = [], onAddCustomOption = () => {},
-  onEdit, onDelete, onAddActivity,
-  onAddConnection, onRemoveNetworkEdge, onRemoveRole, onGenerateSummary, onSaveSummary, summarizing, showToast,
-  onOpenContact, onOpenDeal, onOpenEnabler, onOpenOrganization, onBack,
-}) {
-  const [filter, setFilter] = useState("all");
-  const [addPersonOpen, setAddPersonOpen] = useState(false);
-  const [addOrgOpen, setAddOrgOpen] = useState(false);
-  const [addDealOpen, setAddDealOpen] = useState(false);
-  const [addEnablerOpen, setAddEnablerOpen] = useState(false);
-
-  const t = ORG_TYPES.find(x => x.id === organization.type) || INSTITUTION_TYPES.find(x => x.id === organization.type);
-  const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
-
-  const keyPeopleRoles = contactRoles.filter(r => r.entity_type === "organization" && r.entity_id === organization.id);
-  const keyPeopleEdges = networkEdges.filter(ne => ne.target_type === "organization" && ne.target_id === organization.id && ne.source_type === "contact");
-  const matchedDeal = deals.find(d => (d.company || "").toLowerCase() === organization.name.toLowerCase());
-  const matchedEnabler = enablers.find(en => (en.name || "").toLowerCase() === organization.name.toLowerCase());
-  const keyPeopleRaw = [
-    ...keyPeopleRoles.map(r => ({ contactId: r.contact_id, role: r.role_title, removeId: r.id, removable: true, source: "role" })),
-    ...keyPeopleEdges.map(ne => ({ contactId: ne.source_id, role: ne.notes || NETWORK_EDGE_RELATIONSHIPS.find(r => r.id === ne.relationship)?.label, removeId: ne.id, removable: true, source: "edge" })),
-    ...(matchedDeal ? dealContacts.filter(dc => dc.deal_id === matchedDeal.id).map(dc => ({ contactId: dc.contact_id, role: dc.role_in_deal, removable: false })) : []),
-    ...(matchedEnabler ? enablerContacts.filter(ec => ec.enabler_id === matchedEnabler.id).map(ec => ({ contactId: ec.contact_id, role: ec.role_in_org, removable: false })) : []),
-  ];
-  const seenIds = new Set();
-  const keyPeople = keyPeopleRaw
-    .filter(p => { if (seenIds.has(p.contactId)) return false; seenIds.add(p.contactId); return true; })
-    .map(p => ({ ...p, contact: contacts.find(c => c.id === p.contactId) }))
-    .filter(p => p.contact);
-
-  // "Also at" lines: every OTHER institution a key person here also holds a role at.
-  const alsoAt = (contactId) => contactRoles
-    .filter(r => r.contact_id === contactId && !(r.entity_type === "organization" && r.entity_id === organization.id))
-    .map(r => {
-      const inst = r.entity_type === "deal" ? deals.find(d => d.id === r.entity_id)
-        : r.entity_type === "enabler" ? enablers.find(e => e.id === r.entity_id)
-        : organizations.find(o => o.id === r.entity_id);
-      if (!inst) return null;
-      const name = r.entity_type === "deal" ? inst.company : inst.name;
-      return { name, role: r.role_title };
-    })
-    .filter(Boolean);
-
-  const otherEndOfEdge = (ne, kind) => {
-    const isSource = ne.source_type === "organization" && ne.source_id === organization.id;
-    const otherType = isSource ? ne.target_type : ne.source_type;
-    const otherId = isSource ? ne.target_id : ne.source_id;
-    return otherType === kind ? otherId : null;
-  };
-  const touchesOrg = (ne, kind) => (ne.source_type === "organization" && ne.source_id === organization.id && ne.target_type === kind)
-    || (ne.target_type === "organization" && ne.target_id === organization.id && ne.source_type === kind);
-
-  const connectedOrgs = networkEdges.filter(ne => touchesOrg(ne, "organization"))
-    .map(ne => { const id = otherEndOfEdge(ne, "organization"); const org = organizations.find(o => o.id === id); return org ? { org, edge: ne } : null; })
-    .filter(Boolean);
-  const connectedDeals = networkEdges.filter(ne => touchesOrg(ne, "deal"))
-    .map(ne => { const id = otherEndOfEdge(ne, "deal"); const deal = deals.find(d => d.id === id); return deal ? { deal, edge: ne } : null; })
-    .filter(Boolean);
-  const connectedEnablers = networkEdges.filter(ne => touchesOrg(ne, "enabler"))
-    .map(ne => { const id = otherEndOfEdge(ne, "enabler"); const enabler = enablers.find(e => e.id === id); return enabler ? { enabler, edge: ne } : null; })
-    .filter(Boolean);
-
-  // Auto-detected connections: other institutions that share one of this
-  // organization's key people, and aren't already an explicit connection above.
-  const sharedPersonConnections = (() => {
-    const myContactIds = new Set(keyPeople.map(p => p.contact.id));
-    const seen = new Set();
-    const results = [];
-    contactRoles
-      .filter(r => myContactIds.has(r.contact_id) && !(r.entity_type === "organization" && r.entity_id === organization.id))
-      .forEach(r => {
-        const key = `${r.entity_type}:${r.entity_id}`;
-        if (seen.has(key)) return;
-        if (r.entity_type === "organization" && connectedOrgs.some(c => c.org.id === r.entity_id)) return;
-        if (r.entity_type === "deal" && connectedDeals.some(c => c.deal.id === r.entity_id)) return;
-        if (r.entity_type === "enabler" && connectedEnablers.some(c => c.enabler.id === r.entity_id)) return;
-        let inst = null;
-        if (r.entity_type === "deal") inst = deals.find(d => d.id === r.entity_id);
-        else if (r.entity_type === "enabler") inst = enablers.find(e => e.id === r.entity_id);
-        else inst = organizations.find(o => o.id === r.entity_id);
-        if (!inst) return;
-        seen.add(key);
-        const contactName = contacts.find(c => c.id === r.contact_id)?.name || "a shared contact";
-        results.push({
-          key,
-          name: r.entity_type === "deal" ? inst.company : inst.name,
-          via: contactName,
-          role: r.role_title,
-          onClick: r.entity_type === "deal" ? () => onOpenDeal(inst.id) : r.entity_type === "enabler" ? () => onOpenEnabler(inst.id) : () => onOpenOrganization(inst.id),
-        });
-      });
-    return results;
-  })();
-
-  const handleGenerateSummary = (org, acts) => onGenerateSummary(org, acts, keyPeople.map(p => p.contact.name));
-
-  return (
-    <div className="deal-sheet">
-      <button onClick={onBack} className="sheet-back">← Back to Network</button>
-
-      <div className="sheet-top">
-        <div className="sheet-top-row">
-          <div>
-            <div className="sheet-company">{organization.name}</div>
-            <div className="sheet-meta-row">
-              {t && <span className="badge" style={{background:t.color+"22",color:t.color,border:`1px solid ${t.color}44`}}>{t.label}</span>}
-              {organization.city && <span className="city-pin">📍 {organization.city}{organization.region ? `, ${organization.region}` : ""}</span>}
-            </div>
-            {organization.sector && <div className="sheet-contact">{organization.sector}</div>}
-            {organization.website && <div className="sheet-contact"><a href={organization.website} target="_blank" rel="noreferrer" className="task-link">{organization.website}</a></div>}
-          </div>
-          <div className="sheet-actions">
-            <button onClick={() => onEdit(organization)} className="btn-sec">Edit</button>
-            <button onClick={() => { if (confirm("Delete this organization?")) onDelete(organization.id); }} className="btn-sec btn-danger">Delete</button>
-          </div>
-        </div>
-        {organization.description && <div className="detail-notes sheet-notes">{organization.description}</div>}
-        {organization.notes && <div className="detail-notes sheet-notes">{organization.notes}</div>}
-      </div>
-
-      <SummaryCard
-        entity={organization}
-        activities={activities}
-        onGenerateSummary={handleGenerateSummary}
-        onSaveSummary={onSaveSummary}
-        summarizing={summarizing}
-      />
-
-      <div className="people-section">
-        <div className="ai-summary-header">
-          <div className="section-label">Key People</div>
-          <button onClick={() => setAddPersonOpen(true)} className="btn-copy">+ Add Person</button>
-        </div>
-        {keyPeople.length === 0 ? (
-          <div className="empty-small">No key people linked yet.</div>
-        ) : (
-          <div className="people-grid">
-            {keyPeople.map(p => {
-              const warmth = WARMTH_LEVELS.find(w => w.id === (p.contact.warmth || "unknown"));
-              const others = alsoAt(p.contact.id);
-              return (
-                <div key={p.contactId} className="person-card" onClick={() => onOpenContact(p.contact.id)}>
-                  <div className="person-card-top">
-                    <div>
-                      <div className="person-name"><span className="warmth-dot" style={{background:warmth?.color}} />{p.contact.name}</div>
-                      {p.role && <div className="person-role">{p.role}</div>}
-                    </div>
-                    {p.removable && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (!confirm(`Remove ${p.contact.name}?`)) return;
-                          if (p.source === "role") onRemoveRole({ id: p.removeId, contact_id: p.contactId, entity_type: "organization", entity_id: organization.id });
-                          else onRemoveNetworkEdge(p.removeId);
-                        }}
-                        className="person-remove"
-                        title="Remove"
-                      >✕</button>
-                    )}
-                  </div>
-                  {others.length > 0 && (
-                    <div className="also-at">Also at: {others.map((o, i) => <span key={i}>{o.name}{o.role ? ` (${o.role})` : ""}{i < others.length - 1 ? ", " : ""}</span>)}</div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-        {addPersonOpen && (
-          <AddOrgLinkModal
-            title="Add Person"
-            pickLabel="Contact"
-            entityOptions={contacts.filter(c => !keyPeople.some(p => p.contactId === c.id)).map(c => ({ id: c.id, label: c.name }))}
-            showRole
-            customOptions={customOptions}
-            onAddCustomOption={onAddCustomOption}
-            onSave={async (f) => {
-              await onAddConnection({ aType: "contact", aId: f.entityId, bType: "organization", bId: organization.id, relationship: f.relationship, role: f.role, strength: f.strength, notes: f.notes });
-              setAddPersonOpen(false);
-            }}
-            onClose={() => setAddPersonOpen(false)}
-          />
-        )}
-      </div>
-
-      {sharedPersonConnections.length > 0 && (
-        <div className="people-section">
-          <div className="section-label">Also Connected (via shared people)</div>
-          <div className="todo-list">
-            {sharedPersonConnections.map(c => (
-              <div key={c.key} className="path-row" onClick={c.onClick} style={{ cursor: "pointer" }}>
-                <div className="path-chain">Connected to {c.name} through {c.via}{c.role ? ` (${c.role})` : ""}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div className="people-section">
-        <div className="ai-summary-header">
-          <div className="section-label">Connected Organizations</div>
-          <button onClick={() => setAddOrgOpen(true)} className="btn-copy">+ Connect Organization</button>
-        </div>
-        {connectedOrgs.length === 0 ? (
-          <div className="empty-small">No connected organizations.</div>
-        ) : (
-          <div className="people-grid">
-            {connectedOrgs.map(({ org, edge }) => {
-              const ot = ORG_TYPES.find(x => x.id === org.type) || INSTITUTION_TYPES.find(x => x.id === org.type);
-              const rel = NETWORK_EDGE_RELATIONSHIPS.find(r => r.id === edge.relationship);
-              return (
-                <div key={edge.id} className="person-card" onClick={() => onOpenOrganization(org.id)}>
-                  <div className="person-card-top">
-                    <div className="person-name">{org.name}</div>
-                    <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this connection?")) onRemoveNetworkEdge(edge.id); }} className="person-remove" title="Remove">✕</button>
-                  </div>
-                  <div className="todo-meta-row mb-sm">
-                    {ot && <span className="badge" style={{background:ot.color+"22",color:ot.color,border:`1px solid ${ot.color}44`}}>{ot.label}</span>}
-                    {rel && <span className="badge">{rel.label}</span>}
-                  </div>
-                  {edge.notes && <div className="connection-notes">{edge.notes}</div>}
-                </div>
-              );
-            })}
-          </div>
-        )}
-        {addOrgOpen && (
-          <AddOrgLinkModal
-            title="Connect Organization"
-            pickLabel="Organization"
-            entityOptions={organizations.filter(o => o.id !== organization.id).map(o => ({ id: o.id, label: o.name }))}
-            customOptions={customOptions}
-            onAddCustomOption={onAddCustomOption}
-            onSave={async (f) => {
-              await onAddConnection({ aType: "organization", aId: organization.id, bType: "organization", bId: f.entityId, relationship: f.relationship, strength: f.strength, notes: f.notes });
-              setAddOrgOpen(false);
-            }}
-            onClose={() => setAddOrgOpen(false)}
-          />
-        )}
-      </div>
-
-      <div className="people-section">
-        <div className="ai-summary-header">
-          <div className="section-label">Connected Deals</div>
-          <button onClick={() => setAddDealOpen(true)} className="btn-copy">+ Connect Deal</button>
-        </div>
-        {connectedDeals.length === 0 ? (
-          <div className="empty-small">No connected deals.</div>
-        ) : (
-          <div className="people-grid">
-            {connectedDeals.map(({ deal, edge }) => {
-              const s = STAGES.find(x => x.id === deal.stage);
-              return (
-                <div key={edge.id} className="person-card" onClick={() => onOpenDeal(deal.id)}>
-                  <div className="person-card-top">
-                    <div className="person-name">{deal.company}</div>
-                    <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this connection?")) onRemoveNetworkEdge(edge.id); }} className="person-remove" title="Remove">✕</button>
-                  </div>
-                  {s && <span className="badge" style={{background:s.color+"22",color:s.color,border:`1px solid ${s.color}44`}}>{s.label}</span>}
-                </div>
-              );
-            })}
-          </div>
-        )}
-        {addDealOpen && (
-          <AddOrgLinkModal
-            title="Connect Deal"
-            pickLabel="Deal"
-            entityOptions={deals.map(d => ({ id: d.id, label: d.company }))}
-            customOptions={customOptions}
-            onAddCustomOption={onAddCustomOption}
-            onSave={async (f) => {
-              await onAddConnection({ aType: "organization", aId: organization.id, bType: "deal", bId: f.entityId, relationship: f.relationship, strength: f.strength, notes: f.notes });
-              setAddDealOpen(false);
-            }}
-            onClose={() => setAddDealOpen(false)}
-          />
-        )}
-      </div>
-
-      <div className="people-section">
-        <div className="ai-summary-header">
-          <div className="section-label">Connected Enablers</div>
-          <button onClick={() => setAddEnablerOpen(true)} className="btn-copy">+ Connect Enabler</button>
-        </div>
-        {connectedEnablers.length === 0 ? (
-          <div className="empty-small">No connected enablers.</div>
-        ) : (
-          <div className="people-grid">
-            {connectedEnablers.map(({ enabler, edge }) => {
-              const et = ENABLER_TYPES.find(x => x.id === enabler.type);
-              return (
-                <div key={edge.id} className="person-card" onClick={() => onOpenEnabler(enabler.id)}>
-                  <div className="person-card-top">
-                    <div className="person-name">{enabler.name}</div>
-                    <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this connection?")) onRemoveNetworkEdge(edge.id); }} className="person-remove" title="Remove">✕</button>
-                  </div>
-                  {et && <span className="badge enabler-type-badge" style={{background:et.color+"22",color:et.color,border:`1px solid ${et.color}44`}}>{et.label}</span>}
-                </div>
-              );
-            })}
-          </div>
-        )}
-        {addEnablerOpen && (
-          <AddOrgLinkModal
-            title="Connect Enabler"
-            pickLabel="Enabler"
-            entityOptions={enablers.map(en => ({ id: en.id, label: en.name }))}
-            customOptions={customOptions}
-            onAddCustomOption={onAddCustomOption}
-            onSave={async (f) => {
-              await onAddConnection({ aType: "organization", aId: organization.id, bType: "enabler", bId: f.entityId, relationship: f.relationship, strength: f.strength, notes: f.notes });
-              setAddEnablerOpen(false);
-            }}
-            onClose={() => setAddEnablerOpen(false)}
-          />
-        )}
-      </div>
-
-      <QuickAdd
-        organizationId={organization.id}
-        contactId={null}
-        customOptions={customOptions}
-        onAddCustomOption={onAddCustomOption}
-        onAddActivity={onAddActivity}
-        showToast={showToast}
-      />
-
-      <div className="timeline">
-        <div className="section-label">Activity Timeline</div>
-        <div className="timeline-tabs">
-          {TIMELINE_TABS.map(tb => (
-            <button key={tb.id} onClick={() => setFilter(tb.id)} className={`tag-btn ${filter === tb.id ? "active" : ""}`}>{tb.label}</button>
-          ))}
-        </div>
-        <div className="timeline-list">
-          {filtered.length === 0 && <div className="empty-small">No activities yet</div>}
-          {filtered.map(a => (
-            <div key={a.id} className="timeline-item">
-              <span className="timeline-icon">{ACT_TYPES.find(t2 => t2.id === a.type)?.icon || "."}</span>
-              <div>
-                <div className="act-desc">{a.description}</div>
-                <div className="act-date">{formatDate(a.created_at)}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function InstitutionForm({ customOptions = [], onAddCustomOption = () => {}, onSave, onCancel }) {
-  const [f, setF] = useState({ name: "", type: "competitor", city: "", region: "", sector: "", description: "", website: "" });
-  const [saving, setSaving] = useState(false);
-  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
-  const typeOpts = optionsWithCustom(INSTITUTION_TYPES, customOptions, "institution_type");
-  const cityOpts = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
-  const regionOpts = optionsWithCustom(REGION_OPTIONS, customOptions, "region");
-
-  const submit = async () => {
-    if (!f.name.trim() || saving) return;
-    setSaving(true);
-    try { await onSave(f); } finally { setSaving(false); }
-  };
-
-  return (
-    <div className="quickadd-inline-form">
-      <div className="form-grid">
-        <div className="field-full"><label className="label">Name *</label><input className="input" value={f.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. NUPCO" /></div>
-        <div className="field"><label className="label">Type</label><SelectWithCustom options={typeOpts} value={f.type} onChange={(v)=>{set("type",v); trackCustom("institution_type", typeOpts, onAddCustomOption)(v);}} /></div>
-        <div className="field"><label className="label">City</label><SelectWithCustom options={cityOpts} value={f.city} onChange={(v)=>{set("city",v); trackCustom("city", cityOpts, onAddCustomOption)(v);}} placeholder="City name..." /></div>
-        <div className="field"><label className="label">Region</label><SelectWithCustom options={regionOpts} value={f.region} onChange={(v)=>{set("region",v); trackCustom("region", regionOpts, onAddCustomOption)(v);}} placeholder="Region name..." /></div>
-        <div className="field"><label className="label">Sector</label><input className="input" value={f.sector} onChange={e=>set("sector",e.target.value)} placeholder="e.g. Oncology, Fintech" /></div>
-        <div className="field-full"><label className="label">Website</label><input className="input" value={f.website} onChange={e=>set("website",e.target.value)} placeholder="https://..." /></div>
-        <div className="field-full"><label className="label">Description</label><textarea className="input textarea" value={f.description} onChange={e=>set("description",e.target.value)} /></div>
-      </div>
-      <div className="modal-actions">
-        <button onClick={onCancel} className="btn-sec">Cancel</button>
-        <button onClick={submit} className="btn-primary" disabled={!f.name.trim() || saving}>Save</button>
-      </div>
-    </div>
-  );
-}
-
-function buildInstitutionOptions(deals, enablers, organizations) {
-  return [
-    ...deals.map(d => ({ key: `deal:${d.id}`, label: `${d.company} (Target)` })),
-    ...enablers.map(en => ({ key: `enabler:${en.id}`, label: `${en.name} (Enabler)` })),
-    ...organizations.map(o => ({ key: `organization:${o.id}`, label: `${o.name} (${(ORG_TYPES.find(t=>t.id===o.type) || INSTITUTION_TYPES.find(t=>t.id===o.type))?.label || "Organization"})` })),
-  ];
-}
-
-function PersonForm({ deals, enablers, organizations, customOptions = [], onAddCustomOption = () => {}, onSave, onCancel }) {
-  const institutionOptions = buildInstitutionOptions(deals, enablers, organizations);
-  const [name, setName] = useState("");
-  const [role, setRole] = useState("");
-  const [institutionKey, setInstitutionKey] = useState("");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [warmth, setWarmth] = useState("unknown");
-  const [extraRoles, setExtraRoles] = useState([]);
-  const [saving, setSaving] = useState(false);
-  const warmthOpts = optionsWithCustom(WARMTH_LEVELS, customOptions, "warmth");
-
-  const addExtraRole = () => setExtraRoles(prev => [...prev, { institutionKey: "", role: "" }]);
-  const updateExtraRole = (i, patch) => setExtraRoles(prev => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
-  const removeExtraRole = (i) => setExtraRoles(prev => prev.filter((_, idx) => idx !== i));
-
-  const submit = async () => {
-    if (!name.trim() || saving) return;
-    setSaving(true);
-    try {
-      await onSave({ name, email, phone, warmth, roles: [{ institutionKey, role }, ...extraRoles] });
-    } finally { setSaving(false); }
-  };
-
-  return (
-    <div className="quickadd-inline-form">
-      <div className="form-grid">
-        <div className="field"><label className="label">Name *</label><input className="input" value={name} onChange={e=>setName(e.target.value)} /></div>
-        <div className="field"><label className="label">Role</label><input className="input" value={role} onChange={e=>setRole(e.target.value)} placeholder="e.g. CEO, Head of Oncology" /></div>
-        <div className="field-full">
-          <label className="label">Institution</label>
-          <select className="input" value={institutionKey} onChange={e=>setInstitutionKey(e.target.value)}>
-            <option value="">Select...</option>
-            {institutionOptions.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
-          </select>
-        </div>
-        <div className="field"><label className="label">Email</label><input className="input" type="email" value={email} onChange={e=>setEmail(e.target.value)} /></div>
-        <div className="field"><label className="label">Phone</label><input className="input" value={phone} onChange={e=>setPhone(e.target.value)} /></div>
-        <div className="field-full"><label className="label">Warmth</label><ButtonGroupWithCustom options={warmthOpts} value={warmth} onChange={(v)=>{setWarmth(v); trackCustom("warmth", warmthOpts, onAddCustomOption)(v);}} renderOption={(w)=><><span className="warmth-dot" style={{background:w.color}} />{w.label}</>} /></div>
-      </div>
-
-      {extraRoles.length > 0 && (
-        <div className="mb-sm">
-          <label className="label">Other roles</label>
-          {extraRoles.map((r, i) => (
-            <div className="quickadd-inline-row" key={i}>
-              <select className="input" value={r.institutionKey} onChange={e => updateExtraRole(i, { institutionKey: e.target.value })}>
-                <option value="">Select institution...</option>
-                {institutionOptions.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
-              </select>
-              <input className="input" placeholder="Role" value={r.role} onChange={e => updateExtraRole(i, { role: e.target.value })} />
-              <button onClick={() => removeExtraRole(i)} className="person-remove" title="Remove role">✕</button>
-            </div>
-          ))}
-        </div>
-      )}
-      <button type="button" onClick={addExtraRole} className="link-btn">+ Add another role</button>
-
-      <div className="modal-actions">
-        <button onClick={onCancel} className="btn-sec">Cancel</button>
-        <button onClick={submit} className="btn-primary" disabled={!name.trim() || saving}>Add Person</button>
-      </div>
-    </div>
-  );
-}
-
-const INSTITUTION_TYPE_PLURALS = {
-  target: "Targets", enabler: "Enablers", competitor: "Competitors", payer: "Payers",
-  government: "Government", regulator: "Regulators", association: "Associations",
-  research: "Research", hospital: "Hospitals", market_player: "Market Players",
-};
-
-// Matches a type value against the known vocabularies case insensitively, so
-// legacy free-typed values (e.g. "Hospital" typed before custom_options
-// existed) still group under the same canonical entry as new lowercase ids.
-function institutionTypeMeta(typeId, customOptions) {
+// Matches a raw type value against the known vocabularies case insensitively, so
+// legacy free-typed values (e.g. "Hospital" typed before custom_options existed)
+// group under the same canonical entry as new lowercase ids.
+function institutionTypeMeta(typeId, customOptions = []) {
   const norm = (typeId || "").trim().toLowerCase();
   const found = INSTITUTION_TYPES.find(t => t.id === norm || t.label.toLowerCase() === norm)
     || ORG_TYPES.find(t => t.id === norm || t.label.toLowerCase() === norm)
@@ -3008,58 +2285,522 @@ function institutionTypeMeta(typeId, customOptions) {
 }
 
 // Canonical grouping key for a raw type value: the matching known id if one
-// exists (case insensitively), otherwise the lowercased raw value so at least
-// same-spelling custom values collapse into a single group.
+// exists (case insensitively), otherwise the lowercased raw value so same-spelled
+// custom values still collapse into a single group.
 function normalizeTypeKey(typeId) {
   const norm = (typeId || "").trim().toLowerCase();
   const known = INSTITUTION_TYPES.find(t => t.id === norm || t.label.toLowerCase() === norm) || ORG_TYPES.find(t => t.id === norm || t.label.toLowerCase() === norm);
   return known ? known.id : norm;
 }
 
-// The unified Network tab: every deal/enabler/organization is treated as an
-// "institution" and grouped by type, with people nested inside as contact_roles.
-function NetworkTab({
-  contacts, deals, enablers, organizations, contactRoles, customOptions,
-  onAddCustomOption, onAddInstitution, onAddPersonWithRoles,
-  onOpenDeal, onOpenEnabler, onOpenOrganization,
+const INSTITUTION_TYPE_PLURALS = {
+  hospital: "Hospitals", vc: "VCs", government: "Government", tech_company: "Tech Companies",
+  payer: "Payers", regulator: "Regulators", association: "Associations", research: "Research",
+  pharmaceutical: "Pharmaceutical",
+};
+
+// Dropdown options for picking an existing institution (one per name), valued by
+// the contact_roles primary entity ("type:id").
+function institutionPickerOptions(institutions, customOptions) {
+  return institutions.map(i => {
+    const pe = institutionPrimaryEntity(i);
+    return pe ? { key: `${pe.type}:${pe.id}`, label: `${i.name}${i.type ? ` (${institutionTypeMeta(i.type, customOptions).label})` : ""}` } : null;
+  }).filter(Boolean);
+}
+
+// Every person linked to an institution, unioning contact_roles across the
+// institution's deal/enabler/organization plus legacy junction rows/edges.
+function institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, networkEdges, contacts }) {
+  const targets = [];
+  if (inst.dealId) targets.push(["deal", inst.dealId]);
+  if (inst.enablerId) targets.push(["enabler", inst.enablerId]);
+  if (inst.orgId) targets.push(["organization", inst.orgId]);
+  const rows = [];
+  contactRoles.forEach(r => { if (targets.some(([t, id]) => r.entity_type === t && r.entity_id === id)) rows.push({ contactId: r.contact_id, role: r.role_title, source: "role", roleRow: r }); });
+  if (inst.dealId) dealContacts.filter(dc => dc.deal_id === inst.dealId).forEach(dc => rows.push({ contactId: dc.contact_id, role: dc.role_in_deal, source: "legacy" }));
+  if (inst.enablerId) enablerContacts.filter(ec => ec.enabler_id === inst.enablerId).forEach(ec => rows.push({ contactId: ec.contact_id, role: ec.role_in_org, source: "legacy" }));
+  if (inst.orgId) networkEdges.filter(ne => ne.source_type === "contact" && ne.target_type === "organization" && ne.target_id === inst.orgId).forEach(ne => rows.push({ contactId: ne.source_id, role: ne.notes, source: "edge", removeId: ne.id }));
+  const seen = new Set();
+  return rows.filter(p => { if (seen.has(p.contactId)) return false; seen.add(p.contactId); return true; })
+    .map(p => ({ ...p, contact: contacts.find(c => c.id === p.contactId) }))
+    .filter(p => p.contact);
+}
+
+function InstitutionSheet({
+  institution: inst, summaryEntity, activities, contacts, deals, enablers, organizations,
+  dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {},
+  onEdit, onDelete, onAddActivity, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
+  onChangeStage, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack,
 }) {
+  const [filter, setFilter] = useState("all");
+  const [addPersonOpen, setAddPersonOpen] = useState(false);
+  const [connectOpen, setConnectOpen] = useState(false);
+  const meta = institutionTypeMeta(inst.type, customOptions);
+  const stageOpts = optionsWithCustom(STAGES, customOptions, "deal_stage");
+  const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
+  const primary = institutionPrimaryEntity(inst);
+
+  const people = institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, networkEdges, contacts });
+  const targets = [["deal", inst.dealId], ["enabler", inst.enablerId], ["organization", inst.orgId]].filter(([, id]) => id);
+  const alsoAt = (contactId) => contactRoles
+    .filter(r => r.contact_id === contactId && !targets.some(([t, id]) => r.entity_type === t && r.entity_id === id))
+    .map(r => {
+      const other = r.entity_type === "deal" ? deals.find(d => d.id === r.entity_id) : r.entity_type === "enabler" ? enablers.find(e => e.id === r.entity_id) : organizations.find(o => o.id === r.entity_id);
+      if (!other) return null;
+      return { name: r.entity_type === "deal" ? other.company : other.name, role: r.role_title };
+    }).filter(Boolean);
+
+  // Explicit org-to-org / org-to-deal / org-to-enabler connections.
+  const touches = (ne, kind) => inst.orgId && ((ne.source_type === "organization" && ne.source_id === inst.orgId && ne.target_type === kind) || (ne.target_type === "organization" && ne.target_id === inst.orgId && ne.source_type === kind));
+  const otherEnd = (ne, kind) => { const isSrc = ne.source_type === "organization" && ne.source_id === inst.orgId; const ot = isSrc ? ne.target_type : ne.source_type; const oid = isSrc ? ne.target_id : ne.source_id; return ot === kind ? oid : null; };
+  const explicitConns = [
+    ...networkEdges.filter(ne => touches(ne, "organization")).map(ne => { const o = organizations.find(x => x.id === otherEnd(ne, "organization")); return o ? { id: ne.id, name: o.name, rel: ne.relationship, removable: true } : null; }),
+    ...networkEdges.filter(ne => touches(ne, "deal")).map(ne => { const d = deals.find(x => x.id === otherEnd(ne, "deal")); return d ? { id: ne.id, name: d.company, rel: ne.relationship, removable: true } : null; }),
+    ...networkEdges.filter(ne => touches(ne, "enabler")).map(ne => { const e = enablers.find(x => x.id === otherEnd(ne, "enabler")); return e ? { id: ne.id, name: e.name, rel: ne.relationship, removable: true } : null; }),
+  ].filter(Boolean);
+
+  // Auto-detected connections through shared people.
+  const sharedConns = (() => {
+    const myIds = new Set(people.map(p => p.contact.id));
+    const seen = new Set(explicitConns.map(c => c.name.toLowerCase()));
+    const out = [];
+    contactRoles.filter(r => myIds.has(r.contact_id) && !targets.some(([t, id]) => r.entity_type === t && r.entity_id === id)).forEach(r => {
+      const other = r.entity_type === "deal" ? deals.find(d => d.id === r.entity_id) : r.entity_type === "enabler" ? enablers.find(e => e.id === r.entity_id) : organizations.find(o => o.id === r.entity_id);
+      if (!other) return;
+      const name = r.entity_type === "deal" ? other.company : other.name;
+      if (name.toLowerCase() === inst.name.toLowerCase() || seen.has(name.toLowerCase())) return;
+      seen.add(name.toLowerCase());
+      out.push({ key: `${r.entity_type}:${r.entity_id}`, name, via: contacts.find(c => c.id === r.contact_id)?.name || "a shared contact", role: r.role_title });
+    });
+    return out;
+  })();
+
+  const pathsIn = inst.isTarget && inst.deal ? findNetworkPaths(inst.deal, inst.org, networkEdges, organizations, enablers, contacts, contactRoles) : [];
+
+  return (
+    <div className="deal-sheet">
+      <button onClick={onBack} className="sheet-back">← Back to Network</button>
+
+      <div className="sheet-top">
+        <div className="sheet-top-row">
+          <div>
+            <div className="sheet-company">{inst.name}</div>
+            <div className="sheet-meta-row">
+              {inst.type && <span className="badge" style={{background:meta.color+"22",color:meta.color,border:`1px solid ${meta.color}44`}}>{meta.label}</span>}
+              {inst.isTarget && <span className="inst-flag inst-flag-target">● Target</span>}
+              {inst.isEnabler && <span className="inst-flag inst-flag-enabler">● Enabler</span>}
+              {inst.city && <span className="city-pin">📍 {inst.city}{inst.region ? `, ${inst.region}` : ""}</span>}
+            </div>
+            {inst.sector && <div className="sheet-contact">{inst.sector}</div>}
+            {inst.website && <div className="sheet-contact"><a href={inst.website} target="_blank" rel="noreferrer" className="task-link">{inst.website}</a></div>}
+          </div>
+          <div className="sheet-actions">
+            <button onClick={onEdit} className="btn-sec">Edit</button>
+            <button onClick={() => { if (confirm("Delete this institution and all its linked records?")) onDelete(); }} className="btn-sec btn-danger">Delete</button>
+          </div>
+        </div>
+        {inst.isTarget && (
+          <div className="sheet-next inst-stage-row">
+            <span className="next-label">Pipeline stage:</span>
+            <SelectWithCustom className="input inst-stage-select" options={stageOpts} value={inst.stage || "prospecting"} onChange={(v) => { onChangeStage(v); trackCustom("deal_stage", stageOpts, onAddCustomOption)(v); }} />
+          </div>
+        )}
+        {inst.description && <div className="detail-notes sheet-notes">{inst.description}</div>}
+        {inst.notes && <div className="detail-notes sheet-notes">{inst.notes}</div>}
+      </div>
+
+      <SummaryCard entity={summaryEntity} activities={activities} onGenerateSummary={onGenerateSummary} onSaveSummary={onSaveSummary} summarizing={summarizing} />
+
+      <div className="people-section">
+        <div className="ai-summary-header">
+          <div className="section-label">People at {inst.name}</div>
+          <button onClick={() => setAddPersonOpen(v => !v)} className="btn-copy">{addPersonOpen ? "Cancel" : "+ Add Person"}</button>
+        </div>
+        {addPersonOpen && primary && (
+          <InstitutionAddPerson
+            institutionName={inst.name}
+            availableContacts={contacts.filter(c => !people.some(p => p.contactId === c.id))}
+            customOptions={customOptions}
+            onAddCustomOption={onAddCustomOption}
+            onAddExisting={async (contactId, role) => { await onAddPersonRole({ contactId, entityType: primary.type, entityId: primary.id, roleTitle: role }); setAddPersonOpen(false); }}
+            onAddNew={async (form) => { await onAddPersonWithRoles({ ...form, roles: [{ institutionKey: `${primary.type}:${primary.id}`, role: form.role }] }); setAddPersonOpen(false); }}
+          />
+        )}
+        {people.length === 0 ? (
+          <div className="empty-small">No people linked yet.</div>
+        ) : (
+          <div className="people-grid">
+            {people.map(p => {
+              const warmth = WARMTH_LEVELS.find(w => w.id === (p.contact.warmth || "unknown"));
+              const others = alsoAt(p.contact.id);
+              return (
+                <div key={p.contactId} className="person-card" onClick={() => onOpenPerson(p.contact.id)}>
+                  <div className="person-card-top">
+                    <div>
+                      <div className="person-name"><span className="warmth-dot" style={{background:warmth?.color}} />{p.contact.name}</div>
+                      {p.role && <div className="person-role">{p.role}</div>}
+                      {p.contact.email && <div className="person-company">{p.contact.email}</div>}
+                    </div>
+                    {(p.source === "role" || p.source === "edge") && (
+                      <button onClick={(e) => { e.stopPropagation(); if (!confirm(`Remove ${p.contact.name}?`)) return; if (p.source === "role") onRemoveRole(p.roleRow); else onRemoveNetworkEdge(p.removeId); }} className="person-remove" title="Remove">✕</button>
+                    )}
+                  </div>
+                  {others.length > 0 && <div className="also-at">Also: {others.map((o, i) => <span key={i}>{o.role ? `${o.role} at ` : ""}{o.name}{i < others.length - 1 ? ", " : ""}</span>)}</div>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="people-section">
+        <div className="ai-summary-header">
+          <div className="section-label">Connected Institutions</div>
+          {inst.orgId && <button onClick={() => setConnectOpen(true)} className="btn-copy">+ Add Connection</button>}
+        </div>
+        {explicitConns.length === 0 && sharedConns.length === 0 ? (
+          <div className="empty-small">No connected institutions yet.</div>
+        ) : (
+          <div className="todo-list">
+            {explicitConns.map(c => (
+              <div key={c.id} className="path-row">
+                <div className="path-chain" onClick={() => onOpenInstitution(c.name)} style={{ cursor: "pointer" }}>{c.name}</div>
+                <div className="todo-meta-row">
+                  <span className="badge">{NETWORK_EDGE_RELATIONSHIPS.find(r => r.id === c.rel)?.label || c.rel}</span>
+                  <button onClick={() => { if (confirm("Remove this connection?")) onRemoveNetworkEdge(c.id); }} className="person-remove" title="Remove">✕</button>
+                </div>
+              </div>
+            ))}
+            {sharedConns.map(c => (
+              <div key={c.key} className="path-row" onClick={() => onOpenInstitution(c.name)} style={{ cursor: "pointer" }}>
+                <div className="path-chain">Connected to {c.name} through {c.via}{c.role ? ` (${c.role})` : ""}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        {connectOpen && inst.orgId && (
+          <AddOrgLinkModal
+            title="Connect Institution"
+            pickLabel="Institution"
+            entityOptions={organizations.filter(o => o.id !== inst.orgId).map(o => ({ id: o.id, label: o.name }))}
+            customOptions={customOptions}
+            onAddCustomOption={onAddCustomOption}
+            onSave={async (f) => { await onAddConnection({ aType: "organization", aId: inst.orgId, bType: "organization", bId: f.entityId, relationship: f.relationship, strength: f.strength, notes: f.notes }); setConnectOpen(false); }}
+            onClose={() => setConnectOpen(false)}
+          />
+        )}
+      </div>
+
+      {inst.isTarget && (
+        <div className="people-section">
+          <div className="section-label">Paths In</div>
+          {pathsIn.length === 0 ? (
+            <div className="empty-small">No indirect paths found. Add people and connections to surface how you can reach this target.</div>
+          ) : (
+            <div className="todo-list">
+              {pathsIn.slice(0, 5).map(p => (
+                <div key={p.id} className="path-row">
+                  <div className="path-chain">You {p.chain.map((name, i) => <span key={i}>{"> "}{name}{p.via[i] ? ` (${p.via[i]})` : ""}{i < p.chain.length - 1 ? " " : ""}</span>)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <QuickAdd dealId={inst.dealId} enablerId={inst.enablerId} organizationId={inst.orgId} contactId={null} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} showToast={showToast} />
+
+      <div className="timeline">
+        <div className="section-label">Activity Timeline</div>
+        <div className="timeline-tabs">
+          {TIMELINE_TABS.map(tb => <button key={tb.id} onClick={() => setFilter(tb.id)} className={`tag-btn ${filter === tb.id ? "active" : ""}`}>{tb.label}</button>)}
+        </div>
+        <div className="timeline-list">
+          {filtered.length === 0 && <div className="empty-small">No activities yet</div>}
+          {filtered.map(a => (
+            <div key={a.id} className="timeline-item">
+              <span className="timeline-icon">{ACT_TYPES.find(t => t.id === a.type)?.icon || "."}</span>
+              <div><div className="act-desc">{a.description}</div><div className="act-date">{formatDate(a.created_at)}</div></div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Inline "+ Add Person" on the Institution Sheet: pick an existing contact, or
+// (below the divider) create a brand new one, either way linking them here.
+function InstitutionAddPerson({ institutionName, availableContacts, customOptions, onAddCustomOption, onAddExisting, onAddNew }) {
+  const [contactId, setContactId] = useState("");
+  const [existingRole, setExistingRole] = useState("");
+  const [f, setF] = useState({ name: "", role: "", email: "", phone: "", warmth: "unknown" });
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+  const warmthOpts = optionsWithCustom(WARMTH_LEVELS, customOptions, "warmth");
+  return (
+    <div className="quickadd-inline-form">
+      {availableContacts.length > 0 && (
+        <>
+          <div className="quickadd-inline-row">
+            <select className="input" value={contactId} onChange={e => setContactId(e.target.value)}>
+              <option value="">Search existing people...</option>
+              {availableContacts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <input className="input" placeholder={`Role at ${institutionName}`} value={existingRole} onChange={e => setExistingRole(e.target.value)} />
+            <button onClick={() => contactId && onAddExisting(contactId, existingRole)} className="btn-primary" disabled={!contactId}>Add</button>
+          </div>
+          <div className="form-divider">or add someone new</div>
+        </>
+      )}
+      <div className="form-grid">
+        <div className="field"><label className="label">Name *</label><input className="input" value={f.name} onChange={e => set("name", e.target.value)} /></div>
+        <div className="field"><label className="label">Role at {institutionName}</label><input className="input" value={f.role} onChange={e => set("role", e.target.value)} /></div>
+        <div className="field"><label className="label">Email</label><input className="input" type="email" value={f.email} onChange={e => set("email", e.target.value)} /></div>
+        <div className="field"><label className="label">Phone</label><input className="input" value={f.phone} onChange={e => set("phone", e.target.value)} /></div>
+        <div className="field-full"><label className="label">Warmth</label><ButtonGroupWithCustom options={warmthOpts} value={f.warmth} onChange={(v) => { set("warmth", v); trackCustom("warmth", warmthOpts, onAddCustomOption)(v); }} renderOption={(w) => <><span className="warmth-dot" style={{background:w.color}} />{w.label}</>} /></div>
+      </div>
+      <div className="modal-actions">
+        <button onClick={() => f.name.trim() && onAddNew(f)} className="btn-primary" disabled={!f.name.trim()}>Add New Person</button>
+      </div>
+    </div>
+  );
+}
+
+function InstitutionEditModal({ institution: inst, customOptions = [], onAddCustomOption = () => {}, onSave, onClose }) {
+  const [f, setF] = useState({
+    orgId: inst.orgId, dealId: inst.dealId, enablerId: inst.enablerId,
+    name: inst.name || "", type: inst.type || "hospital", city: inst.city || "", region: inst.region || "",
+    sector: inst.sector || "", description: inst.description || "", website: inst.website || "", notes: inst.notes || "",
+    isTarget: !!inst.isTarget, isEnabler: !!inst.isEnabler,
+  });
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+  const typeOpts = optionsWithCustom(INSTITUTION_TYPES, customOptions, "institution_type");
+  const cityOpts = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
+  const regionOpts = optionsWithCustom(REGION_OPTIONS, customOptions, "region");
+  const submit = () => {
+    if (!f.name.trim()) return;
+    if (!f.isTarget && inst.dealId && !confirm("Unchecking Target removes the linked pipeline deal (its people and pipeline stage). Activity history is kept. Continue?")) return;
+    if (!f.isEnabler && inst.enablerId && !confirm("Unchecking Enabler removes the linked enabler record. Activity history is kept. Continue?")) return;
+    onSave(f);
+  };
+  return (
+    <div className="overlay" onClick={onClose}><div className="modal" onClick={e => e.stopPropagation()}>
+      <div className="modal-header"><div className="modal-title">Edit Institution</div><button onClick={onClose} className="close-btn">✕</button></div>
+      <div className="form-grid">
+        <div className="field-full"><label className="label">Name *</label><input className="input" value={f.name} onChange={e => set("name", e.target.value)} /></div>
+        <div className="field"><label className="label">Type</label><SelectWithCustom options={typeOpts} value={f.type} onChange={(v) => { set("type", v); trackCustom("institution_type", typeOpts, onAddCustomOption)(v); }} /></div>
+        <div className="field"><label className="label">Sector</label><input className="input" value={f.sector} onChange={e => set("sector", e.target.value)} /></div>
+        <div className="field"><label className="label">City</label><SelectWithCustom options={cityOpts} value={f.city} onChange={(v) => { set("city", v); trackCustom("city", cityOpts, onAddCustomOption)(v); }} placeholder="City name..." /></div>
+        <div className="field"><label className="label">Region</label><SelectWithCustom options={regionOpts} value={f.region} onChange={(v) => { set("region", v); trackCustom("region", regionOpts, onAddCustomOption)(v); }} placeholder="Region name..." /></div>
+        <div className="field-full checkbox-row">
+          <label className="checkbox-label"><input type="checkbox" checked={f.isTarget} onChange={e => set("isTarget", e.target.checked)} /> Target (a sales/BD target)</label>
+          <label className="checkbox-label"><input type="checkbox" checked={f.isEnabler} onChange={e => set("isEnabler", e.target.checked)} /> Enabler (can help us reach targets)</label>
+        </div>
+        <div className="field-full"><label className="label">Website</label><input className="input" value={f.website} onChange={e => set("website", e.target.value)} placeholder="https://..." /></div>
+        <div className="field-full"><label className="label">Description</label><textarea className="input textarea" value={f.description} onChange={e => set("description", e.target.value)} /></div>
+        <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={f.notes} onChange={e => set("notes", e.target.value)} /></div>
+      </div>
+      <div className="modal-actions">
+        <button onClick={onClose} className="btn-sec">Cancel</button>
+        <button onClick={submit} className="btn-primary" disabled={!f.name.trim()}>Save</button>
+      </div>
+    </div></div>
+  );
+}
+
+function InstitutionForm({ customOptions = [], onAddCustomOption = () => {}, onSave, onCancel }) {
+  const [f, setF] = useState({ name: "", type: "hospital", city: "", region: "", isTarget: false, isEnabler: false, sector: "", description: "", website: "" });
+  const [showMore, setShowMore] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+  const typeOpts = optionsWithCustom(INSTITUTION_TYPES, customOptions, "institution_type");
+  const cityOpts = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
+  const regionOpts = optionsWithCustom(REGION_OPTIONS, customOptions, "region");
+  const submit = async () => {
+    if (!f.name.trim() || saving) return;
+    setSaving(true);
+    try { await onSave(f); } finally { setSaving(false); }
+  };
+  return (
+    <div className="quickadd-inline-form">
+      <div className="form-grid">
+        <div className="field-full"><label className="label">Name *</label><input className="input" value={f.name} onChange={e => set("name", e.target.value)} placeholder="e.g. NUPCO" /></div>
+        <div className="field"><label className="label">Type</label><SelectWithCustom options={typeOpts} value={f.type} onChange={(v) => { set("type", v); trackCustom("institution_type", typeOpts, onAddCustomOption)(v); }} /></div>
+        <div className="field"><label className="label">City</label><SelectWithCustom options={cityOpts} value={f.city} onChange={(v) => { set("city", v); trackCustom("city", cityOpts, onAddCustomOption)(v); }} placeholder="City name..." /></div>
+        <div className="field"><label className="label">Region</label><SelectWithCustom options={regionOpts} value={f.region} onChange={(v) => { set("region", v); trackCustom("region", regionOpts, onAddCustomOption)(v); }} placeholder="Region name..." /></div>
+        <div className="field-full checkbox-row">
+          <label className="checkbox-label"><input type="checkbox" checked={f.isTarget} onChange={e => set("isTarget", e.target.checked)} /> Target (a sales/BD target)</label>
+          <label className="checkbox-label"><input type="checkbox" checked={f.isEnabler} onChange={e => set("isEnabler", e.target.checked)} /> Enabler (can help us reach targets)</label>
+        </div>
+      </div>
+      <button type="button" onClick={() => setShowMore(s => !s)} className="link-btn">{showMore ? "Hide details" : "More details"}</button>
+      {showMore && (
+        <div className="form-grid">
+          <div className="field"><label className="label">Sector</label><input className="input" value={f.sector} onChange={e => set("sector", e.target.value)} placeholder="e.g. Oncology" /></div>
+          <div className="field"><label className="label">Website</label><input className="input" value={f.website} onChange={e => set("website", e.target.value)} placeholder="https://..." /></div>
+          <div className="field-full"><label className="label">Description</label><textarea className="input textarea" value={f.description} onChange={e => set("description", e.target.value)} /></div>
+        </div>
+      )}
+      <div className="modal-actions">
+        <button onClick={onCancel} className="btn-sec">Cancel</button>
+        <button onClick={submit} className="btn-primary" disabled={!f.name.trim() || saving}>Save</button>
+      </div>
+    </div>
+  );
+}
+
+function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOption = () => {}, onSave, onCancel }) {
+  const instOptions = institutionPickerOptions(institutions, customOptions);
+  const typeOpts = optionsWithCustom(INSTITUTION_TYPES, customOptions, "institution_type");
+  const warmthOpts = optionsWithCustom(WARMTH_LEVELS, customOptions, "warmth");
+  const relOpts = optionsWithCustom(CONNECTION_RELATIONSHIPS, customOptions, "relationship");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+  const [warmth, setWarmth] = useState("unknown");
+  const [notes, setNotes] = useState("");
+  const [roles, setRoles] = useState([{ institutionKey: "", role: "", primary: true, newName: "", newType: "hospital" }]);
+  const [showConn, setShowConn] = useState(false);
+  const [connectedThrough, setConnectedThrough] = useState("");
+  const [canReach, setCanReach] = useState("");
+  const [relationship, setRelationship] = useState("can_introduce");
+  const [saving, setSaving] = useState(false);
+
+  const updateRole = (i, patch) => setRoles(prev => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const addRole = () => setRoles(prev => [...prev, { institutionKey: "", role: "", primary: false, newName: "", newType: "hospital" }]);
+  const removeRole = (i) => setRoles(prev => prev.filter((_, idx) => idx !== i));
+  const setPrimary = (i) => setRoles(prev => prev.map((r, idx) => ({ ...r, primary: idx === i })));
+
+  const submit = async () => {
+    if (!name.trim() || saving) return;
+    setSaving(true);
+    try {
+      const ordered = [...roles].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0));
+      const payload = ordered.map(r => r.institutionKey === "__create__"
+        ? { newName: r.newName, newType: r.newType, role: r.role }
+        : { institutionKey: r.institutionKey, role: r.role });
+      await onSave({ name, email, phone, warmth, notes, roles: payload, connectedThrough: connectedThrough || null, canReach: canReach || null, relationship });
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="quickadd-inline-form">
+      <div className="form-grid">
+        <div className="field-full"><label className="label">Name *</label><input className="input" value={name} onChange={e => setName(e.target.value)} /></div>
+      </div>
+
+      <label className="label">Roles</label>
+      {roles.map((r, i) => (
+        <div key={i}>
+          <div className="quickadd-inline-row">
+            <select className="input" value={r.institutionKey} onChange={e => updateRole(i, { institutionKey: e.target.value })}>
+              <option value="">Select institution...</option>
+              {instOptions.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+              <option value="__create__">+ Create new institution</option>
+            </select>
+            <input className="input" placeholder="Role title" value={r.role} onChange={e => updateRole(i, { role: e.target.value })} />
+            <label className="checkbox-label primary-check"><input type="checkbox" checked={r.primary} onChange={() => setPrimary(i)} /> Primary</label>
+            {roles.length > 1 && <button onClick={() => removeRole(i)} className="person-remove" title="Remove role">✕</button>}
+          </div>
+          {r.institutionKey === "__create__" && (
+            <div className="quickadd-inline-row inline-create">
+              <input className="input" placeholder="New institution name" value={r.newName} onChange={e => updateRole(i, { newName: e.target.value })} />
+              <SelectWithCustom options={typeOpts} value={r.newType} onChange={(v) => { updateRole(i, { newType: v }); trackCustom("institution_type", typeOpts, onAddCustomOption)(v); }} />
+            </div>
+          )}
+        </div>
+      ))}
+      <button type="button" onClick={addRole} className="link-btn">+ Add another role</button>
+
+      <div className="conn-toggle-wrap">
+        <button type="button" onClick={() => setShowConn(s => !s)} className="link-btn">{showConn ? "Hide" : "How are they connected to us?"}</button>
+      </div>
+      {showConn && (
+        <div className="form-grid">
+          <div className="field"><label className="label">Connected through</label>
+            <select className="input" value={connectedThrough} onChange={e => setConnectedThrough(e.target.value)}>
+              <option value="">No one specific</option>
+              {contacts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+          <div className="field"><label className="label">Can help us reach</label>
+            <select className="input" value={canReach} onChange={e => setCanReach(e.target.value)}>
+              <option value="">Nothing specific</option>
+              {instOptions.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+            </select>
+          </div>
+          <div className="field-full"><label className="label">Relationship</label><SelectWithCustom options={relOpts} value={relationship} onChange={(v) => { setRelationship(v); trackCustom("relationship", relOpts, onAddCustomOption)(v); }} /></div>
+        </div>
+      )}
+
+      <div className="form-grid">
+        <div className="field"><label className="label">Email</label><input className="input" type="email" value={email} onChange={e => setEmail(e.target.value)} /></div>
+        <div className="field"><label className="label">Phone</label><input className="input" value={phone} onChange={e => setPhone(e.target.value)} /></div>
+        <div className="field-full"><label className="label">Warmth</label><ButtonGroupWithCustom options={warmthOpts} value={warmth} onChange={(v) => { setWarmth(v); trackCustom("warmth", warmthOpts, onAddCustomOption)(v); }} renderOption={(w) => <><span className="warmth-dot" style={{background:w.color}} />{w.label}</>} /></div>
+        <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={notes} onChange={e => setNotes(e.target.value)} /></div>
+      </div>
+
+      <div className="modal-actions">
+        <button onClick={onCancel} className="btn-sec">Cancel</button>
+        <button onClick={submit} className="btn-primary" disabled={!name.trim() || saving}>Add Person</button>
+      </div>
+    </div>
+  );
+}
+
+const NETWORK_SUBTABS = [{ id: "institutions", label: "Institutions" }, { id: "people", label: "People" }];
+
+// The unified Network tab: institutions grouped by type (Institutions sub-tab)
+// and everyone in the ecosystem (People sub-tab). Institutions are the derived
+// name-keyed union of deals/enablers/organizations; people are contacts.
+function NetworkTab({
+  institutions, contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles,
+  customOptions, onAddCustomOption, onAddInstitution, onAddPersonWithRoles, onOpenInstitution, onOpenPerson,
+}) {
+  const [subtab, setSubtab] = useState("institutions");
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [cityFilter, setCityFilter] = useState("");
+  const [targetsOnly, setTargetsOnly] = useState(false);
+  const [enablersOnly, setEnablersOnly] = useState(false);
+  const [warmthFilter, setWarmthFilter] = useState("");
+  const [instFilter, setInstFilter] = useState("");
   const [activeForm, setActiveForm] = useState(null);
-
-  const institutions = [
-    ...deals.map(d => ({ kind: "deal", id: d.id, name: d.company, type: "target", city: d.city, lastActivity: d.last_activity_at })),
-    ...enablers.map(en => ({ kind: "enabler", id: en.id, name: en.name, type: "enabler", city: en.city, lastActivity: en.last_activity_at })),
-    ...organizations.map(o => ({ kind: "organization", id: o.id, name: o.name, type: normalizeTypeKey(o.type), city: o.city, lastActivity: null })),
-  ];
-
-  const peopleFor = (kind, id) => contactRoles
-    .filter(r => r.entity_type === kind && r.entity_id === id)
-    .map(r => ({ name: r.contacts?.name || contacts.find(c => c.id === r.contact_id)?.name, role: r.role_title }))
-    .filter(p => p.name);
-
-  const onOpenInstitution = (inst) => {
-    if (inst.kind === "deal") onOpenDeal(inst.id);
-    else if (inst.kind === "enabler") onOpenEnabler(inst.id);
-    else onOpenOrganization(inst.id);
-  };
 
   const cities = Array.from(new Set(institutions.map(i => i.city).filter(Boolean))).sort();
   const types = Array.from(new Set(institutions.map(i => i.type).filter(Boolean)));
-
-  const q = search.trim().toLowerCase();
-  const filtered = institutions.filter(i => (!typeFilter || i.type === typeFilter) && (!cityFilter || i.city === cityFilter) && (!q || i.name.toLowerCase().includes(q)));
-
   const orderedTypes = [
     ...INSTITUTION_TYPES.map(t => t.id).filter(id => types.includes(id)),
     ...types.filter(id => !INSTITUTION_TYPES.some(t => t.id === id)).sort(),
   ];
 
+  const q = search.trim().toLowerCase();
+  const filteredInst = institutions.filter(i =>
+    (!typeFilter || i.type === typeFilter) &&
+    (!cityFilter || i.city === cityFilter) &&
+    (!targetsOnly || i.isTarget) &&
+    (!enablersOnly || i.isEnabler) &&
+    (!q || i.name.toLowerCase().includes(q)));
+
+  // People sub-tab data: every contact with their resolved roles.
+  const peopleData = contacts.map(c => {
+    const roles = resolveContactRoles(c, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles });
+    const roleStr = roles.map(r => `${r.role_title ? `${r.role_title} at ` : ""}${r.institutionName}`).join(", ");
+    const connCount = roles.length + networkEdges.filter(ne => (ne.source_type === "contact" && ne.source_id === c.id) || (ne.target_type === "contact" && ne.target_id === c.id)).length;
+    const personCities = Array.from(new Set(roles.map(r => (r.entity_type === "deal" ? r.institution.city : r.institution.city)).filter(Boolean)));
+    return { contact: c, roles, roleStr, connCount, cities: personCities };
+  });
+  const filteredPeople = peopleData.filter(p =>
+    (!q || p.contact.name.toLowerCase().includes(q) || p.roleStr.toLowerCase().includes(q)) &&
+    (!warmthFilter || (p.contact.warmth || "unknown") === warmthFilter) &&
+    (!cityFilter || p.cities.includes(cityFilter)) &&
+    (!instFilter || p.roles.some(r => r.institutionName === instFilter)));
+  const instNames = Array.from(new Set(institutions.map(i => i.name))).sort();
+
   return (
     <div className="network-directory">
       <div className="network-top-bar">
-        <input className="input network-search" placeholder="Search institutions..." value={search} onChange={e => setSearch(e.target.value)} />
+        <input className="input network-search" placeholder={`Search ${subtab}...`} value={search} onChange={e => setSearch(e.target.value)} />
         <div className="network-top-buttons">
           <button onClick={() => setActiveForm(a => (a === "institution" ? null : "institution"))} className={`btn-primary ${activeForm === "institution" ? "active-toggle" : ""}`}>+ Institution</button>
           <button onClick={() => setActiveForm(a => (a === "person" ? null : "person"))} className={`btn-primary ${activeForm === "person" ? "active-toggle" : ""}`}>+ Person</button>
@@ -3067,77 +2808,101 @@ function NetworkTab({
       </div>
 
       {activeForm === "institution" && (
-        <InstitutionForm
-          customOptions={customOptions}
-          onAddCustomOption={onAddCustomOption}
-          onCancel={() => setActiveForm(null)}
-          onSave={async (f) => { await onAddInstitution(f); setActiveForm(null); }}
-        />
+        <InstitutionForm customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCancel={() => setActiveForm(null)} onSave={async (f) => { await onAddInstitution(f); setActiveForm(null); }} />
       )}
       {activeForm === "person" && (
-        <PersonForm
-          deals={deals}
-          enablers={enablers}
-          organizations={organizations}
-          customOptions={customOptions}
-          onAddCustomOption={onAddCustomOption}
-          onCancel={() => setActiveForm(null)}
-          onSave={async (f) => { await onAddPersonWithRoles(f); setActiveForm(null); }}
-        />
+        <PersonForm institutions={institutions} contacts={contacts} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCancel={() => setActiveForm(null)} onSave={async (f) => { await onAddPersonWithRoles(f); setActiveForm(null); }} />
       )}
 
-      <div className="network-filter-row">
-        <SelectWithCustom
-          className="input select-filter"
-          options={[{ id: "", label: "All Types" }, ...types.map(id => ({ id, label: institutionTypeMeta(id, customOptions).label }))]}
-          value={typeFilter}
-          onChange={setTypeFilter}
-        />
-        <SelectWithCustom
-          className="input select-filter"
-          options={[{ id: "", label: "All Cities" }, ...toOptions(Array.from(new Set([...SAUDI_CITIES, ...cities])).sort())]}
-          value={cityFilter}
-          onChange={setCityFilter}
-        />
+      <div className="network-subtabs">
+        {NETWORK_SUBTABS.map(t => <button key={t.id} onClick={() => setSubtab(t.id)} className={`subtab ${subtab === t.id ? "active" : ""}`}>{t.label}</button>)}
       </div>
 
-      {filtered.length === 0 ? (
-        <div className="empty-state">No institutions match.</div>
-      ) : (
-        orderedTypes.map(typeId => {
-          const group = filtered.filter(i => i.type === typeId);
-          if (group.length === 0) return null;
-          const meta = institutionTypeMeta(typeId, customOptions);
-          const plural = INSTITUTION_TYPE_PLURALS[typeId] || (meta.label.endsWith("s") ? meta.label : `${meta.label}s`);
-          return (
-            <div key={typeId} className="institution-group">
-              <div className="institution-group-header">{plural.toUpperCase()} ({group.length})</div>
-              <div className="institution-grid">
-                {group.map(inst => {
-                  const people = peopleFor(inst.kind, inst.id);
-                  const preview = people.slice(0, 3);
-                  return (
-                    <div key={`${inst.kind}-${inst.id}`} className="institution-card" onClick={() => onOpenInstitution(inst)}>
-                      <div className="institution-card-top">
-                        <div className="institution-name">{inst.name}</div>
-                        <span className="badge" style={{background:meta.color+"22",color:meta.color,border:`1px solid ${meta.color}44`}}>{meta.label}</span>
-                      </div>
-                      {inst.city && <span className="city-pin">📍 {inst.city}</span>}
-                      <div className="institution-people-count">{people.length} {people.length === 1 ? "person" : "people"}</div>
-                      {preview.length > 0 && (
-                        <div className="institution-people-preview">
-                          {preview.map((p, i) => <div key={i} className="institution-preview-person">{p.name}{p.role ? ` (${p.role})` : ""}</div>)}
+      {subtab === "institutions" ? (
+        <>
+          <div className="network-filter-row">
+            <SelectWithCustom className="input select-filter" options={[{ id: "", label: "All Types" }, ...INSTITUTION_TYPES.filter(t => types.includes(t.id)), ...types.filter(id => !INSTITUTION_TYPES.some(t => t.id === id)).map(id => ({ id, label: institutionTypeMeta(id, customOptions).label }))]} value={typeFilter} onChange={setTypeFilter} />
+            <SelectWithCustom className="input select-filter" options={[{ id: "", label: "All Cities" }, ...toOptions(Array.from(new Set([...SAUDI_CITIES, ...cities])).sort())]} value={cityFilter} onChange={setCityFilter} />
+            <label className="checkbox-label toggle-filter"><input type="checkbox" checked={targetsOnly} onChange={e => setTargetsOnly(e.target.checked)} /> Targets only</label>
+            <label className="checkbox-label toggle-filter"><input type="checkbox" checked={enablersOnly} onChange={e => setEnablersOnly(e.target.checked)} /> Enablers only</label>
+          </div>
+          {filteredInst.length === 0 ? (
+            <div className="empty-state">No institutions match.</div>
+          ) : (
+            orderedTypes.map(typeId => {
+              const group = filteredInst.filter(i => i.type === typeId);
+              if (group.length === 0) return null;
+              const meta = institutionTypeMeta(typeId, customOptions);
+              const plural = INSTITUTION_TYPE_PLURALS[typeId] || (meta.label.endsWith("s") ? meta.label : `${meta.label}s`);
+              return (
+                <div key={typeId || "other"} className="institution-group">
+                  <div className="institution-group-header">{plural.toUpperCase()} ({group.length})</div>
+                  <div className="institution-grid">
+                    {group.map(inst => {
+                      const ppl = institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, networkEdges, contacts });
+                      const preview = ppl.slice(0, 3);
+                      const stage = inst.isTarget ? STAGES.find(s => s.id === inst.stage) : null;
+                      return (
+                        <div key={inst.key} className="institution-card" onClick={() => onOpenInstitution(inst.name)}>
+                          <div className="institution-card-top">
+                            <div className="institution-name">{inst.name}</div>
+                            <span className="badge" style={{background:meta.color+"22",color:meta.color,border:`1px solid ${meta.color}44`}}>{meta.label}</span>
+                          </div>
+                          <div className="institution-flags-row">
+                            {inst.isTarget && <span className="inst-dot inst-dot-target" title="Target" />}
+                            {inst.isEnabler && <span className="inst-dot inst-dot-enabler" title="Enabler" />}
+                            {inst.city && <span className="city-pin">📍 {inst.city}</span>}
+                            {stage && <span className="badge" style={{background:stage.color+"22",color:stage.color,border:`1px solid ${stage.color}44`}}>{stage.label}</span>}
+                          </div>
+                          <div className="institution-people-count">{ppl.length} {ppl.length === 1 ? "person" : "people"}</div>
+                          {preview.length > 0 && (
+                            <div className="institution-people-preview">
+                              {preview.map((p, i) => <div key={i} className="institution-preview-person">{p.contact.name}{p.role ? ` (${p.role})` : ""}</div>)}
+                            </div>
+                          )}
+                          {inst.lastActivity && <div className="institution-last-activity">{daysAgo(inst.lastActivity)}d ago</div>}
                         </div>
-                      )}
-                      {inst.lastActivity && <div className="institution-last-activity">{daysAgo(inst.lastActivity)}d ago</div>}
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </>
+      ) : (
+        <>
+          <div className="network-filter-row">
+            <SelectWithCustom className="input select-filter" options={[{ id: "", label: "All Warmth" }, ...WARMTH_LEVELS]} value={warmthFilter} onChange={setWarmthFilter} />
+            <SelectWithCustom className="input select-filter" options={[{ id: "", label: "All Cities" }, ...toOptions(Array.from(new Set([...SAUDI_CITIES, ...cities])).sort())]} value={cityFilter} onChange={setCityFilter} />
+            <select className="input select-filter" value={instFilter} onChange={e => setInstFilter(e.target.value)}>
+              <option value="">All Institutions</option>
+              {instNames.map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </div>
+          {filteredPeople.length === 0 ? (
+            <div className="empty-state">No people match.</div>
+          ) : (
+            <div className="institution-grid">
+              {filteredPeople.map(({ contact, roleStr, connCount }) => {
+                const warmth = WARMTH_LEVELS.find(w => w.id === (contact.warmth || "unknown"));
+                return (
+                  <div key={contact.id} className="institution-card" onClick={() => onOpenPerson(contact.id)}>
+                    <div className="institution-card-top">
+                      <div className="institution-name"><span className="warmth-dot" style={{background:warmth?.color}} />{contact.name}</div>
                     </div>
-                  );
-                })}
-              </div>
+                    {roleStr && <div className="person-net-roles">{roleStr}</div>}
+                    {(contact.email || contact.phone) && <div className="person-net-contact">{contact.email}{contact.email && contact.phone ? " . " : ""}{contact.phone}</div>}
+                    <div className="institution-last-activity">{connCount} connection{connCount === 1 ? "" : "s"}{contact.last_contacted_at ? ` . ${daysAgo(contact.last_contacted_at)}d ago` : ""}</div>
+                  </div>
+                );
+              })}
             </div>
-          );
-        })
+          )}
+        </>
       )}
     </div>
   );
 }
+
+

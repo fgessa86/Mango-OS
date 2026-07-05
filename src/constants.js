@@ -47,19 +47,30 @@ export const ORG_TYPES = [
 ];
 
 // The unified "everything is an institution" type vocabulary for the Network
-// tab: target/enabler route to the deals/enablers tables on creation (see
-// addInstitution), everything else routes to organizations. Field name for
+// tab. An institution is always an organizations row; whether it is also a
+// pipeline Target and/or an Enabler is captured by separate checkboxes (which
+// create linked deals/enablers rows), NOT by the type. Field name for
 // custom_options is "institution_type".
 export const INSTITUTION_TYPES = [
-  { id: "target", label: "Target", color: "#F59E0B" },
-  { id: "enabler", label: "Enabler", color: "#8B5CF6" },
-  { id: "competitor", label: "Competitor", color: "#EF4444" },
-  { id: "payer", label: "Payer", color: "#A855F7" },
+  { id: "hospital", label: "Hospital", color: "#059669" },
+  { id: "vc", label: "VC", color: "#8B5CF6" },
   { id: "government", label: "Government", color: "#0EA5E9" },
+  { id: "tech_company", label: "Tech Company", color: "#6366F1" },
+  { id: "payer", label: "Payer", color: "#A855F7" },
   { id: "regulator", label: "Regulator", color: "#3B82F6" },
   { id: "association", label: "Association", color: "#F97316" },
   { id: "research", label: "Research", color: "#14B8A6" },
-  { id: "hospital", label: "Hospital", color: "#059669" },
+  { id: "pharmaceutical", label: "Pharmaceutical", color: "#EC4899" },
+];
+
+// Relationship vocabulary for the "how are they connected to us" picker on the
+// Add Person form (person-to-person and person-to-institution edges). Field
+// name for custom_options is "relationship".
+export const CONNECTION_RELATIONSHIPS = [
+  { id: "can_introduce", label: "Can Introduce" },
+  { id: "knows", label: "Knows" },
+  { id: "works_with", label: "Works With" },
+  { id: "board_overlap", label: "Board Overlap" },
 ];
 
 export const DEAL_ENABLER_RELATIONSHIPS = [
@@ -88,7 +99,7 @@ export const NETWORK_EDGE_RELATIONSHIPS = [
 
 export const SAUDI_CITIES = [
   "Riyadh", "Jeddah", "Dammam", "Dhahran", "Al Khobar",
-  "Mecca", "Medina", "Tabuk", "Abha",
+  "Mecca", "Medina", "Tabuk", "Abha", "Dubai",
 ];
 
 export const REGIONS = ["Central", "Western", "Eastern", "Northern", "Southern"];

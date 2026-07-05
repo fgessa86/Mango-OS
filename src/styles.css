@@ -324,6 +324,33 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .institution-people-preview { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; }
 .institution-preview-person { font-size: 11px; color: var(--muted); line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .institution-last-activity { font-size: 10px; color: var(--faint); margin-top: 6px; }
+.institution-flags-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+
+/* Network sub-tabs */
+.network-subtabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+.subtab { background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted); font-size: 13px; font-weight: 600; padding: 8px 14px; cursor: pointer; margin-bottom: -1px; }
+.subtab:hover { color: var(--text); }
+.subtab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.toggle-filter { padding: 6px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; white-space: nowrap; }
+
+/* Target / Enabler flags */
+.inst-flag { font-size: 11px; font-weight: 600; }
+.inst-flag-target { color: #3B82F6; }
+.inst-flag-enabler { color: var(--accent); }
+.inst-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.inst-dot-target { background: #3B82F6; }
+.inst-dot-enabler { background: var(--accent); }
+
+.checkbox-row { display: flex; gap: 18px; flex-wrap: wrap; }
+.primary-check { font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+.form-divider { text-align: center; font-size: 11px; color: var(--faint); margin: 12px 0; position: relative; }
+.inline-create { margin-top: -2px; margin-bottom: 10px; }
+.conn-toggle-wrap { margin: 8px 0; }
+.person-net-roles { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
+.person-net-contact { font-size: 11px; color: var(--accent); margin-top: 4px; }
+.warmth-dot-lg { width: 12px; height: 12px; margin-right: 8px; }
+.inst-stage-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.inst-stage-select { max-width: 200px; }
 
 @media (max-width: 768px) {
   .kanban { flex-direction: column; }
