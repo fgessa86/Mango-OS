@@ -56,9 +56,22 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [dealSheetId, setDealSheetId] = useState(null);
   const [enablerSheetId, setEnablerSheetId] = useState(null);
+  const [contactSheetId, setContactSheetId] = useState(null);
   const [summarizing, setSummarizing] = useState(false);
+  const [theme, setTheme] = useState(() => localStorage.getItem("mango-theme") || "dark");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsRef = useRef(null);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
+
+  useEffect(() => { localStorage.setItem("mango-theme", theme); }, [theme]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const handler = (e) => { if (settingsRef.current && !settingsRef.current.contains(e.target)) setSettingsOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [settingsOpen]);
 
   const loadData = useCallback(async () => {
     try {
@@ -92,6 +105,13 @@ export default function App() {
       setView("enablers"); setEnablerSheetId(null);
     }
   }, [enablers, view, enablerSheetId]);
+
+  // Kick back to the contacts list if the open contact sheet's contact was deleted elsewhere
+  useEffect(() => {
+    if (view === "contact-sheet" && contactSheetId && contacts.length > 0 && !contacts.find((c) => c.id === contactSheetId)) {
+      setView("contacts"); setContactSheetId(null);
+    }
+  }, [contacts, view, contactSheetId]);
 
   // DEAL CRUD
   const saveDeal = async (form) => {
@@ -162,8 +182,12 @@ export default function App() {
 
   const deleteContact = async (id) => {
     try {
+      await api("deal_contacts", "DELETE", null, `?contact_id=eq.${id}`);
+      await api("enabler_contacts", "DELETE", null, `?contact_id=eq.${id}`);
+      await api("todos", "DELETE", null, `?contact_id=eq.${id}`);
       await api("contacts", "DELETE", null, `?id=eq.${id}`);
       await loadData(); setModal(null); showToast("Contact deleted");
+      setView("contacts"); setContactSheetId(null);
     } catch { showToast("Error deleting contact"); }
   };
 
@@ -290,6 +314,41 @@ Keep it tight and scannable. No preamble.`;
       await loadData(); showToast("Summary generated");
     } catch { showToast("Error generating summary"); }
     setSummarizing(false);
+  };
+
+  const generateContactSummary = async (contact, contactActivities) => {
+    setSummarizing(true);
+    try {
+      const activityText = contactActivities.length > 0
+        ? contactActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${a.description}`).join("\n")
+        : "No activities logged yet.";
+      const prompt = `You are a relationship manager summarizing interactions with a contact for a BD pipeline tool.
+
+Contact: ${contact.name}${contact.role ? ` (${contact.role})` : ""}${contact.company ? ` at ${contact.company}` : ""}
+${contact.notes ? `Notes: ${contact.notes}\n` : ""}
+Activity history:
+${activityText}
+
+Write a concise status summary covering:
+1. Relationship status
+2. Key interactions
+3. What was discussed
+4. Next steps
+5. Any opportunities or risks
+
+Keep it tight and scannable. No preamble.`;
+      const summary = await generateSummary(prompt);
+      await api("contacts", "PATCH", { ai_summary: summary, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${contact.id}`);
+      await loadData(); showToast("Summary generated");
+    } catch { showToast("Error generating summary"); }
+    setSummarizing(false);
+  };
+
+  const saveContactSummary = async (id, text) => {
+    try {
+      await api("contacts", "PATCH", { ai_summary: text, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${id}`);
+      await loadData(); showToast("Summary saved");
+    } catch { showToast("Error saving summary"); }
   };
 
   const saveDealSummary = async (id, text) => {
@@ -423,7 +482,7 @@ Keep it tight and scannable. No preamble.`;
   if (loading) return <div className="app loading-screen"><div className="loading-text">Loading Mango OS...</div></div>;
 
   return (
-    <div className="app">
+    <div className={`app ${theme === "light" ? "light-mode" : ""}`}>
       {toast && <div className="toast">{toast}</div>}
 
       <header className="header">
@@ -431,14 +490,26 @@ Keep it tight and scannable. No preamble.`;
           <span className="logo">🥭</span>
           <div><div className="title">Mango OS</div><div className="subtitle">Pipeline Command Center</div></div>
         </div>
-        <nav className="nav">
-          {[["pipeline","Pipeline"],["contacts","Contacts"],["enablers","Enablers"],["tasks","Tasks"],["reports","Reports"],["boss","Boss View"]].map(([k,l]) => (
-            <button key={k} onClick={() => setView(k)} className={`nav-tab ${view === k ? "active" : ""}`}>{l}</button>
-          ))}
-        </nav>
+        <div className="header-right">
+          <nav className="nav">
+            {[["pipeline","Pipeline"],["contacts","Contacts"],["enablers","Enablers"],["tasks","Tasks"],["reports","Reports"],["boss","Boss View"]].map(([k,l]) => (
+              <button key={k} onClick={() => setView(k)} className={`nav-tab ${view === k ? "active" : ""}`}>{l}</button>
+            ))}
+          </nav>
+          <div className="settings-wrap" ref={settingsRef}>
+            <button onClick={() => setSettingsOpen((s) => !s)} className="settings-btn" title="Settings">⚙️</button>
+            {settingsOpen && (
+              <div className="settings-dropdown">
+                <div className="settings-dropdown-label">Theme</div>
+                <button onClick={() => { setTheme("dark"); setSettingsOpen(false); }} className={`settings-option ${theme === "dark" ? "active" : ""}`}>🌙 Dark Mode</button>
+                <button onClick={() => { setTheme("light"); setSettingsOpen(false); }} className={`settings-option ${theme === "light" ? "active" : ""}`}>☀️ Light Mode</button>
+              </div>
+            )}
+          </div>
+        </div>
       </header>
 
-      {view !== "deal-sheet" && view !== "enabler-sheet" && (
+      {view !== "deal-sheet" && view !== "enabler-sheet" && view !== "contact-sheet" && (
         <div className="stats-bar">
           {[[activeDeals.length,"Active Deals"],[totalValue > 0 ? `$${(totalValue/1000).toFixed(0)}K` : "N/A","Pipeline Value"],[contacts.length,"Contacts"],[enablers.length,"Enablers"],[openTodos.length,"Open Tasks"],[deals.filter(d=>isToday(d.last_activity_at)).length,"Touched Today"],[deals.filter(d=>d.stage==="won").length,"Won"]].map(([v,l],i) => (
             <div key={i} className="stat"><div className="stat-value">{v}</div><div className="stat-label">{l}</div></div>
@@ -494,6 +565,34 @@ Keep it tight and scannable. No preamble.`;
             summarizing={summarizing}
             showToast={showToast}
             onBack={() => { setView("enablers"); setEnablerSheetId(null); }}
+          />
+        ) : null;
+      })()}
+
+      {/* CONTACT SHEET */}
+      {view === "contact-sheet" && contactSheetId && (() => {
+        const sheetContact = contacts.find((c) => c.id === contactSheetId);
+        return sheetContact ? (
+          <ContactSheet
+            contact={sheetContact}
+            activities={activities.filter((a) => a.contact_id === sheetContact.id)}
+            todos={todos.filter((t) => t.contact_id === sheetContact.id)}
+            deals={deals}
+            enablers={enablers}
+            dealContacts={dealContacts}
+            enablerContacts={enablerContacts}
+            onEdit={(c) => setModal({ type: "contact", data: c })}
+            onDelete={deleteContact}
+            onAddActivity={addActivity}
+            onAddTodo={(form) => saveTodo({ ...form, contact_id: sheetContact.id })}
+            onToggleTodo={toggleTodo}
+            onGenerateSummary={generateContactSummary}
+            onSaveSummary={saveContactSummary}
+            summarizing={summarizing}
+            showToast={showToast}
+            onOpenDeal={(id) => { setDealSheetId(id); setView("deal-sheet"); }}
+            onOpenEnabler={(id) => { setEnablerSheetId(id); setView("enabler-sheet"); }}
+            onBack={() => { setView("contacts"); setContactSheetId(null); }}
           />
         ) : null;
       })()}
@@ -554,7 +653,7 @@ Keep it tight and scannable. No preamble.`;
               const cd = deals.filter(d => d.contact_id === c.id);
               const ca = activities.filter(a => a.contact_id === c.id);
               return (
-                <div key={c.id} className="contact-card" onClick={() => setModal({type:"contact-detail",data:c})}>
+                <div key={c.id} className="contact-card" onClick={() => { setContactSheetId(c.id); setView("contact-sheet"); }}>
                   <div className="contact-top">
                     <div>
                       <div className="contact-name">{c.name}</div>
@@ -728,8 +827,6 @@ Keep it tight and scannable. No preamble.`;
       {modal?.type === "deal" && <DealForm deal={modal.data} contacts={contacts} onSave={saveDeal} onClose={() => setModal(null)} />}
       {modal?.type === "contact" && <ContactForm contact={modal.data} onSave={saveContact} onClose={() => setModal(null)} />}
       {modal?.type === "enabler" && <EnablerForm enabler={modal.data} contacts={contacts} onSave={saveEnabler} onClose={() => setModal(null)} />}
-      {modal?.type === "contact-detail" && <ContactDetail contact={modal.data} deals={deals} activities={activities.filter(a => a.contact_id === modal.data.id)} onEdit={(c) => setModal({type:"contact",data:c})} onDelete={deleteContact} onActivity={(id) => setModal({type:"activity",data:{contact_id:id}})} onClose={() => setModal(null)} />}
-      {modal?.type === "activity" && <ActivityForm data={modal.data} deals={deals} contacts={contacts} onSave={addActivity} onClose={() => setModal(null)} />}
     </div>
   );
 }
@@ -781,38 +878,6 @@ function ContactForm({ contact, onSave, onClose }) {
   );
 }
 
-function ContactDetail({ contact, deals, activities, onEdit, onDelete, onActivity, onClose }) {
-  const cd = deals.filter(d=>d.contact_id===contact.id);
-  return (
-    <div className="overlay" onClick={onClose}><div className="modal" onClick={e=>e.stopPropagation()}>
-      <div className="modal-header"><div><div className="modal-title">{contact.name}</div>{contact.role && <div className="modal-sub">{contact.role}</div>}{contact.company && <div className="contact-company">{contact.company}</div>}</div><button onClick={onClose} className="close-btn">✕</button></div>
-      <div className="contact-details">{contact.email&&<div>📧 {contact.email}</div>}{contact.phone&&<div>📞 {contact.phone}</div>}{contact.linkedin&&<div>🔗 {contact.linkedin}</div>}{contact.source&&<div className="source-text">Source: {contact.source}</div>}</div>
-      {(contact.tags||[]).length > 0 && <div className="tags-row mb">{contact.tags.map(t=><span key={t} className="tag">{t}</span>)}</div>}
-      {contact.notes && <div className="detail-notes">{contact.notes}</div>}
-      {cd.length > 0 && <div className="section"><div className="section-label">Linked Deals</div>{cd.map(d=>{const s=STAGES.find(x=>x.id===d.stage);return <div key={d.id} className="linked-deal"><span>{d.company}</span><span style={{color:s?.color}}>{s?.label}</span></div>;})}</div>}
-      <div className="detail-actions"><button onClick={()=>onActivity(contact.id)} className="btn-sec">+ Activity</button><button onClick={()=>onEdit(contact)} className="btn-sec">Edit</button><button onClick={()=>{if(confirm("Delete?"))onDelete(contact.id)}} className="btn-sec btn-danger">Delete</button></div>
-      <div className="section-label">Activity History</div>
-      <div className="activity-list">{activities.length===0?<div className="empty-small">No activities yet</div>:activities.slice().reverse().map(a=><div key={a.id} className="activity-item"><span>{ACT_TYPES.find(t=>t.id===a.type)?.icon||"."}</span><div><div className="act-desc">{a.description}</div><div className="act-date">{formatDate(a.created_at)}</div></div></div>)}</div>
-    </div></div>
-  );
-}
-
-function ActivityForm({ data, deals, contacts, onSave, onClose }) {
-  const [type,setType] = useState("call");
-  const [desc,setDesc] = useState("");
-  const [dealId,setDealId] = useState(data.deal_id||"");
-  const [contactId,setContactId] = useState(data.contact_id||"");
-  return (
-    <div className="overlay" onClick={onClose}><div className="modal modal-sm" onClick={e=>e.stopPropagation()}>
-      <div className="modal-header"><div className="modal-title">Log Activity</div><button onClick={onClose} className="close-btn">✕</button></div>
-      <div className="tags-select mb">{ACT_TYPES.map(t=><button key={t.id} onClick={()=>setType(t.id)} className={`tag-btn ${type===t.id?"active":""}`}>{t.icon} {t.label}</button>)}</div>
-      {!data.deal_id&&<div className="mb-sm"><label className="label">Deal</label><select className="input" value={dealId} onChange={e=>setDealId(e.target.value)}><option value="">None</option>{deals.map(d=><option key={d.id} value={d.id}>{d.company}</option>)}</select></div>}
-      {!data.contact_id&&<div className="mb-sm"><label className="label">Contact</label><select className="input" value={contactId} onChange={e=>setContactId(e.target.value)}><option value="">None</option>{contacts.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>}
-      <textarea className="input textarea" value={desc} onChange={e=>setDesc(e.target.value)} placeholder="What happened?" />
-      <div className="modal-actions"><button onClick={onClose} className="btn-sec">Cancel</button><button onClick={()=>desc&&onSave(dealId||null,contactId||null,{type,description:desc})} className="btn-primary" disabled={!desc}>Log</button></div>
-    </div></div>
-  );
-}
 
 const TIMELINE_TABS = [
   { id: "all", label: "All" },
@@ -1005,6 +1070,124 @@ function EnablerSheet({ enabler, activities, people, todos, contacts, onEdit, on
         {filteredPersonName && (
           <div className="person-filter-badge">Filtered to {filteredPersonName} <button onClick={() => setPersonFilter(null)} className="person-filter-clear">✕</button></div>
         )}
+        <div className="timeline-tabs">
+          {TIMELINE_TABS.map(t => (
+            <button key={t.id} onClick={() => setFilter(t.id)} className={`tag-btn ${filter === t.id ? "active" : ""}`}>{t.label}</button>
+          ))}
+        </div>
+        <div className="timeline-list">
+          {filtered.length === 0 && <div className="empty-small">No activities yet</div>}
+          {filtered.map(a => (
+            <div key={a.id} className="timeline-item">
+              <span className="timeline-icon">{ACT_TYPES.find(t => t.id === a.type)?.icon || "."}</span>
+              <div>
+                <div className="act-desc">{a.description}</div>
+                <div className="act-date">{formatDate(a.created_at)}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ContactSheet({ contact, activities, todos, deals, enablers, dealContacts, enablerContacts, onEdit, onDelete, onAddActivity, onAddTodo, onToggleTodo, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenDeal, onOpenEnabler, onBack }) {
+  const [filter, setFilter] = useState("all");
+  const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
+
+  const linkedDealIds = new Set([
+    ...dealContacts.filter(dc => dc.contact_id === contact.id).map(dc => dc.deal_id),
+    ...deals.filter(d => d.contact_id === contact.id).map(d => d.id),
+  ]);
+  const linkedDeals = deals.filter(d => linkedDealIds.has(d.id));
+
+  const linkedEnablerIds = new Set(enablerContacts.filter(ec => ec.contact_id === contact.id).map(ec => ec.enabler_id));
+  const linkedEnablers = enablers.filter(en => linkedEnablerIds.has(en.id));
+
+  return (
+    <div className="deal-sheet">
+      <button onClick={onBack} className="sheet-back">← Back to Contacts</button>
+
+      <div className="sheet-top">
+        <div className="sheet-top-row">
+          <div>
+            <div className="sheet-company">{contact.name}</div>
+            {(contact.role || contact.company) && (
+              <div className="sheet-contact">{contact.role}{contact.role && contact.company ? " . " : ""}{contact.company}</div>
+            )}
+            <div className="contact-details mb-sm">
+              {contact.email && <div>📧 {contact.email}</div>}
+              {contact.phone && <div>📞 {contact.phone}</div>}
+              {contact.linkedin && <div>🔗 {contact.linkedin}</div>}
+              {contact.source && <div className="source-text">Source: {contact.source}</div>}
+            </div>
+            {(contact.tags || []).length > 0 && <div className="tags-row">{contact.tags.map(t => <span key={t} className="tag">{t}</span>)}</div>}
+          </div>
+          <div className="sheet-actions">
+            <button onClick={() => onEdit(contact)} className="btn-sec">Edit</button>
+            <button onClick={() => { if (confirm("Delete this contact?")) onDelete(contact.id); }} className="btn-sec btn-danger">Delete</button>
+          </div>
+        </div>
+        {contact.notes && <div className="detail-notes sheet-notes">{contact.notes}</div>}
+      </div>
+
+      <SummaryCard
+        entity={contact}
+        activities={activities}
+        onGenerateSummary={onGenerateSummary}
+        onSaveSummary={onSaveSummary}
+        summarizing={summarizing}
+      />
+
+      <div className="people-section">
+        <div className="section-label">Linked Deals</div>
+        {linkedDeals.length === 0 ? (
+          <div className="empty-small">No linked deals.</div>
+        ) : (
+          <div className="people-grid">
+            {linkedDeals.map(d => {
+              const s = STAGES.find(x => x.id === d.stage);
+              return (
+                <div key={d.id} className="person-card" onClick={() => onOpenDeal(d.id)}>
+                  <div className="person-name">{d.company}</div>
+                  {s && <span className="badge" style={{background:s.color+"22",color:s.color,border:`1px solid ${s.color}44`,marginTop:"4px",display:"inline-block"}}>{s.label}</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="people-section">
+        <div className="section-label">Linked Enablers</div>
+        {linkedEnablers.length === 0 ? (
+          <div className="empty-small">No linked enablers.</div>
+        ) : (
+          <div className="people-grid">
+            {linkedEnablers.map(en => {
+              const et = ENABLER_TYPES.find(x => x.id === en.type);
+              return (
+                <div key={en.id} className="person-card" onClick={() => onOpenEnabler(en.id)}>
+                  <div className="person-name">{en.name}</div>
+                  {et && <span className="badge enabler-type-badge" style={{background:et.color+"22",color:et.color,border:`1px solid ${et.color}44`}}>{et.label}</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <TodoSection todos={todos} contacts={[]} onAdd={onAddTodo} onToggle={onToggleTodo} />
+
+      <QuickAdd
+        contactId={contact.id}
+        onAddActivity={onAddActivity}
+        showToast={showToast}
+      />
+
+      <div className="timeline">
+        <div className="section-label">Activity Timeline</div>
         <div className="timeline-tabs">
           {TIMELINE_TABS.map(t => (
             <button key={t.id} onClick={() => setFilter(t.id)} className={`tag-btn ${filter === t.id ? "active" : ""}`}>{t.label}</button>
