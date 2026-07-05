@@ -25,7 +25,7 @@ Junction / relationship tables:
 - **deal_contacts** — deal_id, contact_id, role_in_deal (unique on deal_id+contact_id) — multi-contact support per deal
 - **enabler_contacts** — enabler_id, contact_id, role_in_org (unique on enabler_id+contact_id) — multi-contact support per enabler
 - **deal_enablers** — deal_id, enabler_id, relationship (can_introduce/active/institutional), strength (strong/medium/weak), notes — which enablers can help with which deals
-- **network_edges** — source_type, source_id, target_type, target_id, relationship, strength, direction, notes — generic polymorphic graph edges (any entity to any entity). Currently **read-only in the UI** (displayed in Network → Connections, resolved to names where possible) — there's no add/edit form for it yet, since a fully generic "any entity to any entity" picker was out of scope when the Network tab was built. Feeds a future visual network map.
+- **network_edges** — source_type, source_id, target_type, target_id, relationship, strength, direction, notes — generic polymorphic graph edges (any entity to any entity). Written only via the Network tab's generic "+ Connection" picker, as the fallback for pairs that don't map to a dedicated junction table (see Network tab below); no dedicated edit/delete UI for existing rows yet. Feeds a future visual network map.
 
 `deals`/`enablers`/`contacts` all carry `ai_summary`/`ai_summary_updated_at` and auto-regenerate their summary (via `SummaryCard`) whenever a sheet is opened and the existing summary is missing or older than the most recent activity. Summaries are also click-to-edit and independently saveable.
 
@@ -37,11 +37,12 @@ Junction / relationship tables:
 
 - **Pipeline** — Kanban board of deals by stage, drag-and-drop between columns.
 - **Deal Sheet / Enabler Sheet / Contact Sheet** — full-page detail views (not modals) sharing the same structural pattern: header info + Edit/Delete/Back, AI Summary card, People/Linked-entity sections, Enabler-connection sections, To-Dos, Quick Add, and an Activity Timeline. The timeline component (filters: All/Calls/Emails/Meetings/Notes) is intentionally identical across all three sheets.
-- **Network tab** — data-management hub for the relationship graph, three sub-tabs:
-  - *Organizations* — CRUD grid for competitors/market players/regulators/payers/associations/research orgs.
-  - *Connections* — CRUD list for `deal_enablers` ("Add Connection" picks an enabler + a deal), plus a read-only list of `network_edges`.
-  - *Internal Team* — contacts with `is_internal = true`; toggle any contact in/out, see their linked deals/enablers.
-  - Deal Sheets show a read-only "Enabler Paths" section (from `deal_enablers`); Enabler Sheets show an editable "Connected Targets" section (add/remove) — the same underlying rows, viewed from each side.
+- **Network tab** — single integrated workspace for the relationship graph (replaced an earlier 3-sub-tab design):
+  - *Quick Add bar* — "+ Contact", "+ Organization", "+ Connection" each expand an inline form below the buttons (not a modal); "Bulk Add" opens a rapid-entry table (Name/Type/Company/Role/Email/Warmth per row, "Save All" at the end) for dumping many contacts/orgs at once.
+  - *Directory* — every contact, deal, enabler, and organization in one searchable, filterable (All/Contacts/Internal Team/Targets/Enablers/Competitors/Market Players), sorted-by-type list. Each row shows a compact "connected to: ..." line resolving `deal_contacts`/`enabler_contacts`/`deal_enablers`/`network_edges` (plus one indirect hop for contacts, e.g. "KFSHRC (Deal via BECO Capital)") into clickable names. Clicking a contact/deal/enabler row opens its full sheet; clicking an organization expands an inline edit card in place (no sheet exists for organizations).
+  - The generic "+ Connection" picker searches across all four entity types and routes to the right table based on the pair: enabler+deal → `deal_enablers`, contact+deal → `deal_contacts`, contact+enabler → `enabler_contacts`, anything else (contact-contact, org-anything, etc.) → `network_edges`. This is also the only UI that writes to `network_edges` — still no dedicated edit/delete for it beyond what this generic form provides.
+  - Deal Sheets show a read-only "Enabler Paths" section (from `deal_enablers`); Enabler Sheets show an editable "Connected Targets" section (add/remove via the existing `AddConnectionModal`) — the same underlying rows, viewed from each side.
+  - Auto-population: creating a contact with a `company` that case-insensitively matches an existing deal's `company` or enabler's `name` auto-creates the corresponding `deal_contacts`/`enabler_contacts` row; marking a contact internal auto-adds an "Internal Team" tag. Both rules live in `persistContact` (the side-effect-free core that `saveContact` wraps), so every contact-creation path — the regular Contacts-tab form, the Network quick-add, and Bulk Add — gets them for free.
 - **Tasks tab** — every open todo across deals/enablers, sorted priority-then-due-date, filterable (All/High Priority/Due Today/Overdue), inline-editable (title/priority/due date/linked deal-enabler).
 - **Reports** — plaintext EOD/EOW report generation + copy-to-clipboard.
 - **Boss View** — pipeline overview, Key Summaries (AI summaries for active deals/enablers), Action Items (top 10 priority todos).

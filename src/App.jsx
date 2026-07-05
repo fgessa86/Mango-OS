@@ -48,7 +48,7 @@ export default function App() {
   const [organizations, setOrganizations] = useState([]);
   const [dealEnablers, setDealEnablers] = useState([]);
   const [networkEdges, setNetworkEdges] = useState([]);
-  const [networkSection, setNetworkSection] = useState("organizations");
+  const [bulkAddOpen, setBulkAddOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
   const [reportCopied, setReportCopied] = useState(null);
@@ -177,23 +177,45 @@ export default function App() {
   };
 
   // CONTACT CRUD
+  // Core create/update logic with no UI side effects (no loadData/toast/modal-close),
+  // so bulk operations can call this in a loop and only reload/toast once at the end.
+  // Applies the auto-population rules: marking a contact internal auto-tags them
+  // "Internal Team", and a new contact's company name is matched (case-insensitively)
+  // against existing deal/enabler names to auto-create the corresponding junction row.
+  const persistContact = async (form) => {
+    const name = (form.name || "").trim();
+    if (!name) throw new Error("Name is required");
+    const clean = { name, warmth: form.warmth || "unknown" };
+    for (const k of ["role", "company", "email", "phone", "linkedin", "source", "notes"]) {
+      const v = (form[k] || "").trim();
+      if (v) clean[k] = v;
+    }
+    // Only touch is_internal when the caller explicitly means to set it — otherwise
+    // a plain edit-form save would silently reset every contact back to external.
+    if (form.is_internal !== undefined) clean.is_internal = !!form.is_internal;
+    let tags = form.tags && form.tags.length > 0 ? [...form.tags] : [];
+    if (clean.is_internal && !tags.includes("Internal Team")) tags.push("Internal Team");
+    if (tags.length > 0) clean.tags = tags;
+
+    if (form.id) {
+      await api("contacts", "PATCH", clean, `?id=eq.${form.id}`);
+      return null;
+    }
+    const created = (await api("contacts", "POST", clean) || [])[0];
+    if (created && clean.company) {
+      const companyLower = clean.company.toLowerCase();
+      const matchedDeal = deals.find((d) => (d.company || "").toLowerCase() === companyLower);
+      if (matchedDeal) await api("deal_contacts", "POST", { deal_id: matchedDeal.id, contact_id: created.id }).catch(() => {});
+      const matchedEnabler = enablers.find((en) => (en.name || "").toLowerCase() === companyLower);
+      if (matchedEnabler) await api("enabler_contacts", "POST", { enabler_id: matchedEnabler.id, contact_id: created.id }).catch(() => {});
+    }
+    return created;
+  };
+
   const saveContact = async (form) => {
     try {
-      const name = (form.name || "").trim();
-      if (!name) { showToast("Name is required"); return; }
-      const clean = { name, warmth: form.warmth || "unknown" };
-      // Only send optional string fields when they have real content
-      for (const k of ["role", "company", "email", "phone", "linkedin", "source", "notes"]) {
-        const v = (form[k] || "").trim();
-        if (v) clean[k] = v;
-      }
-      if (form.tags && form.tags.length > 0) clean.tags = form.tags;
-      if (form.id) {
-        await api("contacts", "PATCH", clean, `?id=eq.${form.id}`);
-      } else {
-        await api("contacts", "POST", clean);
-      }
-      await loadData(); setModal(null); showToast(form.id ? "Contact updated" : "Contact added");
+      await persistContact(form);
+      await loadData(); setModal(null); showToast(form.id ? "Contact updated" : "Contact added. Fill in more details anytime.");
     } catch { showToast("Error saving contact"); }
   };
 
@@ -206,13 +228,6 @@ export default function App() {
       await loadData(); setModal(null); showToast("Contact deleted");
       setView("contacts"); setContactSheetId(null);
     } catch { showToast("Error deleting contact"); }
-  };
-
-  const toggleContactInternal = async (id, current) => {
-    try {
-      await api("contacts", "PATCH", { is_internal: !current }, `?id=eq.${id}`);
-      await loadData(); showToast(!current ? "Marked as internal" : "Removed from internal team");
-    } catch { showToast("Error updating contact"); }
   };
 
   // ENABLER CRUD
@@ -284,20 +299,24 @@ export default function App() {
   };
 
   // ORGANIZATIONS
+  const persistOrganization = async (form) => {
+    const name = (form.name || "").trim();
+    if (!name) throw new Error("Name is required");
+    const clean = { name, type: form.type || "competitor" };
+    for (const k of ["sector", "description", "website", "notes"]) {
+      const v = (form[k] || "").trim();
+      if (v) clean[k] = v;
+    }
+    if (form.id) {
+      await api("organizations", "PATCH", clean, `?id=eq.${form.id}`);
+    } else {
+      await api("organizations", "POST", clean);
+    }
+  };
+
   const saveOrganization = async (form) => {
     try {
-      const name = (form.name || "").trim();
-      if (!name) { showToast("Name is required"); return; }
-      const clean = { name, type: form.type || "competitor" };
-      for (const k of ["sector", "description", "website", "notes"]) {
-        const v = (form[k] || "").trim();
-        if (v) clean[k] = v;
-      }
-      if (form.id) {
-        await api("organizations", "PATCH", clean, `?id=eq.${form.id}`);
-      } else {
-        await api("organizations", "POST", clean);
-      }
+      await persistOrganization(form);
       await loadData(); setModal(null); showToast(form.id ? "Organization updated" : "Organization added");
     } catch { showToast("Error saving organization"); }
   };
@@ -329,6 +348,54 @@ export default function App() {
       await api("deal_enablers", "DELETE", null, `?id=eq.${id}`);
       await loadData(); showToast("Connection removed");
     } catch { showToast("Error removing connection"); }
+  };
+
+  // GENERIC POLYMORPHIC EDGES (any entity to any entity, used when the pair
+  // isn't a deal/enabler/contact combo with its own dedicated junction table)
+  const addNetworkEdge = async (form) => {
+    try {
+      const clean = {
+        source_type: form.source_type,
+        source_id: form.source_id,
+        target_type: form.target_type,
+        target_id: form.target_id,
+        relationship: form.relationship || "knows",
+        strength: form.strength || "unknown",
+        direction: form.direction || "bidirectional",
+      };
+      if ((form.notes || "").trim()) clean.notes = form.notes.trim();
+      await api("network_edges", "POST", clean);
+      await loadData(); showToast("Connection added");
+    } catch { showToast("Error adding connection"); }
+  };
+
+  // Routes a generic "entity A <-> entity B" connection to the right table:
+  // deal+enabler -> deal_enablers, contact+deal -> deal_contacts,
+  // contact+enabler -> enabler_contacts, anything else -> network_edges.
+  const addConnection = async ({ aType, aId, bType, bId, relationship, strength, notes }) => {
+    const pair = [aType, bType].sort().join("-");
+    if (pair === "deal-enabler") {
+      const dealId = aType === "deal" ? aId : bId;
+      const enablerId = aType === "enabler" ? aId : bId;
+      const validRel = ["can_introduce", "active", "institutional"];
+      await addDealEnabler({
+        deal_id: dealId,
+        enabler_id: enablerId,
+        relationship: validRel.includes(relationship) ? relationship : (relationship === "active_relationship" ? "active" : "can_introduce"),
+        strength: strength === "unknown" ? "medium" : strength,
+        notes,
+      });
+    } else if (pair === "contact-deal") {
+      const dealId = aType === "deal" ? aId : bId;
+      const contactId = aType === "contact" ? aId : bId;
+      await addDealContact(dealId, contactId, (notes || "").trim() || NETWORK_EDGE_RELATIONSHIPS.find((r) => r.id === relationship)?.label || "");
+    } else if (pair === "contact-enabler") {
+      const enablerId = aType === "enabler" ? aId : bId;
+      const contactId = aType === "contact" ? aId : bId;
+      await addEnablerContact(enablerId, contactId, (notes || "").trim() || NETWORK_EDGE_RELATIONSHIPS.find((r) => r.id === relationship)?.label || "");
+    } else {
+      await addNetworkEdge({ source_type: aType, source_id: aId, target_type: bType, target_id: bId, relationship, strength, notes });
+    }
   };
 
   const generateDealSummary = async (deal, dealActivities) => {
@@ -818,40 +885,36 @@ Keep it tight and scannable. No preamble.`;
       {/* NETWORK */}
       {view === "network" && (
         <div className="section-pad">
-          <div className="timeline-tabs mb">
-            {[["organizations","Organizations"],["connections","Connections"],["internal","Internal Team"]].map(([k,l]) => (
-              <button key={k} onClick={() => setNetworkSection(k)} className={`tag-btn ${networkSection === k ? "active" : ""}`}>{l}</button>
-            ))}
-          </div>
-          {networkSection === "organizations" && (
-            <OrganizationsSection
-              organizations={organizations}
-              onEdit={(o) => setModal({ type: "organization", data: o })}
-              onAdd={() => setModal({ type: "organization", data: {} })}
-              onDelete={deleteOrganization}
-            />
-          )}
-          {networkSection === "connections" && (
-            <ConnectionsSection
-              dealEnablers={dealEnablers}
-              networkEdges={networkEdges}
-              deals={deals}
-              enablers={enablers}
-              contacts={contacts}
-              organizations={organizations}
-              onAdd={addDealEnabler}
-              onRemove={removeDealEnabler}
-            />
-          )}
-          {networkSection === "internal" && (
-            <InternalTeamSection
-              contacts={contacts}
-              deals={deals}
-              enablers={enablers}
-              dealContacts={dealContacts}
-              enablerContacts={enablerContacts}
-              onToggleInternal={toggleContactInternal}
-              onOpenContact={(id) => { setContactSheetId(id); setView("contact-sheet"); }}
+          <NetworkQuickAddBar
+            contacts={contacts}
+            deals={deals}
+            enablers={enablers}
+            organizations={organizations}
+            onSaveContact={saveContact}
+            onSaveOrganization={saveOrganization}
+            onSaveConnection={addConnection}
+            onOpenBulkAdd={() => setBulkAddOpen(true)}
+          />
+          <NetworkDirectory
+            contacts={contacts}
+            deals={deals}
+            enablers={enablers}
+            organizations={organizations}
+            dealContacts={dealContacts}
+            enablerContacts={enablerContacts}
+            dealEnablers={dealEnablers}
+            networkEdges={networkEdges}
+            onOpenContact={(id) => { setContactSheetId(id); setView("contact-sheet"); }}
+            onOpenDeal={(id) => { setDealSheetId(id); setView("deal-sheet"); }}
+            onOpenEnabler={(id) => { setEnablerSheetId(id); setView("enabler-sheet"); }}
+            onEditOrganization={saveOrganization}
+            onDeleteOrganization={deleteOrganization}
+          />
+          {bulkAddOpen && (
+            <BulkAddModal
+              onSaveContact={persistContact}
+              onSaveOrganization={persistOrganization}
+              onClose={async () => { setBulkAddOpen(false); await loadData(); }}
             />
           )}
         </div>
@@ -975,7 +1038,6 @@ Keep it tight and scannable. No preamble.`;
       {modal?.type === "deal" && <DealForm deal={modal.data} contacts={contacts} onSave={saveDeal} onClose={() => setModal(null)} />}
       {modal?.type === "contact" && <ContactForm contact={modal.data} onSave={saveContact} onClose={() => setModal(null)} />}
       {modal?.type === "enabler" && <EnablerForm enabler={modal.data} contacts={contacts} onSave={saveEnabler} onClose={() => setModal(null)} />}
-      {modal?.type === "organization" && <OrganizationForm organization={modal.data} onSave={saveOrganization} onClose={() => setModal(null)} />}
     </div>
   );
 }
@@ -1005,7 +1067,7 @@ function DealForm({ deal, contacts, onSave, onClose }) {
 
 function ContactForm({ contact, onSave, onClose }) {
   const isEdit = !!contact.id;
-  const [f, setF] = useState({ id:contact.id||"", name:contact.name||"", role:contact.role||"", company:contact.company||"", email:contact.email||"", phone:contact.phone||"", linkedin:contact.linkedin||"", source:contact.source||"", notes:contact.notes||"", tags:contact.tags||[], warmth:contact.warmth||"unknown" });
+  const [f, setF] = useState({ id:contact.id||"", name:contact.name||"", role:contact.role||"", company:contact.company||"", email:contact.email||"", phone:contact.phone||"", linkedin:contact.linkedin||"", source:contact.source||"", notes:contact.notes||"", tags:contact.tags||[], warmth:contact.warmth||"unknown", is_internal:!!contact.is_internal });
   const set = (k,v) => setF(p=>({...p,[k]:v}));
   const toggleTag = (t) => setF(p=>({...p, tags:p.tags.includes(t)?p.tags.filter(x=>x!==t):[...p.tags,t]}));
   return (
@@ -1020,6 +1082,7 @@ function ContactForm({ contact, onSave, onClose }) {
         <div className="field"><label className="label">LinkedIn</label><input className="input" value={f.linkedin} onChange={e=>set("linkedin",e.target.value)} /></div>
         <div className="field"><label className="label">Source</label><input className="input" value={f.source} onChange={e=>set("source",e.target.value)} placeholder="e.g. Conference, Referral" /></div>
         <div className="field-full"><label className="label">Warmth</label><div className="tags-select">{WARMTH_LEVELS.map(w=><button key={w.id} onClick={()=>set("warmth",w.id)} className={`tag-btn ${f.warmth===w.id?"active":""}`}><span className="warmth-dot" style={{background:w.color}} />{w.label}</button>)}</div></div>
+        <div className="field-full"><label className="checkbox-label"><input type="checkbox" checked={f.is_internal} onChange={e=>set("is_internal",e.target.checked)} /> Internal team member</label></div>
         <div className="field-full"><label className="label">Tags</label><div className="tags-select">{TAG_OPTIONS.map(t=><button key={t} onClick={()=>toggleTag(t)} className={`tag-btn ${f.tags.includes(t)?"active":""}`}>{t}</button>)}</div></div>
         <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={f.notes} onChange={e=>set("notes",e.target.value)} /></div>
       </div>
@@ -1853,70 +1916,6 @@ function TaskQuickAdd({ deals, enablers, onAdd }) {
   );
 }
 
-function OrganizationForm({ organization, onSave, onClose }) {
-  const isEdit = !!organization.id;
-  const [f, setF] = useState({ id:organization.id||"", name:organization.name||"", type:organization.type||"competitor", sector:organization.sector||"", description:organization.description||"", website:organization.website||"", notes:organization.notes||"" });
-  const set = (k,v) => setF(p => ({...p,[k]:v}));
-  return (
-    <div className="overlay" onClick={onClose}><div className="modal" onClick={e=>e.stopPropagation()}>
-      <div className="modal-header"><div className="modal-title">{isEdit?"Edit Organization":"New Organization"}</div><button onClick={onClose} className="close-btn">✕</button></div>
-      <div className="form-grid">
-        <div className="field-full"><label className="label">Name *</label><input className="input" value={f.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. Competitor Inc." /></div>
-        <div className="field"><label className="label">Type</label><select className="input" value={f.type} onChange={e=>set("type",e.target.value)}>{ORG_TYPES.map(t=><option key={t.id} value={t.id}>{t.label}</option>)}</select></div>
-        <div className="field"><label className="label">Sector</label><input className="input" value={f.sector} onChange={e=>set("sector",e.target.value)} placeholder="e.g. Oncology, Fintech" /></div>
-        <div className="field-full"><label className="label">Website</label><input className="input" value={f.website} onChange={e=>set("website",e.target.value)} placeholder="https://..." /></div>
-        <div className="field-full"><label className="label">Description</label><textarea className="input textarea" value={f.description} onChange={e=>set("description",e.target.value)} /></div>
-        <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={f.notes} onChange={e=>set("notes",e.target.value)} /></div>
-      </div>
-      <div className="modal-actions"><button onClick={onClose} className="btn-sec">Cancel</button><button onClick={()=>f.name.trim()&&onSave(f)} className="btn-primary" disabled={!f.name.trim()}>{isEdit?"Save":"Add Organization"}</button></div>
-    </div></div>
-  );
-}
-
-function OrganizationsSection({ organizations, onEdit, onAdd, onDelete }) {
-  const [search, setSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState("");
-  const filtered = organizations.filter(o => {
-    const ms = !search || [o.name, o.sector].some(f => f?.toLowerCase().includes(search.toLowerCase()));
-    const mt = !typeFilter || o.type === typeFilter;
-    return ms && mt;
-  });
-
-  return (
-    <div>
-      <div className="contacts-toolbar">
-        <div className="search-row">
-          <input className="input" placeholder="Search organizations..." value={search} onChange={e => setSearch(e.target.value)} />
-          <select className="input select-filter" value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
-            <option value="">All Types</option>
-            {ORG_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
-          </select>
-        </div>
-        <button onClick={onAdd} className="btn-primary">+ New Organization</button>
-      </div>
-      {filtered.length === 0 && <div className="empty-state">{organizations.length === 0 ? "No organizations yet. Add your first one." : "No organizations match."}</div>}
-      <div className="contacts-grid">
-        {filtered.map(o => {
-          const t = ORG_TYPES.find(x => x.id === o.type);
-          return (
-            <div key={o.id} className="contact-card" onClick={() => onEdit(o)}>
-              <div className="contact-top">
-                <div>
-                  <div className="contact-name">{o.name}</div>
-                  {t && <span className="badge enabler-type-badge" style={{background:t.color+"22",color:t.color,border:`1px solid ${t.color}44`}}>{t.label}</span>}
-                </div>
-                <button onClick={(e) => { e.stopPropagation(); if (confirm(`Delete ${o.name}?`)) onDelete(o.id); }} className="person-remove" title="Delete">✕</button>
-              </div>
-              {o.sector && <div className="contact-company">{o.sector}</div>}
-              {o.description && <div className="enabler-summary-preview">{o.description.slice(0, 120)}{o.description.length > 120 ? "…" : ""}</div>}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 function AddConnectionModal({ deals, enablers, fixedEnablerId, fixedDealId, onSave, onClose }) {
   const [enablerId, setEnablerId] = useState(fixedEnablerId || "");
   const [dealId, setDealId] = useState(fixedDealId || "");
@@ -1944,132 +1943,392 @@ function AddConnectionModal({ deals, enablers, fixedEnablerId, fixedDealId, onSa
   );
 }
 
-function ConnectionsSection({ dealEnablers, networkEdges, deals, enablers, contacts, organizations, onAdd, onRemove }) {
-  const [modalOpen, setModalOpen] = useState(false);
 
-  const resolveEntity = (type, id) => {
-    const map = { deal: deals, enabler: enablers, contact: contacts, organization: organizations };
-    const found = map[type]?.find(x => x.id === id);
-    if (!found) return `${type} (${String(id).slice(0, 8)})`;
-    return found.company || found.name;
+const DIRECTORY_TABS = [
+  { id: "all", label: "All" },
+  { id: "contacts", label: "Contacts" },
+  { id: "internal", label: "Internal Team" },
+  { id: "targets", label: "Targets" },
+  { id: "enablers", label: "Enablers" },
+  { id: "competitors", label: "Competitors" },
+  { id: "market_players", label: "Market Players" },
+];
+
+function QuickAddContactForm({ onSave, onCancel }) {
+  const [f, setF] = useState({ name:"", company:"", role:"", email:"", warmth:"unknown", is_internal:false, tags:[] });
+  const [saving, setSaving] = useState(false);
+  const set = (k,v) => setF(p => ({...p,[k]:v}));
+  const toggleTag = (t) => setF(p=>({...p, tags:p.tags.includes(t)?p.tags.filter(x=>x!==t):[...p.tags,t]}));
+  const submit = async () => {
+    if (!f.name.trim() || saving) return;
+    setSaving(true);
+    try { await onSave(f); } finally { setSaving(false); }
+  };
+  return (
+    <div className="quickadd-inline-form">
+      <div className="form-grid">
+        <div className="field"><label className="label">Name *</label><input className="input" value={f.name} onChange={e=>set("name",e.target.value)} /></div>
+        <div className="field"><label className="label">Company</label><input className="input" value={f.company} onChange={e=>set("company",e.target.value)} placeholder="Matches a deal/enabler name to auto-link" /></div>
+        <div className="field"><label className="label">Role</label><input className="input" value={f.role} onChange={e=>set("role",e.target.value)} /></div>
+        <div className="field"><label className="label">Email</label><input className="input" type="email" value={f.email} onChange={e=>set("email",e.target.value)} /></div>
+        <div className="field-full"><label className="label">Warmth</label><div className="tags-select">{WARMTH_LEVELS.map(w=><button key={w.id} onClick={()=>set("warmth",w.id)} className={`tag-btn ${f.warmth===w.id?"active":""}`}><span className="warmth-dot" style={{background:w.color}} />{w.label}</button>)}</div></div>
+        <div className="field-full"><label className="checkbox-label"><input type="checkbox" checked={f.is_internal} onChange={e=>set("is_internal",e.target.checked)} /> Internal team member</label></div>
+        <div className="field-full"><label className="label">Tags</label><div className="tags-select">{TAG_OPTIONS.map(t=><button key={t} onClick={()=>toggleTag(t)} className={`tag-btn ${f.tags.includes(t)?"active":""}`}>{t}</button>)}</div></div>
+      </div>
+      <div className="modal-actions">
+        <button onClick={onCancel} className="btn-sec">Cancel</button>
+        <button onClick={submit} className="btn-primary" disabled={!f.name.trim() || saving}>Add Contact</button>
+      </div>
+    </div>
+  );
+}
+
+function QuickAddOrganizationForm({ onSave, onCancel }) {
+  const [f, setF] = useState({ name:"", type:"competitor", sector:"", description:"" });
+  const [saving, setSaving] = useState(false);
+  const set = (k,v) => setF(p => ({...p,[k]:v}));
+  const submit = async () => {
+    if (!f.name.trim() || saving) return;
+    setSaving(true);
+    try { await onSave(f); } finally { setSaving(false); }
+  };
+  return (
+    <div className="quickadd-inline-form">
+      <div className="form-grid">
+        <div className="field-full"><label className="label">Name *</label><input className="input" value={f.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. Competitor Inc." /></div>
+        <div className="field"><label className="label">Type</label><select className="input" value={f.type} onChange={e=>set("type",e.target.value)}>{ORG_TYPES.map(t=><option key={t.id} value={t.id}>{t.label}</option>)}</select></div>
+        <div className="field"><label className="label">Sector</label><input className="input" value={f.sector} onChange={e=>set("sector",e.target.value)} placeholder="e.g. Oncology, Fintech" /></div>
+        <div className="field-full"><label className="label">Description</label><textarea className="input textarea" value={f.description} onChange={e=>set("description",e.target.value)} /></div>
+      </div>
+      <div className="modal-actions">
+        <button onClick={onCancel} className="btn-sec">Cancel</button>
+        <button onClick={submit} className="btn-primary" disabled={!f.name.trim() || saving}>Add Organization</button>
+      </div>
+    </div>
+  );
+}
+
+function buildEntityOptions(contacts, deals, enablers, organizations) {
+  return [
+    ...contacts.map(c => ({ type: "contact", id: c.id, label: `${c.name} (Contact)` })),
+    ...deals.map(d => ({ type: "deal", id: d.id, label: `${d.company} (Deal)` })),
+    ...enablers.map(en => ({ type: "enabler", id: en.id, label: `${en.name} (Enabler)` })),
+    ...organizations.map(o => ({ type: "organization", id: o.id, label: `${o.name} (${ORG_TYPES.find(t => t.id === o.type)?.label || "Organization"})` })),
+  ];
+}
+
+function QuickConnectionForm({ contacts, deals, enablers, organizations, onSave, onCancel }) {
+  const options = buildEntityOptions(contacts, deals, enablers, organizations);
+  const [aKey, setAKey] = useState("");
+  const [bKey, setBKey] = useState("");
+  const [relationship, setRelationship] = useState("knows");
+  const [strength, setStrength] = useState("medium");
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const parseKey = (k) => { const idx = k.indexOf(":"); return { type: k.slice(0, idx), id: k.slice(idx + 1) }; };
+
+  const submit = async () => {
+    if (!aKey || !bKey || aKey === bKey || saving) return;
+    setSaving(true);
+    try {
+      const a = parseKey(aKey), b = parseKey(bKey);
+      await onSave({ aType: a.type, aId: a.id, bType: b.type, bId: b.id, relationship, strength, notes });
+    } finally { setSaving(false); }
   };
 
   return (
-    <div>
-      <div className="contacts-toolbar">
-        <div className="section-label" style={{margin:0}}>Enabler → Deal Connections</div>
-        <button onClick={() => setModalOpen(true)} className="btn-primary">+ Add Connection</button>
+    <div className="quickadd-inline-form">
+      <div className="quickadd-inline-row">
+        <select className="input" value={aKey} onChange={e => setAKey(e.target.value)}>
+          <option value="">Select entity...</option>
+          {options.map(o => <option key={`${o.type}:${o.id}`} value={`${o.type}:${o.id}`}>{o.label}</option>)}
+        </select>
+        <span className="connection-arrow">→</span>
+        <select className="input" value={bKey} onChange={e => setBKey(e.target.value)}>
+          <option value="">Select entity...</option>
+          {options.map(o => <option key={`${o.type}:${o.id}`} value={`${o.type}:${o.id}`}>{o.label}</option>)}
+        </select>
       </div>
-      {dealEnablers.length === 0 ? (
-        <div className="empty-state">No connections yet.</div>
-      ) : (
-        <div className="todo-list mb">
-          {dealEnablers.map(de => {
-            const rel = DEAL_ENABLER_RELATIONSHIPS.find(r => r.id === de.relationship);
-            const str = STRENGTHS.find(s => s.id === de.strength);
-            return (
-              <div key={de.id} className="connection-row">
-                <div className="connection-main">
-                  <span className="connection-title">{de.enablers?.name || "Unknown enabler"} → {de.deals?.company || "Unknown deal"}</span>
-                  <div className="todo-meta-row">
-                    {rel && <span className="badge">{rel.label}</span>}
-                    {str && <span className="badge" style={{background:str.color+"22",color:str.color,border:`1px solid ${str.color}44`}}>{str.label}</span>}
-                  </div>
-                  {de.notes && <div className="connection-notes">{de.notes}</div>}
-                </div>
-                <button onClick={() => { if (confirm("Remove this connection?")) onRemove(de.id); }} className="person-remove" title="Remove">✕</button>
-              </div>
-            );
-          })}
-        </div>
-      )}
+      <div className="quickadd-inline-row">
+        <select className="input" value={relationship} onChange={e => setRelationship(e.target.value)}>
+          {NETWORK_EDGE_RELATIONSHIPS.map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
+        </select>
+        <select className="input" value={strength} onChange={e => setStrength(e.target.value)}>
+          {STRENGTHS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+        </select>
+      </div>
+      <textarea className="input textarea" placeholder="Notes (optional)" value={notes} onChange={e => setNotes(e.target.value)} />
+      <div className="modal-actions">
+        <button onClick={onCancel} className="btn-sec">Cancel</button>
+        <button onClick={submit} className="btn-primary" disabled={!aKey || !bKey || aKey === bKey || saving}>Add Connection</button>
+      </div>
+    </div>
+  );
+}
 
-      <div className="section-label boss-section-label">Network Edges</div>
-      {networkEdges.length === 0 ? (
-        <div className="empty-small">No network edges recorded yet.</div>
-      ) : (
-        <div className="todo-list">
-          {networkEdges.map(ne => {
-            const rel = NETWORK_EDGE_RELATIONSHIPS.find(r => r.id === ne.relationship);
-            const str = STRENGTHS.find(s => s.id === ne.strength);
-            return (
-              <div key={ne.id} className="connection-row">
-                <div className="connection-main">
-                  <span className="connection-title">{resolveEntity(ne.source_type, ne.source_id)} → {resolveEntity(ne.target_type, ne.target_id)}</span>
-                  <div className="todo-meta-row">
-                    {rel && <span className="badge">{rel.label}</span>}
-                    {str && <span className="badge" style={{background:str.color+"22",color:str.color,border:`1px solid ${str.color}44`}}>{str.label}</span>}
-                    <span className="task-link-static">{ne.direction === "one_way" ? "One-way" : "Bidirectional"}</span>
-                  </div>
-                  {ne.notes && <div className="connection-notes">{ne.notes}</div>}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+function NetworkQuickAddBar({ contacts, deals, enablers, organizations, onSaveContact, onSaveOrganization, onSaveConnection, onOpenBulkAdd }) {
+  const [active, setActive] = useState(null);
+  const toggle = (key) => setActive(a => (a === key ? null : key));
 
-      {modalOpen && (
-        <AddConnectionModal
+  return (
+    <div className="network-quickadd">
+      <div className="network-quickadd-buttons">
+        <button onClick={() => toggle("contact")} className={`btn-primary ${active === "contact" ? "active-toggle" : ""}`}>+ Contact</button>
+        <button onClick={() => toggle("organization")} className={`btn-primary ${active === "organization" ? "active-toggle" : ""}`}>+ Organization</button>
+        <button onClick={() => toggle("connection")} className={`btn-primary ${active === "connection" ? "active-toggle" : ""}`}>+ Connection</button>
+        <button onClick={onOpenBulkAdd} className="btn-copy">Bulk Add</button>
+      </div>
+      {active === "contact" && (
+        <QuickAddContactForm onCancel={() => setActive(null)} onSave={async (f) => { await onSaveContact(f); setActive(null); }} />
+      )}
+      {active === "organization" && (
+        <QuickAddOrganizationForm onCancel={() => setActive(null)} onSave={async (f) => { await onSaveOrganization(f); setActive(null); }} />
+      )}
+      {active === "connection" && (
+        <QuickConnectionForm
+          contacts={contacts}
           deals={deals}
           enablers={enablers}
-          onSave={async (form) => { await onAdd(form); setModalOpen(false); }}
-          onClose={() => setModalOpen(false)}
+          organizations={organizations}
+          onCancel={() => setActive(null)}
+          onSave={async (f) => { await onSaveConnection(f); setActive(null); }}
         />
       )}
     </div>
   );
 }
 
-function InternalTeamSection({ contacts, deals, enablers, dealContacts, enablerContacts, onToggleInternal, onOpenContact }) {
-  const [addContactId, setAddContactId] = useState("");
-  const internalContacts = contacts.filter(c => c.is_internal);
-  const availableContacts = contacts.filter(c => !c.is_internal);
+function OrganizationInlineDetail({ organization, onSave, onDelete, onClose }) {
+  const [f, setF] = useState({ id:organization.id, name:organization.name||"", type:organization.type||"competitor", sector:organization.sector||"", description:organization.description||"", website:organization.website||"", notes:organization.notes||"" });
+  const set = (k,v) => setF(p => ({...p,[k]:v}));
+  return (
+    <div className="org-inline-detail" onClick={e => e.stopPropagation()}>
+      <div className="form-grid">
+        <div className="field-full"><label className="label">Name *</label><input className="input" value={f.name} onChange={e=>set("name",e.target.value)} /></div>
+        <div className="field"><label className="label">Type</label><select className="input" value={f.type} onChange={e=>set("type",e.target.value)}>{ORG_TYPES.map(t=><option key={t.id} value={t.id}>{t.label}</option>)}</select></div>
+        <div className="field"><label className="label">Sector</label><input className="input" value={f.sector} onChange={e=>set("sector",e.target.value)} /></div>
+        <div className="field-full"><label className="label">Website</label><input className="input" value={f.website} onChange={e=>set("website",e.target.value)} /></div>
+        <div className="field-full"><label className="label">Description</label><textarea className="input textarea" value={f.description} onChange={e=>set("description",e.target.value)} /></div>
+        <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={f.notes} onChange={e=>set("notes",e.target.value)} /></div>
+      </div>
+      <div className="modal-actions">
+        <button onClick={() => { if (confirm(`Delete ${organization.name}?`)) onDelete(organization.id); }} className="btn-sec btn-danger">Delete</button>
+        <button onClick={onClose} className="btn-sec">Close</button>
+        <button onClick={() => f.name.trim() && onSave(f)} className="btn-primary" disabled={!f.name.trim()}>Save</button>
+      </div>
+    </div>
+  );
+}
+
+function NetworkDirectory({ contacts, deals, enablers, organizations, dealContacts, enablerContacts, dealEnablers, networkEdges, onOpenContact, onOpenDeal, onOpenEnabler, onEditOrganization, onDeleteOrganization }) {
+  const [tab, setTab] = useState("all");
+  const [search, setSearch] = useState("");
+  const [expandedOrgId, setExpandedOrgId] = useState(null);
+
+  const items = [
+    ...contacts.map(c => ({ kind:"contact", id:c.id, name:c.name, sub:c.company||c.role||"", warmth:c.warmth, isInternal:!!c.is_internal, lastActivity:c.last_contacted_at, typeLabel:c.is_internal?"Internal":"Contact", typeColor:c.is_internal?"#22C55E":"#3B82F6", raw:c })),
+    ...deals.map(d => ({ kind:"deal", id:d.id, name:d.company, sub:d.contact_name||"", lastActivity:d.last_activity_at, typeLabel:"Target", typeColor:"#F59E0B", raw:d })),
+    ...enablers.map(en => ({ kind:"enabler", id:en.id, name:en.name, sub:ENABLER_TYPES.find(t=>t.id===en.type)?.label||"", lastActivity:en.last_activity_at, typeLabel:"Enabler", typeColor:"#8B5CF6", raw:en })),
+    ...organizations.map(o => { const t = ORG_TYPES.find(x=>x.id===o.type); return { kind:"organization", id:o.id, name:o.name, sub:o.sector||"", typeLabel:t?.label||"Organization", typeColor:t?.color||"#94A3B8", orgType:o.type, raw:o }; }),
+  ];
+
+  const entityMap = { contact: contacts, deal: deals, enabler: enablers, organization: organizations };
+  const entityLabel = (type, entity) => entity ? (entity.company || entity.name) : null;
+  const openByType = { contact: onOpenContact, deal: onOpenDeal, enabler: onOpenEnabler };
+
+  // Any network_edges row touching this entity, resolved (where possible) to a name + click-through.
+  const getEdgeLines = (kind, id) => {
+    const lines = [];
+    networkEdges.filter(ne => (ne.source_type === kind && ne.source_id === id) || (ne.target_type === kind && ne.target_id === id)).forEach(ne => {
+      const isSource = ne.source_type === kind && ne.source_id === id;
+      const otherType = isSource ? ne.target_type : ne.source_type;
+      const otherId = isSource ? ne.target_id : ne.source_id;
+      const found = entityMap[otherType]?.find(x => x.id === otherId);
+      const label = entityLabel(otherType, found) || `${otherType} (${String(otherId).slice(0, 8)})`;
+      const typeName = otherType.charAt(0).toUpperCase() + otherType.slice(1);
+      lines.push({ label: `${label} (${typeName})`, onClick: openByType[otherType] ? () => openByType[otherType](otherId) : undefined });
+    });
+    return lines;
+  };
+
+  const getConnectionLines = (item) => {
+    const lines = [];
+    if (item.kind === "contact") {
+      const linkedEnablerIds = new Set(enablerContacts.filter(ec => ec.contact_id === item.id).map(ec => ec.enabler_id));
+      const linkedDealIdsDirect = new Set([
+        ...dealContacts.filter(dc => dc.contact_id === item.id).map(dc => dc.deal_id),
+        ...deals.filter(d => d.contact_id === item.id).map(d => d.id),
+      ]);
+      enablers.filter(en => linkedEnablerIds.has(en.id)).forEach(en => lines.push({ label: `${en.name} (Enabler)`, onClick: () => onOpenEnabler(en.id) }));
+      deals.filter(d => linkedDealIdsDirect.has(d.id)).forEach(d => lines.push({ label: `${d.company} (Deal)`, onClick: () => onOpenDeal(d.id) }));
+      linkedEnablerIds.forEach(enId => {
+        const en = enablers.find(x => x.id === enId);
+        dealEnablers.filter(de => de.enabler_id === enId).forEach(de => {
+          if (linkedDealIdsDirect.has(de.deal_id)) return;
+          const d = deals.find(x => x.id === de.deal_id);
+          if (d && en) lines.push({ label: `${d.company} (Deal via ${en.name})`, onClick: () => onOpenDeal(d.id) });
+        });
+      });
+    } else if (item.kind === "deal") {
+      dealEnablers.filter(de => de.deal_id === item.id).forEach(de => { const en = enablers.find(x=>x.id===de.enabler_id); if (en) lines.push({ label:`${en.name} (Enabler)`, onClick:()=>onOpenEnabler(en.id) }); });
+      const linkedContactIds = new Set([
+        ...dealContacts.filter(dc => dc.deal_id === item.id).map(dc => dc.contact_id),
+        ...(item.raw.contact_id ? [item.raw.contact_id] : []),
+      ]);
+      contacts.filter(c => linkedContactIds.has(c.id)).forEach(c => lines.push({ label:`${c.name} (Contact)`, onClick:()=>onOpenContact(c.id) }));
+    } else if (item.kind === "enabler") {
+      dealEnablers.filter(de => de.enabler_id === item.id).forEach(de => { const d = deals.find(x=>x.id===de.deal_id); if (d) lines.push({ label:`${d.company} (Deal)`, onClick:()=>onOpenDeal(d.id) }); });
+      const linkedContactIds = new Set([
+        ...enablerContacts.filter(ec => ec.enabler_id === item.id).map(ec => ec.contact_id),
+        ...(item.raw.contact_id ? [item.raw.contact_id] : []),
+      ]);
+      contacts.filter(c => linkedContactIds.has(c.id)).forEach(c => lines.push({ label:`${c.name} (Contact)`, onClick:()=>onOpenContact(c.id) }));
+    }
+    lines.push(...getEdgeLines(item.kind, item.id));
+    return lines;
+  };
+
+  const matchesTab = (item) => {
+    if (tab === "all") return true;
+    if (tab === "contacts") return item.kind === "contact";
+    if (tab === "internal") return item.kind === "contact" && item.isInternal;
+    if (tab === "targets") return item.kind === "deal";
+    if (tab === "enablers") return item.kind === "enabler";
+    if (tab === "competitors") return item.kind === "organization" && item.orgType === "competitor";
+    if (tab === "market_players") return item.kind === "organization" && item.orgType === "market_player";
+    return true;
+  };
+
+  const q = search.trim().toLowerCase();
+  const filtered = items
+    .filter(matchesTab)
+    .filter(item => !q || item.name?.toLowerCase().includes(q) || item.sub?.toLowerCase().includes(q))
+    .sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name));
 
   return (
-    <div>
+    <div className="network-directory">
       <div className="contacts-toolbar">
         <div className="search-row">
-          <select className="input" value={addContactId} onChange={e => setAddContactId(e.target.value)}>
-            <option value="">Select a contact to mark internal...</option>
-            {availableContacts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
+          <input className="input" placeholder="Search the network..." value={search} onChange={e => setSearch(e.target.value)} />
         </div>
-        <button
-          onClick={() => { if (addContactId) { onToggleInternal(addContactId, false); setAddContactId(""); } }}
-          className="btn-primary"
-          disabled={!addContactId}
-        >+ Mark as Internal</button>
       </div>
-      {internalContacts.length === 0 ? (
-        <div className="empty-state">No internal team members yet.</div>
+      <div className="timeline-tabs mb">
+        {DIRECTORY_TABS.map(t => <button key={t.id} onClick={() => setTab(t.id)} className={`tag-btn ${tab === t.id ? "active" : ""}`}>{t.label}</button>)}
+      </div>
+      {filtered.length === 0 ? (
+        <div className="empty-state">No entities match.</div>
       ) : (
-        <div className="contacts-grid">
-          {internalContacts.map(c => {
-            const linkedDealIds = new Set([
-              ...dealContacts.filter(dc => dc.contact_id === c.id).map(dc => dc.deal_id),
-              ...deals.filter(d => d.contact_id === c.id).map(d => d.id),
-            ]);
-            const linkedEnablerIds = new Set(enablerContacts.filter(ec => ec.contact_id === c.id).map(ec => ec.enabler_id));
-            const linkedDealNames = deals.filter(d => linkedDealIds.has(d.id)).map(d => d.company);
-            const linkedEnablerNames = enablers.filter(en => linkedEnablerIds.has(en.id)).map(en => en.name);
+        <div className="todo-list">
+          {filtered.map(item => {
+            const lines = getConnectionLines(item);
+            const warmth = item.kind === "contact" ? WARMTH_LEVELS.find(w => w.id === (item.warmth || "unknown")) : null;
             return (
-              <div key={c.id} className="contact-card" onClick={() => onOpenContact(c.id)}>
-                <div className="contact-top">
-                  <div>
-                    <div className="contact-name">{c.name}</div>
-                    {c.role && <div className="contact-role">{c.role}</div>}
+              <div key={`${item.kind}-${item.id}`} className="directory-row">
+                <div
+                  className="directory-row-main"
+                  onClick={() => {
+                    if (item.kind === "contact") onOpenContact(item.id);
+                    else if (item.kind === "deal") onOpenDeal(item.id);
+                    else if (item.kind === "enabler") onOpenEnabler(item.id);
+                    else if (item.kind === "organization") setExpandedOrgId(id => (id === item.id ? null : item.id));
+                  }}
+                >
+                  <div className="directory-row-top">
+                    {warmth && <span className="warmth-dot" style={{background:warmth.color}} title={`Warmth: ${warmth.label}`} />}
+                    <span className="directory-name">{item.name}</span>
+                    <span className="badge" style={{background:item.typeColor+"22",color:item.typeColor,border:`1px solid ${item.typeColor}44`}}>{item.typeLabel}</span>
+                    {item.sub && <span className="directory-sub">{item.sub}</span>}
+                    <span className="directory-meta">{lines.length} connection{lines.length !== 1 ? "s" : ""}{item.lastActivity ? ` . ${daysAgo(item.lastActivity)}d ago` : ""}</span>
                   </div>
-                  <button onClick={(e) => { e.stopPropagation(); onToggleInternal(c.id, true); }} className="person-remove" title="Remove from internal team">✕</button>
+                  {lines.length > 0 && (
+                    <div className="directory-connections">
+                      {item.name} ({item.typeLabel}) → connected to: {lines.map((l, i) => (
+                        <span key={i}>
+                          {l.onClick ? (
+                            <button onClick={(e) => { e.stopPropagation(); l.onClick(); }} className="task-link">{l.label}</button>
+                          ) : (
+                            <span className="task-link-static">{l.label}</span>
+                          )}
+                          {i < lines.length - 1 ? ", " : ""}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                {linkedDealNames.length > 0 && <div className="contact-meta">Deals: {linkedDealNames.join(", ")}</div>}
-                {linkedEnablerNames.length > 0 && <div className="contact-meta">Enablers: {linkedEnablerNames.join(", ")}</div>}
-                {linkedDealNames.length === 0 && linkedEnablerNames.length === 0 && <div className="contact-meta">No linked deals or enablers</div>}
+                {item.kind === "organization" && expandedOrgId === item.id && (
+                  <OrganizationInlineDetail
+                    organization={item.raw}
+                    onSave={onEditOrganization}
+                    onDelete={onDeleteOrganization}
+                    onClose={() => setExpandedOrgId(null)}
+                  />
+                )}
               </div>
             );
           })}
         </div>
       )}
     </div>
+  );
+}
+
+function BulkAddModal({ onSaveContact, onSaveOrganization, onClose }) {
+  const emptyRow = () => ({ name:"", type:"contact", company:"", role:"", email:"", warmth:"unknown" });
+  const [rows, setRows] = useState([emptyRow(), emptyRow(), emptyRow()]);
+  const [saving, setSaving] = useState(false);
+
+  const setCell = (i, k, v) => setRows(prev => prev.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)));
+  const addRow = () => setRows(prev => [...prev, emptyRow()]);
+  const removeRow = (i) => setRows(prev => prev.filter((_, idx) => idx !== i));
+
+  const saveAll = async () => {
+    const valid = rows.filter(r => r.name.trim());
+    if (valid.length === 0 || saving) return;
+    setSaving(true);
+    try {
+      for (const r of valid) {
+        if (r.type === "organization") {
+          await onSaveOrganization({ name: r.name.trim(), type: "market_player", sector: r.company.trim() });
+        } else {
+          await onSaveContact({ name: r.name.trim(), company: r.company.trim(), role: r.role.trim(), email: r.email.trim(), warmth: r.warmth });
+        }
+      }
+      onClose();
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="overlay" onClick={onClose}><div className="modal bulk-add-modal" onClick={e => e.stopPropagation()}>
+      <div className="modal-header"><div className="modal-title">Bulk Add</div><button onClick={onClose} className="close-btn">✕</button></div>
+      <div className="bulk-add-table">
+        <div className="bulk-add-row bulk-add-head">
+          <span>Name</span><span>Type</span><span>Company</span><span>Role</span><span>Email</span><span>Warmth</span><span />
+        </div>
+        {rows.map((r, i) => (
+          <div className="bulk-add-row" key={i}>
+            <input className="input" value={r.name} onChange={e => setCell(i, "name", e.target.value)} placeholder="Name" />
+            <select className="input" value={r.type} onChange={e => setCell(i, "type", e.target.value)}>
+              <option value="contact">Contact</option>
+              <option value="organization">Organization</option>
+            </select>
+            <input className="input" value={r.company} onChange={e => setCell(i, "company", e.target.value)} placeholder={r.type === "organization" ? "Sector" : "Company"} />
+            <input className="input" value={r.role} onChange={e => setCell(i, "role", e.target.value)} placeholder="Role" disabled={r.type === "organization"} />
+            <input className="input" value={r.email} onChange={e => setCell(i, "email", e.target.value)} placeholder="Email" disabled={r.type === "organization"} />
+            <select className="input" value={r.warmth} onChange={e => setCell(i, "warmth", e.target.value)} disabled={r.type === "organization"}>
+              {WARMTH_LEVELS.map(w => <option key={w.id} value={w.id}>{w.label}</option>)}
+            </select>
+            <button onClick={() => removeRow(i)} className="person-remove" title="Remove row">✕</button>
+          </div>
+        ))}
+      </div>
+      <div className="modal-actions bulk-add-actions">
+        <button onClick={addRow} className="btn-sec">+ Add Row</button>
+        <div className="bulk-add-actions-right">
+          <button onClick={onClose} className="btn-sec">Cancel</button>
+          <button onClick={saveAll} className="btn-primary" disabled={saving}>{saving ? "Saving..." : "Save All"}</button>
+        </div>
+      </div>
+    </div></div>
   );
 }

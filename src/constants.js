@@ -77,5 +77,5 @@ export const WARMTH_LEVELS = [
 export const TAG_OPTIONS = [
   "Decision Maker", "Technical Buyer", "Champion", "Influencer",
   "Gatekeeper", "End User", "C-Suite", "Government",
-  "Private Sector", "Oncology", "Data", "Procurement"
+  "Private Sector", "Oncology", "Data", "Procurement", "Internal Team"
 ];
