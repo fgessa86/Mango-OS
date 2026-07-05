@@ -515,9 +515,11 @@ export default function App() {
   // Each role's institutionKey is "type:id" for an existing institution, or a
   // { newName, newType } object to create a fresh organization inline. Also
   // writes the optional "connected through" and "can help us reach" edges.
-  const addPersonWithRoles = async ({ name, email, phone, warmth, notes, roles, connectedThrough, canReach, relationship }) => {
+  const addPersonWithRoles = async ({ name, company, role, email, phone, warmth, notes, roles, connectedThrough, canReach, relationship }) => {
     try {
-      const created = await persistContact({ name, email, phone, warmth, notes });
+      // company/role, when supplied (e.g. adding a new person from an institution
+      // sheet), populate the contact's own company/role fields in the same save.
+      const created = await persistContact({ name, company, role, email, phone, warmth, notes });
       if (!created) throw new Error("Could not create contact");
       const validRoles = (roles || []).filter((r) => r.institutionKey || (r.newName || "").trim());
       let primaryAssigned = false;
@@ -2423,7 +2425,7 @@ function InstitutionSheet({
             customOptions={customOptions}
             onAddCustomOption={onAddCustomOption}
             onAddExisting={async (contactId, role) => { await onAddPersonRole({ contactId, entityType: primary.type, entityId: primary.id, roleTitle: role }); setAddPersonOpen(false); }}
-            onAddNew={async (form) => { await onAddPersonWithRoles({ ...form, roles: [{ institutionKey: `${primary.type}:${primary.id}`, role: form.role }] }); setAddPersonOpen(false); }}
+            onAddNew={async (form) => { await onAddPersonWithRoles({ ...form, company: inst.name, roles: [{ institutionKey: `${primary.type}:${primary.id}`, role: form.role }] }); setAddPersonOpen(false); }}
           />
         )}
         {people.length === 0 ? (
