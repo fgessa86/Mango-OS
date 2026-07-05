@@ -265,10 +265,14 @@ export default function MapTab({ institutions, contacts, contactRoles, dealEnabl
       const r = st.r * scale;
       const dark = d3.color(st.fill).darker(0.9).formatHex();
       if (d.fresh) g.append("circle").attr("class", "map-pulse-ring").attr("r", r).attr("fill", "none").attr("stroke", st.fill).attr("stroke-width", 2);
-      g.append("circle").attr("class", "map-node-circle").attr("r", r).attr("fill", st.fill).attr("stroke", dark).attr("stroke-width", 1);
+      const circle = g.append("circle").attr("class", "map-node-circle").attr("r", r).attr("stroke", dark).attr("stroke-width", 1);
+      // Person nodes are near-white by design (spec #E8ECF1, which is --text in
+      // dark mode); use the theme text color so they stay visible in light mode.
+      if (d.type === "person") circle.style("fill", "var(--text)"); else circle.attr("fill", st.fill);
       const showLabel = isInstitutionType(d.type) || d.type === "internal_person";
+      // Label fill comes from CSS (.map-node-label -> var(--text)) so it flips with the theme.
       g.append("text").attr("class", "map-node-label").attr("text-anchor", "middle").attr("dy", r + 12)
-        .attr("font-size", isPersonType(d.type) ? 10 : 11).attr("fill", "#E8ECF1").attr("opacity", showLabel ? 1 : 0).text(truncate(d.label));
+        .attr("font-size", isPersonType(d.type) ? 10 : 11).attr("opacity", showLabel ? 1 : 0).text(truncate(d.label));
     });
 
     // Hover: emphasize the node and its neighbors, dim the rest.
@@ -464,7 +468,7 @@ export default function MapTab({ institutions, contacts, contactRoles, dealEnabl
               <div>
                 <div className="map-panel-name">{panelNode.label}</div>
                 <div className="map-panel-badges">
-                  <span className="badge" style={{ background: styleOf(panelNode.type).fill + "22", color: styleOf(panelNode.type).fill, border: `1px solid ${styleOf(panelNode.type).fill}44` }}>{styleOf(panelNode.type).label}</span>
+                  <span className="badge" style={{ background: styleOf(panelNode.type).fill + "22", color: panelNode.type === "person" ? "var(--text)" : styleOf(panelNode.type).fill, border: `1px solid ${styleOf(panelNode.type).fill}44` }}>{styleOf(panelNode.type).label}</span>
                   {panelNode.city && <span className="city-pin">📍 {panelNode.city}</span>}
                 </div>
               </div>
