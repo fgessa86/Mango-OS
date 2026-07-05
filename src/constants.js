@@ -39,9 +39,27 @@ export const ORG_TYPES = [
   { id: "competitor", label: "Competitor", color: "#EF4444" },
   { id: "market_player", label: "Market Player", color: "#22C55E" },
   { id: "regulator", label: "Regulator", color: "#3B82F6" },
-  { id: "payer", label: "Payer", color: "#8B5CF6" },
+  { id: "payer", label: "Payer", color: "#A855F7" },
   { id: "association", label: "Association", color: "#F97316" },
   { id: "research", label: "Research", color: "#14B8A6" },
+  { id: "government", label: "Government", color: "#0EA5E9" },
+  { id: "hospital", label: "Hospital", color: "#059669" },
+];
+
+// The unified "everything is an institution" type vocabulary for the Network
+// tab: target/enabler route to the deals/enablers tables on creation (see
+// addInstitution), everything else routes to organizations. Field name for
+// custom_options is "institution_type".
+export const INSTITUTION_TYPES = [
+  { id: "target", label: "Target", color: "#F59E0B" },
+  { id: "enabler", label: "Enabler", color: "#8B5CF6" },
+  { id: "competitor", label: "Competitor", color: "#EF4444" },
+  { id: "payer", label: "Payer", color: "#A855F7" },
+  { id: "government", label: "Government", color: "#0EA5E9" },
+  { id: "regulator", label: "Regulator", color: "#3B82F6" },
+  { id: "association", label: "Association", color: "#F97316" },
+  { id: "research", label: "Research", color: "#14B8A6" },
+  { id: "hospital", label: "Hospital", color: "#059669" },
 ];
 
 export const DEAL_ENABLER_RELATIONSHIPS = [
@@ -67,10 +85,6 @@ export const NETWORK_EDGE_RELATIONSHIPS = [
   { id: "invested_in", label: "Invested In" },
   { id: "custom", label: "Custom" },
 ];
-
-// Relationship types where a free-text "role/title" makes sense (connecting a
-// person to an organization, e.g. "CEO", "Board Member").
-export const PERSON_ORG_RELATIONSHIPS = ["works_at", "board_member", "advisor", "reports_to"];
 
 export const SAUDI_CITIES = [
   "Riyadh", "Jeddah", "Dammam", "Dhahran", "Al Khobar",

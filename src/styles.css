@@ -215,7 +215,7 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .person-role { font-size: 11px; color: var(--muted); }
 .person-company { font-size: 11px; color: var(--accent); }
 .person-meta { font-size: 10px; color: var(--faint); margin-top: 6px; }
-.cross-pollination-badge { margin-top: 6px; font-size: 10px; background: rgba(245,166,35,0.12); color: var(--accent); border: 1px solid rgba(245,166,35,0.3); }
+.also-at { margin-top: 6px; font-size: 10px; color: var(--accent); }
 .person-remove { background: none; border: none; color: var(--dim); font-size: 12px; cursor: pointer; padding: 2px 4px; flex-shrink: 0; }
 .person-remove:hover { color: #f87171; }
 .person-filter-badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(245,166,35,0.13); color: var(--accent); font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 8px; margin-bottom: 10px; }
@@ -288,7 +288,6 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 .connection-main { flex: 1; min-width: 0; }
 .connection-title { font-size: 13px; font-weight: 600; color: var(--text); }
 .connection-notes { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
-.connection-arrow { color: var(--muted); font-size: 14px; flex-shrink: 0; }
 .path-row { background: var(--surface); border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; }
 .path-chain { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
 .path-notes { font-size: 11px; color: var(--muted); }
@@ -303,28 +302,28 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 
 .city-pin { font-size: 10px; color: var(--muted); white-space: nowrap; }
 
-.network-quickadd { background: var(--surface); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
-.network-quickadd-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
-.network-quickadd-buttons .active-toggle { background: var(--btn-sec-bg); color: var(--btn-sec-text); }
 .quickadd-inline-form { background: var(--bg); border-radius: 8px; padding: 12px; margin-top: 10px; }
 .quickadd-inline-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
 .quickadd-inline-row .input { flex: 1; }
 
 .network-directory { background: var(--surface); border-radius: 10px; padding: 14px; }
-.directory-row { background: var(--bg); border-radius: 8px; margin-bottom: 6px; overflow: hidden; }
-.directory-row-main { padding: 10px 12px; cursor: pointer; }
-.directory-row-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.directory-name { font-size: 13px; font-weight: 700; color: var(--text); }
-.directory-sub { font-size: 12px; color: var(--muted); }
-.directory-meta { font-size: 10px; color: var(--faint); margin-left: auto; }
-.directory-connections { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+.network-top-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.network-search { flex: 1; min-width: 200px; }
+.network-top-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.network-top-buttons .active-toggle { background: var(--btn-sec-bg); color: var(--btn-sec-text); }
+.network-filter-row { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 
-.bulk-add-modal { max-width: 980px; }
-.bulk-add-table { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
-.bulk-add-row { display: grid; grid-template-columns: 1.1fr 0.9fr 1fr 0.9fr 0.9fr 1.2fr 0.9fr auto; gap: 6px; align-items: center; }
-.bulk-add-head { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
-.bulk-add-actions { justify-content: space-between; }
-.bulk-add-actions-right { display: flex; gap: 8px; }
+.institution-group { margin-bottom: 22px; }
+.institution-group-header { font-size: 11px; font-weight: 700; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 10px; }
+.institution-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.institution-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; cursor: pointer; transition: border-color 0.15s; }
+.institution-card:hover { border-color: var(--dark); }
+.institution-card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 6px; margin-bottom: 4px; }
+.institution-name { font-size: 14px; font-weight: 700; color: var(--text); }
+.institution-people-count { font-size: 11px; color: var(--muted); margin-top: 6px; }
+.institution-people-preview { margin-top: 6px; border-top: 1px solid var(--border); padding-top: 6px; }
+.institution-preview-person { font-size: 11px; color: var(--muted); line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.institution-last-activity { font-size: 10px; color: var(--faint); margin-top: 6px; }
 
 @media (max-width: 768px) {
   .kanban { flex-direction: column; }
