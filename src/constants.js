@@ -35,6 +35,45 @@ export const PRIORITIES = [
   { id: "low", label: "Low", color: "#7B8A9E" },
 ];
 
+export const ORG_TYPES = [
+  { id: "competitor", label: "Competitor", color: "#EF4444" },
+  { id: "market_player", label: "Market Player", color: "#22C55E" },
+  { id: "regulator", label: "Regulator", color: "#3B82F6" },
+  { id: "payer", label: "Payer", color: "#8B5CF6" },
+  { id: "association", label: "Association", color: "#F97316" },
+  { id: "research", label: "Research", color: "#14B8A6" },
+];
+
+export const DEAL_ENABLER_RELATIONSHIPS = [
+  { id: "can_introduce", label: "Can Introduce" },
+  { id: "active", label: "Active" },
+  { id: "institutional", label: "Institutional" },
+];
+
+export const NETWORK_EDGE_RELATIONSHIPS = [
+  { id: "knows", label: "Knows" },
+  { id: "can_introduce", label: "Can Introduce" },
+  { id: "active_relationship", label: "Active Relationship" },
+  { id: "competitor_presence", label: "Competitor Presence" },
+  { id: "internal_connection", label: "Internal Connection" },
+  { id: "institutional", label: "Institutional" },
+];
+
+export const STRENGTHS = [
+  { id: "strong", label: "Strong", color: "#22C55E" },
+  { id: "medium", label: "Medium", color: "#F59E0B" },
+  { id: "weak", label: "Weak", color: "#94A3B8" },
+  { id: "unknown", label: "Unknown", color: "#64748B" },
+];
+
+export const WARMTH_LEVELS = [
+  { id: "unknown", label: "Unknown", color: "#94A3B8" },
+  { id: "cold", label: "Cold", color: "#3B82F6" },
+  { id: "warm", label: "Warm", color: "#F59E0B" },
+  { id: "hot", label: "Hot", color: "#F97316" },
+  { id: "active", label: "Active", color: "#22C55E" },
+];
+
 export const TAG_OPTIONS = [
   "Decision Maker", "Technical Buyer", "Champion", "Influencer",
   "Gatekeeper", "End User", "C-Suite", "Government",

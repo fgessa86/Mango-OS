@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "./supabase";
 import { generateSummary, summarizeImage } from "./anthropic";
-import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES } from "./constants";
+import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, STRENGTHS, WARMTH_LEVELS } from "./constants";
 import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import "./styles.css";
 
@@ -45,6 +45,10 @@ export default function App() {
   const [enablerContacts, setEnablerContacts] = useState([]);
   const [todos, setTodos] = useState([]);
   const [taskFilter, setTaskFilter] = useState("all");
+  const [organizations, setOrganizations] = useState([]);
+  const [dealEnablers, setDealEnablers] = useState([]);
+  const [networkEdges, setNetworkEdges] = useState([]);
+  const [networkSection, setNetworkSection] = useState("organizations");
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
   const [reportCopied, setReportCopied] = useState(null);
@@ -64,7 +68,16 @@ export default function App() {
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
 
-  useEffect(() => { localStorage.setItem("mango-theme", theme); }, [theme]);
+  useEffect(() => {
+    localStorage.setItem("mango-theme", theme);
+    // body sits outside .app, so it needs its own theme class — otherwise its
+    // inherited `color` falls back to the bare :root/media-query value instead
+    // of the explicit dark/light override, and anything inheriting straight
+    // from body (rather than an element with its own color rule) picks up
+    // the wrong theme.
+    document.body.classList.remove("dark-mode", "light-mode");
+    document.body.classList.add(theme === "light" ? "light-mode" : "dark-mode");
+  }, [theme]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -75,7 +88,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, orgs, de, ne] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -83,9 +96,13 @@ export default function App() {
         api("deal_contacts", "GET", null, "?select=*,contacts(*)&order=created_at.asc"),
         api("enabler_contacts", "GET", null, "?select=*,contacts(*)&order=created_at.asc"),
         api("todos", "GET", null, "?select=*&order=created_at.desc"),
+        api("organizations", "GET", null, "?select=*&order=name.asc"),
+        api("deal_enablers", "GET", null, "?select=*,deals(*),enablers(*)&order=created_at.desc"),
+        api("network_edges", "GET", null, "?select=*&order=created_at.desc"),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []);
+      setOrganizations(orgs || []); setDealEnablers(de || []); setNetworkEdges(ne || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -164,7 +181,7 @@ export default function App() {
     try {
       const name = (form.name || "").trim();
       if (!name) { showToast("Name is required"); return; }
-      const clean = { name };
+      const clean = { name, warmth: form.warmth || "unknown" };
       // Only send optional string fields when they have real content
       for (const k of ["role", "company", "email", "phone", "linkedin", "source", "notes"]) {
         const v = (form[k] || "").trim();
@@ -189,6 +206,13 @@ export default function App() {
       await loadData(); setModal(null); showToast("Contact deleted");
       setView("contacts"); setContactSheetId(null);
     } catch { showToast("Error deleting contact"); }
+  };
+
+  const toggleContactInternal = async (id, current) => {
+    try {
+      await api("contacts", "PATCH", { is_internal: !current }, `?id=eq.${id}`);
+      await loadData(); showToast(!current ? "Marked as internal" : "Removed from internal team");
+    } catch { showToast("Error updating contact"); }
   };
 
   // ENABLER CRUD
@@ -257,6 +281,54 @@ export default function App() {
       await api("enabler_contacts", "DELETE", null, `?id=eq.${id}`);
       await loadData(); showToast("Person removed");
     } catch { showToast("Error removing person"); }
+  };
+
+  // ORGANIZATIONS
+  const saveOrganization = async (form) => {
+    try {
+      const name = (form.name || "").trim();
+      if (!name) { showToast("Name is required"); return; }
+      const clean = { name, type: form.type || "competitor" };
+      for (const k of ["sector", "description", "website", "notes"]) {
+        const v = (form[k] || "").trim();
+        if (v) clean[k] = v;
+      }
+      if (form.id) {
+        await api("organizations", "PATCH", clean, `?id=eq.${form.id}`);
+      } else {
+        await api("organizations", "POST", clean);
+      }
+      await loadData(); setModal(null); showToast(form.id ? "Organization updated" : "Organization added");
+    } catch { showToast("Error saving organization"); }
+  };
+
+  const deleteOrganization = async (id) => {
+    try {
+      await api("organizations", "DELETE", null, `?id=eq.${id}`);
+      await loadData(); showToast("Organization deleted");
+    } catch { showToast("Error deleting organization"); }
+  };
+
+  // DEAL <-> ENABLER CONNECTIONS
+  const addDealEnabler = async (form) => {
+    try {
+      const clean = {
+        deal_id: form.deal_id,
+        enabler_id: form.enabler_id,
+        relationship: form.relationship || "can_introduce",
+        strength: form.strength || "medium",
+      };
+      if ((form.notes || "").trim()) clean.notes = form.notes.trim();
+      await api("deal_enablers", "POST", clean);
+      await loadData(); showToast("Connection added");
+    } catch { showToast("Error adding connection"); }
+  };
+
+  const removeDealEnabler = async (id) => {
+    try {
+      await api("deal_enablers", "DELETE", null, `?id=eq.${id}`);
+      await loadData(); showToast("Connection removed");
+    } catch { showToast("Error removing connection"); }
   };
 
   const generateDealSummary = async (deal, dealActivities) => {
@@ -507,7 +579,7 @@ Keep it tight and scannable. No preamble.`;
         </div>
         <div className="header-right">
           <nav className="nav">
-            {[["pipeline","Pipeline"],["contacts","Contacts"],["enablers","Enablers"],["tasks","Tasks"],["reports","Reports"],["boss","Boss View"]].map(([k,l]) => (
+            {[["pipeline","Pipeline"],["contacts","Contacts"],["enablers","Enablers"],["network","Network"],["tasks","Tasks"],["reports","Reports"],["boss","Boss View"]].map(([k,l]) => (
               <button key={k} onClick={() => setView(k)} className={`nav-tab ${view === k ? "active" : ""}`}>{l}</button>
             ))}
           </nav>
@@ -548,6 +620,7 @@ Keep it tight and scannable. No preamble.`;
             contacts={contacts}
             deals={deals}
             enablers={enablers}
+            dealEnablers={dealEnablers.filter((de) => de.deal_id === sheetDeal.id)}
             onEdit={(d) => setModal({ type: "deal", data: d })}
             onDelete={deleteDeal}
             onAddActivity={addActivity}
@@ -578,11 +651,14 @@ Keep it tight and scannable. No preamble.`;
             contacts={contacts}
             deals={deals}
             enablers={enablers}
+            dealEnablers={dealEnablers.filter((de) => de.enabler_id === sheetEnabler.id)}
             onEdit={(en) => setModal({ type: "enabler", data: en })}
             onDelete={deleteEnabler}
             onAddActivity={addActivity}
             onAddPerson={(contactId, role) => addEnablerContact(sheetEnabler.id, contactId, role)}
             onRemovePerson={removeEnablerContact}
+            onAddConnection={(form) => addDealEnabler({ ...form, enabler_id: sheetEnabler.id })}
+            onRemoveConnection={removeDealEnabler}
             onAddTodo={(form) => saveTodo({ ...form, enabler_id: sheetEnabler.id })}
             onToggleTodo={toggleTodo}
             onUpdateTodo={updateTodo}
@@ -680,11 +756,15 @@ Keep it tight and scannable. No preamble.`;
             {filteredContacts.map((c) => {
               const cd = deals.filter(d => d.contact_id === c.id);
               const ca = activities.filter(a => a.contact_id === c.id);
+              const warmth = WARMTH_LEVELS.find(w => w.id === (c.warmth || "unknown"));
               return (
                 <div key={c.id} className="contact-card" onClick={() => { setContactSheetId(c.id); setView("contact-sheet"); }}>
                   <div className="contact-top">
                     <div>
-                      <div className="contact-name">{c.name}</div>
+                      <div className="contact-name">
+                        <span className="warmth-dot" style={{background: warmth?.color}} title={`Warmth: ${warmth?.label}`} />
+                        {c.name}
+                      </div>
                       {c.role && <div className="contact-role">{c.role}</div>}
                       {c.company && <div className="contact-company">{c.company}</div>}
                     </div>
@@ -732,6 +812,48 @@ Keep it tight and scannable. No preamble.`;
               );
             })}
           </div>
+        </div>
+      )}
+
+      {/* NETWORK */}
+      {view === "network" && (
+        <div className="section-pad">
+          <div className="timeline-tabs mb">
+            {[["organizations","Organizations"],["connections","Connections"],["internal","Internal Team"]].map(([k,l]) => (
+              <button key={k} onClick={() => setNetworkSection(k)} className={`tag-btn ${networkSection === k ? "active" : ""}`}>{l}</button>
+            ))}
+          </div>
+          {networkSection === "organizations" && (
+            <OrganizationsSection
+              organizations={organizations}
+              onEdit={(o) => setModal({ type: "organization", data: o })}
+              onAdd={() => setModal({ type: "organization", data: {} })}
+              onDelete={deleteOrganization}
+            />
+          )}
+          {networkSection === "connections" && (
+            <ConnectionsSection
+              dealEnablers={dealEnablers}
+              networkEdges={networkEdges}
+              deals={deals}
+              enablers={enablers}
+              contacts={contacts}
+              organizations={organizations}
+              onAdd={addDealEnabler}
+              onRemove={removeDealEnabler}
+            />
+          )}
+          {networkSection === "internal" && (
+            <InternalTeamSection
+              contacts={contacts}
+              deals={deals}
+              enablers={enablers}
+              dealContacts={dealContacts}
+              enablerContacts={enablerContacts}
+              onToggleInternal={toggleContactInternal}
+              onOpenContact={(id) => { setContactSheetId(id); setView("contact-sheet"); }}
+            />
+          )}
         </div>
       )}
 
@@ -853,6 +975,7 @@ Keep it tight and scannable. No preamble.`;
       {modal?.type === "deal" && <DealForm deal={modal.data} contacts={contacts} onSave={saveDeal} onClose={() => setModal(null)} />}
       {modal?.type === "contact" && <ContactForm contact={modal.data} onSave={saveContact} onClose={() => setModal(null)} />}
       {modal?.type === "enabler" && <EnablerForm enabler={modal.data} contacts={contacts} onSave={saveEnabler} onClose={() => setModal(null)} />}
+      {modal?.type === "organization" && <OrganizationForm organization={modal.data} onSave={saveOrganization} onClose={() => setModal(null)} />}
     </div>
   );
 }
@@ -882,7 +1005,7 @@ function DealForm({ deal, contacts, onSave, onClose }) {
 
 function ContactForm({ contact, onSave, onClose }) {
   const isEdit = !!contact.id;
-  const [f, setF] = useState({ id:contact.id||"", name:contact.name||"", role:contact.role||"", company:contact.company||"", email:contact.email||"", phone:contact.phone||"", linkedin:contact.linkedin||"", source:contact.source||"", notes:contact.notes||"", tags:contact.tags||[] });
+  const [f, setF] = useState({ id:contact.id||"", name:contact.name||"", role:contact.role||"", company:contact.company||"", email:contact.email||"", phone:contact.phone||"", linkedin:contact.linkedin||"", source:contact.source||"", notes:contact.notes||"", tags:contact.tags||[], warmth:contact.warmth||"unknown" });
   const set = (k,v) => setF(p=>({...p,[k]:v}));
   const toggleTag = (t) => setF(p=>({...p, tags:p.tags.includes(t)?p.tags.filter(x=>x!==t):[...p.tags,t]}));
   return (
@@ -896,6 +1019,7 @@ function ContactForm({ contact, onSave, onClose }) {
         <div className="field"><label className="label">Phone</label><input className="input" value={f.phone} onChange={e=>set("phone",e.target.value)} /></div>
         <div className="field"><label className="label">LinkedIn</label><input className="input" value={f.linkedin} onChange={e=>set("linkedin",e.target.value)} /></div>
         <div className="field"><label className="label">Source</label><input className="input" value={f.source} onChange={e=>set("source",e.target.value)} placeholder="e.g. Conference, Referral" /></div>
+        <div className="field-full"><label className="label">Warmth</label><div className="tags-select">{WARMTH_LEVELS.map(w=><button key={w.id} onClick={()=>set("warmth",w.id)} className={`tag-btn ${f.warmth===w.id?"active":""}`}><span className="warmth-dot" style={{background:w.color}} />{w.label}</button>)}</div></div>
         <div className="field-full"><label className="label">Tags</label><div className="tags-select">{TAG_OPTIONS.map(t=><button key={t} onClick={()=>toggleTag(t)} className={`tag-btn ${f.tags.includes(t)?"active":""}`}>{t}</button>)}</div></div>
         <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={f.notes} onChange={e=>set("notes",e.target.value)} /></div>
       </div>
@@ -920,7 +1044,7 @@ const TASK_FILTER_TABS = [
   { id: "overdue", label: "Overdue" },
 ];
 
-function DealSheet({ deal, activities, people, todos, contacts, deals, enablers, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
+function DealSheet({ deal, activities, people, todos, contacts, deals, enablers, dealEnablers, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
   const stage = STAGES.find(s => s.id === deal.stage);
   const [filter, setFilter] = useState("all");
   const [personFilter, setPersonFilter] = useState(null);
@@ -973,6 +1097,31 @@ function DealSheet({ deal, activities, people, todos, contacts, deals, enablers,
         onAdd={onAddPerson}
         onRemove={onRemovePerson}
       />
+
+      <div className="people-section">
+        <div className="section-label">Enabler Paths</div>
+        {dealEnablers.length === 0 ? (
+          <div className="empty-small">No enablers connected to this deal.</div>
+        ) : (
+          <div className="people-grid">
+            {dealEnablers.map(de => {
+              const en = enablers.find(x => x.id === de.enabler_id);
+              const rel = DEAL_ENABLER_RELATIONSHIPS.find(r => r.id === de.relationship);
+              const str = STRENGTHS.find(s => s.id === de.strength);
+              if (!en) return null;
+              return (
+                <div key={de.id} className="person-card" onClick={() => onNavigate({ type: "enabler", id: en.id })}>
+                  <div className="person-name">{en.name}</div>
+                  <div className="todo-meta-row mb-sm">
+                    {rel && <span className="badge">{rel.label}</span>}
+                    {str && <span className="badge" style={{background:str.color+"22",color:str.color,border:`1px solid ${str.color}44`}}>{str.label}</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
 
@@ -1030,10 +1179,11 @@ function EnablerForm({ enabler, contacts, onSave, onClose }) {
   );
 }
 
-function EnablerSheet({ enabler, activities, people, todos, contacts, deals, enablers, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
+function EnablerSheet({ enabler, activities, people, todos, contacts, deals, enablers, dealEnablers, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onAddConnection, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
   const type = ENABLER_TYPES.find(t => t.id === enabler.type);
   const [filter, setFilter] = useState("all");
   const [personFilter, setPersonFilter] = useState(null);
+  const [linkModalOpen, setLinkModalOpen] = useState(false);
 
   const peopleNorm = people.map(p => ({ id: p.id, contact_id: p.contact_id, role: p.role_in_org, contact: p.contacts }));
   const filtered = activities
@@ -1081,6 +1231,46 @@ function EnablerSheet({ enabler, activities, people, todos, contacts, deals, ena
         onAdd={onAddPerson}
         onRemove={onRemovePerson}
       />
+
+      <div className="people-section">
+        <div className="ai-summary-header">
+          <div className="section-label">Connected Targets</div>
+          <button onClick={() => setLinkModalOpen(true)} className="btn-copy">+ Link Target</button>
+        </div>
+        {dealEnablers.length === 0 ? (
+          <div className="empty-small">No deals connected yet.</div>
+        ) : (
+          <div className="people-grid">
+            {dealEnablers.map(de => {
+              const d = deals.find(x => x.id === de.deal_id);
+              const rel = DEAL_ENABLER_RELATIONSHIPS.find(r => r.id === de.relationship);
+              const str = STRENGTHS.find(s => s.id === de.strength);
+              if (!d) return null;
+              return (
+                <div key={de.id} className="person-card" onClick={() => onNavigate({ type: "deal", id: d.id })}>
+                  <div className="person-card-top">
+                    <div className="person-name">{d.company}</div>
+                    <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this connection?")) onRemoveConnection(de.id); }} className="person-remove" title="Remove">✕</button>
+                  </div>
+                  <div className="todo-meta-row mb-sm">
+                    {rel && <span className="badge">{rel.label}</span>}
+                    {str && <span className="badge" style={{background:str.color+"22",color:str.color,border:`1px solid ${str.color}44`}}>{str.label}</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {linkModalOpen && (
+          <AddConnectionModal
+            deals={deals}
+            enablers={enablers}
+            fixedEnablerId={enabler.id}
+            onSave={async (form) => { await onAddConnection(form); setLinkModalOpen(false); }}
+            onClose={() => setLinkModalOpen(false)}
+          />
+        )}
+      </div>
 
       <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
 
@@ -1659,6 +1849,227 @@ function TaskQuickAdd({ deals, enablers, onAdd }) {
         </select>
         <button onClick={submit} className="btn-primary" disabled={!title.trim()}>Add</button>
       </div>
+    </div>
+  );
+}
+
+function OrganizationForm({ organization, onSave, onClose }) {
+  const isEdit = !!organization.id;
+  const [f, setF] = useState({ id:organization.id||"", name:organization.name||"", type:organization.type||"competitor", sector:organization.sector||"", description:organization.description||"", website:organization.website||"", notes:organization.notes||"" });
+  const set = (k,v) => setF(p => ({...p,[k]:v}));
+  return (
+    <div className="overlay" onClick={onClose}><div className="modal" onClick={e=>e.stopPropagation()}>
+      <div className="modal-header"><div className="modal-title">{isEdit?"Edit Organization":"New Organization"}</div><button onClick={onClose} className="close-btn">✕</button></div>
+      <div className="form-grid">
+        <div className="field-full"><label className="label">Name *</label><input className="input" value={f.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. Competitor Inc." /></div>
+        <div className="field"><label className="label">Type</label><select className="input" value={f.type} onChange={e=>set("type",e.target.value)}>{ORG_TYPES.map(t=><option key={t.id} value={t.id}>{t.label}</option>)}</select></div>
+        <div className="field"><label className="label">Sector</label><input className="input" value={f.sector} onChange={e=>set("sector",e.target.value)} placeholder="e.g. Oncology, Fintech" /></div>
+        <div className="field-full"><label className="label">Website</label><input className="input" value={f.website} onChange={e=>set("website",e.target.value)} placeholder="https://..." /></div>
+        <div className="field-full"><label className="label">Description</label><textarea className="input textarea" value={f.description} onChange={e=>set("description",e.target.value)} /></div>
+        <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={f.notes} onChange={e=>set("notes",e.target.value)} /></div>
+      </div>
+      <div className="modal-actions"><button onClick={onClose} className="btn-sec">Cancel</button><button onClick={()=>f.name.trim()&&onSave(f)} className="btn-primary" disabled={!f.name.trim()}>{isEdit?"Save":"Add Organization"}</button></div>
+    </div></div>
+  );
+}
+
+function OrganizationsSection({ organizations, onEdit, onAdd, onDelete }) {
+  const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const filtered = organizations.filter(o => {
+    const ms = !search || [o.name, o.sector].some(f => f?.toLowerCase().includes(search.toLowerCase()));
+    const mt = !typeFilter || o.type === typeFilter;
+    return ms && mt;
+  });
+
+  return (
+    <div>
+      <div className="contacts-toolbar">
+        <div className="search-row">
+          <input className="input" placeholder="Search organizations..." value={search} onChange={e => setSearch(e.target.value)} />
+          <select className="input select-filter" value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
+            <option value="">All Types</option>
+            {ORG_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </select>
+        </div>
+        <button onClick={onAdd} className="btn-primary">+ New Organization</button>
+      </div>
+      {filtered.length === 0 && <div className="empty-state">{organizations.length === 0 ? "No organizations yet. Add your first one." : "No organizations match."}</div>}
+      <div className="contacts-grid">
+        {filtered.map(o => {
+          const t = ORG_TYPES.find(x => x.id === o.type);
+          return (
+            <div key={o.id} className="contact-card" onClick={() => onEdit(o)}>
+              <div className="contact-top">
+                <div>
+                  <div className="contact-name">{o.name}</div>
+                  {t && <span className="badge enabler-type-badge" style={{background:t.color+"22",color:t.color,border:`1px solid ${t.color}44`}}>{t.label}</span>}
+                </div>
+                <button onClick={(e) => { e.stopPropagation(); if (confirm(`Delete ${o.name}?`)) onDelete(o.id); }} className="person-remove" title="Delete">✕</button>
+              </div>
+              {o.sector && <div className="contact-company">{o.sector}</div>}
+              {o.description && <div className="enabler-summary-preview">{o.description.slice(0, 120)}{o.description.length > 120 ? "…" : ""}</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function AddConnectionModal({ deals, enablers, fixedEnablerId, fixedDealId, onSave, onClose }) {
+  const [enablerId, setEnablerId] = useState(fixedEnablerId || "");
+  const [dealId, setDealId] = useState(fixedDealId || "");
+  const [relationship, setRelationship] = useState("can_introduce");
+  const [strength, setStrength] = useState("medium");
+  const [notes, setNotes] = useState("");
+
+  return (
+    <div className="overlay" onClick={onClose}><div className="modal modal-sm" onClick={e=>e.stopPropagation()}>
+      <div className="modal-header"><div className="modal-title">Add Connection</div><button onClick={onClose} className="close-btn">✕</button></div>
+      {!fixedEnablerId && (
+        <div className="mb-sm"><label className="label">Enabler</label><select className="input" value={enablerId} onChange={e=>setEnablerId(e.target.value)}><option value="">Select...</option>{enablers.map(en=><option key={en.id} value={en.id}>{en.name}</option>)}</select></div>
+      )}
+      {!fixedDealId && (
+        <div className="mb-sm"><label className="label">Deal</label><select className="input" value={dealId} onChange={e=>setDealId(e.target.value)}><option value="">Select...</option>{deals.map(d=><option key={d.id} value={d.id}>{d.company}</option>)}</select></div>
+      )}
+      <div className="mb-sm"><label className="label">Relationship</label><select className="input" value={relationship} onChange={e=>setRelationship(e.target.value)}>{DEAL_ENABLER_RELATIONSHIPS.map(r=><option key={r.id} value={r.id}>{r.label}</option>)}</select></div>
+      <div className="mb-sm"><label className="label">Strength</label><select className="input" value={strength} onChange={e=>setStrength(e.target.value)}>{STRENGTHS.filter(s=>s.id!=="unknown").map(s=><option key={s.id} value={s.id}>{s.label}</option>)}</select></div>
+      <div className="mb-sm"><label className="label">Notes</label><textarea className="input textarea" value={notes} onChange={e=>setNotes(e.target.value)} /></div>
+      <div className="modal-actions">
+        <button onClick={onClose} className="btn-sec">Cancel</button>
+        <button onClick={() => enablerId && dealId && onSave({ enabler_id: enablerId, deal_id: dealId, relationship, strength, notes })} className="btn-primary" disabled={!enablerId || !dealId}>Add</button>
+      </div>
+    </div></div>
+  );
+}
+
+function ConnectionsSection({ dealEnablers, networkEdges, deals, enablers, contacts, organizations, onAdd, onRemove }) {
+  const [modalOpen, setModalOpen] = useState(false);
+
+  const resolveEntity = (type, id) => {
+    const map = { deal: deals, enabler: enablers, contact: contacts, organization: organizations };
+    const found = map[type]?.find(x => x.id === id);
+    if (!found) return `${type} (${String(id).slice(0, 8)})`;
+    return found.company || found.name;
+  };
+
+  return (
+    <div>
+      <div className="contacts-toolbar">
+        <div className="section-label" style={{margin:0}}>Enabler → Deal Connections</div>
+        <button onClick={() => setModalOpen(true)} className="btn-primary">+ Add Connection</button>
+      </div>
+      {dealEnablers.length === 0 ? (
+        <div className="empty-state">No connections yet.</div>
+      ) : (
+        <div className="todo-list mb">
+          {dealEnablers.map(de => {
+            const rel = DEAL_ENABLER_RELATIONSHIPS.find(r => r.id === de.relationship);
+            const str = STRENGTHS.find(s => s.id === de.strength);
+            return (
+              <div key={de.id} className="connection-row">
+                <div className="connection-main">
+                  <span className="connection-title">{de.enablers?.name || "Unknown enabler"} → {de.deals?.company || "Unknown deal"}</span>
+                  <div className="todo-meta-row">
+                    {rel && <span className="badge">{rel.label}</span>}
+                    {str && <span className="badge" style={{background:str.color+"22",color:str.color,border:`1px solid ${str.color}44`}}>{str.label}</span>}
+                  </div>
+                  {de.notes && <div className="connection-notes">{de.notes}</div>}
+                </div>
+                <button onClick={() => { if (confirm("Remove this connection?")) onRemove(de.id); }} className="person-remove" title="Remove">✕</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="section-label boss-section-label">Network Edges</div>
+      {networkEdges.length === 0 ? (
+        <div className="empty-small">No network edges recorded yet.</div>
+      ) : (
+        <div className="todo-list">
+          {networkEdges.map(ne => {
+            const rel = NETWORK_EDGE_RELATIONSHIPS.find(r => r.id === ne.relationship);
+            const str = STRENGTHS.find(s => s.id === ne.strength);
+            return (
+              <div key={ne.id} className="connection-row">
+                <div className="connection-main">
+                  <span className="connection-title">{resolveEntity(ne.source_type, ne.source_id)} → {resolveEntity(ne.target_type, ne.target_id)}</span>
+                  <div className="todo-meta-row">
+                    {rel && <span className="badge">{rel.label}</span>}
+                    {str && <span className="badge" style={{background:str.color+"22",color:str.color,border:`1px solid ${str.color}44`}}>{str.label}</span>}
+                    <span className="task-link-static">{ne.direction === "one_way" ? "One-way" : "Bidirectional"}</span>
+                  </div>
+                  {ne.notes && <div className="connection-notes">{ne.notes}</div>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {modalOpen && (
+        <AddConnectionModal
+          deals={deals}
+          enablers={enablers}
+          onSave={async (form) => { await onAdd(form); setModalOpen(false); }}
+          onClose={() => setModalOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function InternalTeamSection({ contacts, deals, enablers, dealContacts, enablerContacts, onToggleInternal, onOpenContact }) {
+  const [addContactId, setAddContactId] = useState("");
+  const internalContacts = contacts.filter(c => c.is_internal);
+  const availableContacts = contacts.filter(c => !c.is_internal);
+
+  return (
+    <div>
+      <div className="contacts-toolbar">
+        <div className="search-row">
+          <select className="input" value={addContactId} onChange={e => setAddContactId(e.target.value)}>
+            <option value="">Select a contact to mark internal...</option>
+            {availableContacts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <button
+          onClick={() => { if (addContactId) { onToggleInternal(addContactId, false); setAddContactId(""); } }}
+          className="btn-primary"
+          disabled={!addContactId}
+        >+ Mark as Internal</button>
+      </div>
+      {internalContacts.length === 0 ? (
+        <div className="empty-state">No internal team members yet.</div>
+      ) : (
+        <div className="contacts-grid">
+          {internalContacts.map(c => {
+            const linkedDealIds = new Set([
+              ...dealContacts.filter(dc => dc.contact_id === c.id).map(dc => dc.deal_id),
+              ...deals.filter(d => d.contact_id === c.id).map(d => d.id),
+            ]);
+            const linkedEnablerIds = new Set(enablerContacts.filter(ec => ec.contact_id === c.id).map(ec => ec.enabler_id));
+            const linkedDealNames = deals.filter(d => linkedDealIds.has(d.id)).map(d => d.company);
+            const linkedEnablerNames = enablers.filter(en => linkedEnablerIds.has(en.id)).map(en => en.name);
+            return (
+              <div key={c.id} className="contact-card" onClick={() => onOpenContact(c.id)}>
+                <div className="contact-top">
+                  <div>
+                    <div className="contact-name">{c.name}</div>
+                    {c.role && <div className="contact-role">{c.role}</div>}
+                  </div>
+                  <button onClick={(e) => { e.stopPropagation(); onToggleInternal(c.id, true); }} className="person-remove" title="Remove from internal team">✕</button>
+                </div>
+                {linkedDealNames.length > 0 && <div className="contact-meta">Deals: {linkedDealNames.join(", ")}</div>}
+                {linkedEnablerNames.length > 0 && <div className="contact-meta">Enablers: {linkedEnablerNames.join(", ")}</div>}
+                {linkedDealNames.length === 0 && linkedEnablerNames.length === 0 && <div className="contact-meta">No linked deals or enablers</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

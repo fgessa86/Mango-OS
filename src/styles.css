@@ -1,9 +1,9 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 :root { --bg: #0F1419; --surface: #1A2332; --card: #111820; --border: #1e293b; --accent: #F5A623; --text: #E8ECF1; --muted: #7B8A9E; --dim: #64748B; --faint: #475569; --dark: #334155; --btn-sec-bg: #243044; --btn-sec-text: #CBD5E1; }
-.app.light-mode { --bg: #F5F7FA; --surface: #FFFFFF; --card: #F0F2F5; --border: #E2E8F0; --accent: #F5A623; --text: #1A202C; --muted: #64748B; --dim: #94A3B8; --faint: #94A3B8; --dark: #E2E8F0; --btn-sec-bg: #E2E8F0; --btn-sec-text: #1A202C; }
+.app.light-mode, body.light-mode { --bg: #F5F7FA; --surface: #FFFFFF; --card: #F0F2F5; --border: #E2E8F0; --accent: #F5A623; --text: #1A202C; --muted: #64748B; --dim: #94A3B8; --faint: #94A3B8; --dark: #E2E8F0; --btn-sec-bg: #E2E8F0; --btn-sec-text: #1A202C; }
 /* Explicit pin for the manual "Dark Mode" choice — matches :root exactly so it survives
    the prefers-color-scheme fallback below regardless of the OS setting. */
-.app.dark-mode { --bg: #0F1419; --surface: #1A2332; --card: #111820; --border: #1e293b; --accent: #F5A623; --text: #E8ECF1; --muted: #7B8A9E; --dim: #64748B; --faint: #475569; --dark: #334155; --btn-sec-bg: #243044; --btn-sec-text: #CBD5E1; }
+.app.dark-mode, body.dark-mode { --bg: #0F1419; --surface: #1A2332; --card: #111820; --border: #1e293b; --accent: #F5A623; --text: #E8ECF1; --muted: #7B8A9E; --dim: #64748B; --faint: #475569; --dark: #334155; --btn-sec-bg: #243044; --btn-sec-text: #CBD5E1; }
 /* Fallback for contexts where the app renders before/without an explicit theme class
    (e.g. pre-hydration) and the OS/browser prefers light — keeps text readable instead
    of defaulting to light-on-dark colors against a light background. */
@@ -278,6 +278,15 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 /* Enablers */
 .enabler-type-badge { margin-top: 4px; display: inline-block; }
 .enabler-summary-preview { color: var(--dim); font-size: 11px; margin-top: 6px; line-height: 1.4; }
+
+/* Warmth */
+.warmth-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; flex-shrink: 0; }
+
+/* Network */
+.connection-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; background: var(--surface); border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; }
+.connection-main { flex: 1; min-width: 0; }
+.connection-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.connection-notes { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
 
 @media (max-width: 768px) {
   .kanban { flex-direction: column; }
