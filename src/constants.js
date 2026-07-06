@@ -73,6 +73,27 @@ export const CONNECTION_RELATIONSHIPS = [
   { id: "board_overlap", label: "Board Overlap" },
 ];
 
+// Pipeline tiers for deals. Stored as the raw string ("Tier 1"/"Untiered") on
+// the deals.tier column, so the id IS the stored value. Field name for
+// custom_options is not used (fixed vocabulary).
+export const DEAL_TIERS = [
+  { id: "Tier 1", label: "Tier 1", color: "#EF4444" },
+  { id: "Tier 2", label: "Tier 2", color: "#F59E0B" },
+  { id: "Tier 3", label: "Tier 3", color: "#3B82F6" },
+  { id: "Untiered", label: "Untiered", color: "#7B8A9E" },
+];
+
+// Relationship vocabulary for person-to-person connections created from the
+// Person Sheet "Connect to Person" picker. Field name for custom_options is
+// "relationship" (shared with the other relationship pickers).
+export const PERSON_CONNECTION_RELATIONSHIPS = [
+  { id: "knows", label: "Knows" },
+  { id: "can_introduce", label: "Can Introduce" },
+  { id: "reports_to", label: "Reports To" },
+  { id: "works_with", label: "Works With" },
+  { id: "family", label: "Family" },
+];
+
 export const DEAL_ENABLER_RELATIONSHIPS = [
   { id: "can_introduce", label: "Can Introduce" },
   { id: "active", label: "Active" },

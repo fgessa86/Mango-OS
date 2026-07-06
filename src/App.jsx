@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "./supabase";
 import { generateSummary, summarizeImage } from "./anthropic";
-import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
+import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import MapTab from "./MapTab";
 import "./styles.css";
@@ -250,6 +250,8 @@ export default function App() {
   const [modal, setModal] = useState(null);
   const [reportCopied, setReportCopied] = useState(null);
   const [dragOver, setDragOver] = useState(null);
+  const [tierFilter, setTierFilter] = useState("all");
+  const [showCompletedTasks, setShowCompletedTasks] = useState(false);
   const [toast, setToast] = useState(null);
   const [dealSheetId, setDealSheetId] = useState(null);
   const [institutionSheetKey, setInstitutionSheetKey] = useState(null);
@@ -344,6 +346,7 @@ export default function App() {
       const clean = {
         company,
         stage: form.stage || "prospecting",
+        tier: form.tier || "Untiered",
         last_activity_at: new Date().toISOString(),
       };
       // Only send optional string fields when they have real content
@@ -381,6 +384,13 @@ export default function App() {
       await api("activities", "POST", { deal_id: dealId, type: "note", description: `Moved to ${STAGES.find((s) => s.id === newStage)?.label}` });
       await loadData();
     } catch { showToast("Error moving deal"); }
+  };
+
+  const setDealTier = async (dealId, tier) => {
+    try {
+      await api("deals", "PATCH", { tier: tier || "Untiered" }, `?id=eq.${dealId}`);
+      await loadData();
+    } catch { showToast("Error updating tier"); }
   };
 
   // CONTACT CRUD
@@ -516,11 +526,11 @@ export default function App() {
   // Each role's institutionKey is "type:id" for an existing institution, or a
   // { newName, newType } object to create a fresh organization inline. Also
   // writes the optional "connected through" and "can help us reach" edges.
-  const addPersonWithRoles = async ({ name, company, role, email, phone, warmth, notes, roles, connectedThrough, canReach, relationship }) => {
+  const addPersonWithRoles = async ({ name, company, role, email, phone, linkedin, warmth, notes, roles, connectedThrough, canReach, relationship }) => {
     try {
       // company/role, when supplied (e.g. adding a new person from an institution
       // sheet), populate the contact's own company/role fields in the same save.
-      const created = await persistContact({ name, company, role, email, phone, warmth, notes });
+      const created = await persistContact({ name, company, role, email, phone, linkedin, warmth, notes });
       if (!created) throw new Error("Could not create contact");
       const validRoles = (roles || []).filter((r) => r.institutionKey || (r.newName || "").trim());
       let primaryAssigned = false;
@@ -995,6 +1005,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     if (taskFilter === "overdue") return isOverdue(t.due_date);
     return true;
   });
+  const completedTasks = todos.filter((t) => t.status === "completed").slice().sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at));
   // Activities are already loaded ordered by created_at desc, so the first
   // match is the most recent auto-synced (email/meeting) activity.
   const lastSyncedActivity = activities.find((a) => a.type === "email" || a.type === "meeting");
@@ -1067,6 +1078,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onDelete={deleteDeal}
             onAddActivity={addActivity}
             onAddPerson={(contactId, role) => addDealContact(sheetDeal.id, contactId, role)}
+            onAddPersonNew={(form) => addPersonWithRoles({ ...form, company: sheetDeal.company, roles: [{ institutionKey: `deal:${sheetDeal.id}`, role: form.role }] })}
+            onChangeTier={setDealTier}
             onRemovePerson={(p) => (p.source === "edge" ? removeNetworkEdge(p.id) : removeDealContact(p.id))}
             onAddTodo={(form) => saveTodo({ ...form, deal_id: sheetDeal.id })}
             onToggleTodo={toggleTodo}
@@ -1157,6 +1170,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onAddActivity={addActivity}
             onAddRole={addPersonRole}
             onRemoveRole={removePersonRole}
+            onConnectPerson={(sourceId, targetId, relationship) => addNetworkEdge({ source_type: "contact", source_id: sourceId, target_type: "contact", target_id: targetId, relationship, strength: "medium", direction: "bidirectional" })}
+            onRemoveConnection={removeNetworkEdge}
             onGenerateSummary={generateContactSummary}
             onSaveSummary={saveContactSummary}
             summarizing={summarizing}
@@ -1171,10 +1186,17 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       {/* PIPELINE */}
       {view === "pipeline" && (
         <div>
-          <div className="toolbar"><button onClick={() => setModal({type:"deal",data:{stage:"prospecting"}})} className="btn-primary">+ New Deal</button></div>
+          <div className="toolbar">
+            <div className="tier-filter">
+              {[{ id: "all", label: "All" }, ...DEAL_TIERS.filter(t => t.id !== "Untiered")].map(t => (
+                <button key={t.id} onClick={() => setTierFilter(t.id)} className={`tag-btn ${tierFilter === t.id ? "active" : ""}`}>{t.label}</button>
+              ))}
+            </div>
+            <button onClick={() => setModal({type:"deal",data:{stage:"prospecting"}})} className="btn-primary">+ New Deal</button>
+          </div>
           <div className="kanban">
             {STAGES.map((stage) => {
-              const sd = deals.filter(d => d.stage === stage.id);
+              const sd = deals.filter(d => d.stage === stage.id && (tierFilter === "all" || (d.tier || "Untiered") === tierFilter));
               return (
                 <div key={stage.id} className={`column ${dragOver === stage.id ? "drag-over" : ""}`}
                   onDragOver={(e) => { e.preventDefault(); setDragOver(stage.id); }}
@@ -1190,6 +1212,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
                         onClick={() => { setDealSheetId(deal.id); setView("deal-sheet"); }}
                         className="deal-card" style={{borderLeftColor: stage.color}}>
                         <div className="card-company">{deal.company}</div>
+                        {(() => { const t = DEAL_TIERS.find(x => x.id === (deal.tier || "Untiered")); return t && t.id !== "Untiered" ? <span className="badge tier-badge" style={{background:t.color+"22",color:t.color,border:`1px solid ${t.color}44`}}>{t.label}</span> : null; })()}
                         {deal.contact_name && <div className="card-contact">{deal.contact_name}{deal.contact_role ? ` . ${deal.contact_role}` : ""}</div>}
                         {deal.city && <span className="city-pin">📍 {deal.city}</span>}
                         {deal.value > 0 && <div className="card-value">${Number(deal.value).toLocaleString()}</div>}
@@ -1272,6 +1295,29 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
                   onNavigate={openTaskLink}
                 />
               ))}
+            </div>
+          )}
+          {completedTasks.length > 0 && (
+            <div className="todo-completed-toggle">
+              <button onClick={() => setShowCompletedTasks(s => !s)} className="link-btn">{showCompletedTasks ? "▾" : "▸"} Completed ({completedTasks.length})</button>
+              {showCompletedTasks && (
+                <div className="todo-list todo-list-completed">
+                  {completedTasks.map((t) => (
+                    <TodoRow
+                      key={t.id}
+                      todo={t}
+                      contacts={contacts}
+                      deals={deals}
+                      enablers={enablers}
+                      customOptions={customOptions}
+                      onAddCustomOption={addCustomOption}
+                      onToggle={toggleTodo}
+                      onUpdate={updateTodo}
+                      onNavigate={openTaskLink}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1371,7 +1417,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
 function DealForm({ deal, contacts, customOptions, onAddCustomOption, onSave, onClose }) {
   const isEdit = !!deal.id;
-  const [f, setF] = useState({ id:deal.id||"", company:deal.company||"", contact_id:deal.contact_id||"", contact_name:deal.contact_name||"", contact_role:deal.contact_role||"", value:deal.value||"", stage:deal.stage||"prospecting", city:deal.city||"", region:deal.region||"", notes:deal.notes||"", next_action:deal.next_action||"" });
+  const [f, setF] = useState({ id:deal.id||"", company:deal.company||"", contact_id:deal.contact_id||"", contact_name:deal.contact_name||"", contact_role:deal.contact_role||"", value:deal.value||"", stage:deal.stage||"prospecting", tier:deal.tier||"Untiered", city:deal.city||"", region:deal.region||"", notes:deal.notes||"", next_action:deal.next_action||"" });
   const set = (k,v) => setF(p => ({...p,[k]:v}));
   const pickContact = (id) => { const c = contacts.find(x=>x.id===id); if(c){setF(p=>({...p, contact_id:id, contact_name:c.name||"", contact_role:c.role||"", company:p.company||c.company||""}));} else {set("contact_id","");} };
   const stageOpts = optionsWithCustom(STAGES, customOptions, "deal_stage");
@@ -1387,6 +1433,7 @@ function DealForm({ deal, contacts, customOptions, onAddCustomOption, onSave, on
         <div className="field"><label className="label">Role</label><input className="input" value={f.contact_role} onChange={e=>set("contact_role",e.target.value)} /></div>
         <div className="field"><label className="label">Value (USD)</label><input className="input" type="number" value={f.value} onChange={e=>set("value",e.target.value)} placeholder="Optional" /></div>
         <div className="field"><label className="label">Stage</label><SelectWithCustom options={stageOpts} value={f.stage} onChange={(v)=>{set("stage",v); trackCustom("deal_stage", stageOpts, onAddCustomOption)(v);}} /></div>
+        <div className="field"><label className="label">Tier</label><select className="input" value={f.tier} onChange={e=>set("tier",e.target.value)}>{DEAL_TIERS.map(t=><option key={t.id} value={t.id}>{t.label}</option>)}</select></div>
         <div className="field"><label className="label">City</label><SelectWithCustom options={cityOpts} value={f.city} onChange={(v)=>{set("city",v); trackCustom("city", cityOpts, onAddCustomOption)(v);}} placeholder="City name..." /></div>
         <div className="field"><label className="label">Region</label><SelectWithCustom options={regionOpts} value={f.region} onChange={(v)=>{set("region",v); trackCustom("region", regionOpts, onAddCustomOption)(v);}} placeholder="Region name..." /></div>
         <div className="field-full"><label className="label">Next Action</label><input className="input" value={f.next_action} onChange={e=>set("next_action",e.target.value)} placeholder="What needs to happen next?" /></div>
@@ -1444,8 +1491,9 @@ const TASK_FILTER_TABS = [
   { id: "overdue", label: "Overdue" },
 ];
 
-function DealSheet({ deal, activities, people, todos, contacts, deals, enablers, organizations, networkEdges, contactRoles, dealEnablers, customOptions = [], onAddCustomOption = () => {}, onEdit, onDelete, onAddActivity, onAddPerson, onRemovePerson, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
+function DealSheet({ deal, activities, people, todos, contacts, deals, enablers, organizations, networkEdges, contactRoles, dealEnablers, customOptions = [], onAddCustomOption = () => {}, onEdit, onDelete, onAddActivity, onAddPerson, onAddPersonNew, onRemovePerson, onChangeTier, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
   const stage = STAGES.find(s => s.id === deal.stage);
+  const tier = DEAL_TIERS.find(t => t.id === (deal.tier || "Untiered"));
   const [filter, setFilter] = useState("all");
   const [personFilter, setPersonFilter] = useState(null);
 
@@ -1474,7 +1522,11 @@ function DealSheet({ deal, activities, people, todos, contacts, deals, enablers,
             <div className="sheet-company">{deal.company}</div>
             <div className="sheet-meta-row">
               {stage && <span className="badge" style={{background:stage.color+"22",color:stage.color,border:`1px solid ${stage.color}44`}}>{stage.label}</span>}
+              {tier && <span className="badge" style={{background:tier.color+"22",color:tier.color,border:`1px solid ${tier.color}44`}}>{tier.label}</span>}
               {deal.value > 0 && <span className="badge val-badge">${Number(deal.value).toLocaleString()}</span>}
+              <select className="input tier-select" value={deal.tier || "Untiered"} onChange={e => onChangeTier(deal.id, e.target.value)} title="Change tier">
+                {DEAL_TIERS.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+              </select>
             </div>
             {deal.contact_name && <div className="sheet-contact">{deal.contact_name}{deal.contact_role ? ` . ${deal.contact_role}` : ""}</div>}
           </div>
@@ -1499,10 +1551,13 @@ function DealSheet({ deal, activities, people, todos, contacts, deals, enablers,
         people={peopleNorm}
         activities={activities}
         contacts={contacts}
-        roleLabel="Role in Deal"
+        institutionName={deal.company}
+        customOptions={customOptions}
+        onAddCustomOption={onAddCustomOption}
         selectedContactId={personFilter}
         onSelectPerson={(id) => setPersonFilter(p => p === id ? null : id)}
         onAdd={onAddPerson}
+        onAddNew={(form) => onAddPersonNew(form)}
         onRemove={onRemovePerson}
       />
 
@@ -1616,11 +1671,14 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onEdit, onDelete, onAddActivity, onAddRole, onRemoveRole, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onEdit, onDelete, onAddActivity, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack }) {
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
   const [roleInst, setRoleInst] = useState("");
   const [roleTitle, setRoleTitle] = useState("");
+  const [addingConn, setAddingConn] = useState(false);
+  const [connContactId, setConnContactId] = useState("");
+  const [connRel, setConnRel] = useState("knows");
   const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
   const warmth = WARMTH_LEVELS.find(w => w.id === (contact.warmth || "unknown"));
 
@@ -1638,24 +1696,47 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
     setAddingRole(false); setRoleInst(""); setRoleTitle("");
   };
 
+  const relLabel = (id) => PERSON_CONNECTION_RELATIONSHIPS.find(r => r.id === id)?.label || NETWORK_EDGE_RELATIONSHIPS.find(r => r.id === id)?.label || id;
+  // Resolves a "(role, institution)" hint for a person, using their primary role.
+  const personDetail = (other) => {
+    const otherRoles = resolveContactRoles(other, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles });
+    const primary = otherRoles.find(r => r.is_primary) || otherRoles[0];
+    if (!primary) return other.company || "";
+    const parts = [primary.role_title, primary.institutionName].filter(Boolean);
+    return parts.join(", ");
+  };
+
   // Connections: every network_edge touching this contact, resolved to the other end.
+  const connectedContactIds = new Set();
   const connections = networkEdges
     .filter(ne => (ne.source_type === "contact" && ne.source_id === contact.id) || (ne.target_type === "contact" && ne.target_id === contact.id))
     .map(ne => {
       const isSource = ne.source_type === "contact" && ne.source_id === contact.id;
       const otherType = isSource ? ne.target_type : ne.source_type;
       const otherId = isSource ? ne.target_id : ne.source_id;
-      const rel = NETWORK_EDGE_RELATIONSHIPS.find(r => r.id === ne.relationship)?.label || ne.relationship;
+      const rel = relLabel(ne.relationship);
       if (otherType === "contact") {
         const other = contacts.find(c => c.id === otherId);
-        return other ? { id: ne.id, label: other.name, rel, onClick: () => onOpenPerson(other.id) } : null;
+        if (!other) return null;
+        connectedContactIds.add(otherId);
+        const detail = personDetail(other);
+        return { id: ne.id, label: other.name, detail, rel, onClick: () => onOpenPerson(other.id) };
       }
       const other = otherType === "deal" ? deals.find(d => d.id === otherId) : otherType === "enabler" ? enablers.find(e => e.id === otherId) : organizations.find(o => o.id === otherId);
       if (!other) return null;
       const name = otherType === "deal" ? other.company : other.name;
-      return { id: ne.id, label: name, rel, onClick: () => onOpenInstitution(name) };
+      return { id: ne.id, label: name, detail: "", rel, onClick: () => onOpenInstitution(name) };
     })
     .filter(Boolean);
+
+  const connectableContacts = contacts.filter(c => c.id !== contact.id && !connectedContactIds.has(c.id));
+  const relOpts = optionsWithCustom(PERSON_CONNECTION_RELATIONSHIPS, customOptions, "relationship");
+
+  const submitConn = async () => {
+    if (!connContactId || !onConnectPerson) return;
+    await onConnectPerson(contact.id, connContactId, connRel);
+    setAddingConn(false); setConnContactId(""); setConnRel("knows");
+  };
 
   return (
     <div className="deal-sheet">
@@ -1725,15 +1806,30 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
       </div>
 
       <div className="people-section">
-        <div className="section-label">Connections</div>
+        <div className="ai-summary-header">
+          <div className="section-label">Connections</div>
+          <button onClick={() => setAddingConn(v => !v)} className="btn-copy">{addingConn ? "Cancel" : "+ Connect to Person"}</button>
+        </div>
+        {addingConn && (
+          <div className="quickadd-inline-row mb-sm">
+            <select className="input" value={connContactId} onChange={e => setConnContactId(e.target.value)}>
+              <option value="">Select a person...</option>
+              {connectableContacts.map(c => <option key={c.id} value={c.id}>{c.name}{c.company ? ` (${c.company})` : ""}</option>)}
+            </select>
+            <SelectWithCustom options={relOpts} value={connRel} onChange={(v) => { setConnRel(v); trackCustom("relationship", relOpts, onAddCustomOption)(v); }} />
+            <button onClick={submitConn} className="btn-primary" disabled={!connContactId}>Connect</button>
+          </div>
+        )}
         {connections.length === 0 ? (
           <div className="empty-small">No connections logged yet.</div>
         ) : (
           <div className="todo-list">
             {connections.map(c => (
-              <div key={c.id} className="path-row" onClick={c.onClick} style={{ cursor: "pointer" }}>
-                <div className="path-chain">{c.label}</div>
-                <div className="todo-meta-row"><span className="badge">{c.rel}</span></div>
+              <div key={c.id} className="path-row">
+                <div onClick={c.onClick} style={{ cursor: "pointer", flex: 1 }}>
+                  <div className="path-chain">{c.rel} {c.label}{c.detail ? ` (${c.detail})` : ""}</div>
+                </div>
+                {onRemoveConnection && <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this connection?")) onRemoveConnection(c.id); }} className="person-remove" title="Remove">✕</button>}
               </div>
             ))}
           </div>
@@ -1766,8 +1862,8 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
   );
 }
 
-function PeopleSection({ people, activities, contacts, roleLabel, selectedContactId, onSelectPerson, onAdd, onRemove }) {
-  const [modalOpen, setModalOpen] = useState(false);
+function PeopleSection({ people, activities, contacts, institutionName, customOptions = [], onAddCustomOption = () => {}, selectedContactId, onSelectPerson, onAdd, onAddNew, onRemove }) {
+  const [adding, setAdding] = useState(false);
   const linkedIds = new Set(people.map(p => p.contact_id));
   const available = contacts.filter(c => !linkedIds.has(c.id));
 
@@ -1775,8 +1871,18 @@ function PeopleSection({ people, activities, contacts, roleLabel, selectedContac
     <div className="people-section">
       <div className="ai-summary-header">
         <div className="section-label">People</div>
-        <button onClick={() => setModalOpen(true)} className="btn-copy">+ Add Person</button>
+        <button onClick={() => setAdding(v => !v)} className="btn-copy">{adding ? "Cancel" : "+ Add Person"}</button>
       </div>
+      {adding && (
+        <InstitutionAddPerson
+          institutionName={institutionName}
+          availableContacts={available}
+          customOptions={customOptions}
+          onAddCustomOption={onAddCustomOption}
+          onAddExisting={async (contactId, role) => { await onAdd(contactId, role); setAdding(false); }}
+          onAddNew={async (form) => { await onAddNew(form); setAdding(false); }}
+        />
+      )}
       {people.length === 0 ? (
         <div className="empty-small">No people linked yet.</div>
       ) : (
@@ -1802,46 +1908,7 @@ function PeopleSection({ people, activities, contacts, roleLabel, selectedContac
           })}
         </div>
       )}
-      {modalOpen && (
-        <AddPersonModal
-          contacts={available}
-          roleLabel={roleLabel}
-          onSave={async (contactId, role) => { await onAdd(contactId, role); setModalOpen(false); }}
-          onClose={() => setModalOpen(false)}
-        />
-      )}
     </div>
-  );
-}
-
-function AddPersonModal({ contacts, roleLabel, onSave, onClose }) {
-  const [contactId, setContactId] = useState("");
-  const [role, setRole] = useState("");
-  return (
-    <div className="overlay" onClick={onClose}><div className="modal modal-sm" onClick={e=>e.stopPropagation()}>
-      <div className="modal-header"><div className="modal-title">Add Person</div><button onClick={onClose} className="close-btn">✕</button></div>
-      {contacts.length === 0 ? (
-        <div className="empty-small">No available contacts to link. Everyone is already added, or you have no contacts yet.</div>
-      ) : (
-        <>
-          <div className="mb-sm">
-            <label className="label">Contact</label>
-            <select className="input" value={contactId} onChange={e => setContactId(e.target.value)}>
-              <option value="">Select...</option>
-              {contacts.map(c => <option key={c.id} value={c.id}>{c.name}{c.company ? ` (${c.company})` : ""}</option>)}
-            </select>
-          </div>
-          <div className="mb-sm">
-            <label className="label">{roleLabel}</label>
-            <input className="input" value={role} onChange={e => setRole(e.target.value)} placeholder="e.g. Decision Maker" />
-          </div>
-        </>
-      )}
-      <div className="modal-actions">
-        <button onClick={onClose} className="btn-sec">Cancel</button>
-        <button onClick={() => contactId && onSave(contactId, role)} className="btn-primary" disabled={!contactId}>Add</button>
-      </div>
-    </div></div>
   );
 }
 
@@ -2085,18 +2152,21 @@ function TodoRow({ todo, contacts, deals = [], enablers = [], customOptions = []
     );
   }
 
+  const done = todo.status === "completed";
   return (
-    <div className={`todo-row ${todo.status === "completed" ? "todo-done" : ""}`}>
-      <input type="checkbox" checked={todo.status === "completed"} onChange={() => onToggle(todo)} className="todo-checkbox" />
+    <div className={`todo-row ${done ? "todo-done" : ""}`}>
+      <input type="checkbox" checked={done} onChange={() => onToggle(todo)} className="todo-checkbox" />
       <div className="todo-main">
         <div className="todo-title-row">
           <span className="todo-title">{todo.title}</span>
-          {onUpdate && <button onClick={startEdit} className="icon-btn" title="Edit task">✎</button>}
+          {!done && onUpdate && <button onClick={startEdit} className="icon-btn" title="Edit task">✎</button>}
           <PriorityBadge priority={todo.priority} />
           {overdue && <span className="badge overdue-badge">Overdue</span>}
+          {done && <button onClick={() => onToggle(todo)} className="btn-copy todo-reopen">Reopen</button>}
         </div>
         <div className="todo-meta-row">
-          {todo.due_date && <span className="todo-due">Due {formatDate(todo.due_date)}</span>}
+          {done && todo.completed_at && <span className="todo-due">Completed {formatDate(todo.completed_at)}</span>}
+          {!done && todo.due_date && <span className="todo-due">Due {formatDate(todo.due_date)}</span>}
           {contact && <span className="todo-contact">{contact.name}</span>}
           {(linkedDeal || linkedEnabler) && (onNavigate
             ? <button onClick={() => onNavigate(linkedDeal ? { type: "deal", id: linkedDeal.id } : { type: "enabler", id: linkedEnabler.id })} className="task-link">{linkedDeal ? linkedDeal.company : linkedEnabler.name}</button>
@@ -2137,7 +2207,7 @@ function TodoSection({ todos, contacts, deals = [], enablers = [], customOptions
       )}
       {completed.length > 0 && (
         <div className="todo-completed-toggle">
-          <button onClick={() => setShowCompleted(s => !s)} className="link-btn">{showCompleted ? "Hide completed" : `Show completed (${completed.length})`}</button>
+          <button onClick={() => setShowCompleted(s => !s)} className="link-btn">{showCompleted ? "▾" : "▸"} Completed ({completed.length})</button>
           {showCompleted && (
             <div className="todo-list todo-list-completed">
               {completed.map(t => <TodoRow key={t.id} todo={t} contacts={contacts} deals={deals} enablers={enablers} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onToggle={onToggle} onUpdate={onUpdate} onNavigate={onNavigate} />)}
@@ -2553,7 +2623,7 @@ function InstitutionSheet({
 function InstitutionAddPerson({ institutionName, availableContacts, customOptions, onAddCustomOption, onAddExisting, onAddNew }) {
   const [contactId, setContactId] = useState("");
   const [existingRole, setExistingRole] = useState("");
-  const [f, setF] = useState({ name: "", role: "", email: "", phone: "", warmth: "unknown" });
+  const [f, setF] = useState({ name: "", role: "", email: "", phone: "", linkedin: "", warmth: "unknown" });
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
   const warmthOpts = optionsWithCustom(WARMTH_LEVELS, customOptions, "warmth");
   return (
@@ -2576,6 +2646,7 @@ function InstitutionAddPerson({ institutionName, availableContacts, customOption
         <div className="field"><label className="label">Role at {institutionName}</label><input className="input" value={f.role} onChange={e => set("role", e.target.value)} /></div>
         <div className="field"><label className="label">Email</label><input className="input" type="email" value={f.email} onChange={e => set("email", e.target.value)} /></div>
         <div className="field"><label className="label">Phone</label><input className="input" value={f.phone} onChange={e => set("phone", e.target.value)} /></div>
+        <div className="field-full"><label className="label">LinkedIn</label><input className="input" value={f.linkedin} onChange={e => set("linkedin", e.target.value)} placeholder="linkedin.com/in/..." /></div>
         <div className="field-full"><label className="label">Warmth</label><ButtonGroupWithCustom options={warmthOpts} value={f.warmth} onChange={(v) => { set("warmth", v); trackCustom("warmth", warmthOpts, onAddCustomOption)(v); }} renderOption={(w) => <><span className="warmth-dot" style={{background:w.color}} />{w.label}</>} /></div>
       </div>
       <div className="modal-actions">
