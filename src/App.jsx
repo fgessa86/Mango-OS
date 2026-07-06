@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "./supabase";
-import { generateSummary, summarizeImage } from "./anthropic";
+import { generateSummary, summarizeImage, researchInstitution } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import MapTab from "./MapTab";
@@ -109,6 +109,75 @@ function Sidebar({ view, setView, tasksCount }) {
         </div>
       </div>
     </aside>
+  );
+}
+
+// ---- Inline editing primitives ----
+// Single-user app: click a value to edit it in place. Enter or blur saves,
+// Escape cancels. onSave only fires when the value actually changed.
+function InlineText({ value, onSave, placeholder = "Add...", className = "", multiline = false, rows = 2 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value || "");
+  const ref = useRef(null);
+  useEffect(() => {
+    if (editing && ref.current) {
+      ref.current.focus();
+      const len = ref.current.value.length;
+      ref.current.setSelectionRange(len, len);
+    }
+  }, [editing]);
+  const commit = () => {
+    setEditing(false);
+    if ((draft || "") !== (value || "")) onSave(draft);
+  };
+  const cancel = () => { setDraft(value || ""); setEditing(false); };
+  if (editing) {
+    const common = {
+      ref, value: draft, className: `inline-edit ${className}`,
+      onChange: (e) => setDraft(e.target.value), onBlur: commit,
+    };
+    return multiline
+      ? <textarea {...common} rows={rows} onKeyDown={(e) => { if (e.key === "Escape") cancel(); }} />
+      : <input {...common} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } if (e.key === "Escape") cancel(); }} />;
+  }
+  return (
+    <span className={`inline-editable ${className} ${!value ? "inline-empty" : ""}`} onClick={(e) => { e.stopPropagation(); setDraft(value || ""); setEditing(true); }} title="Click to edit">
+      {value || placeholder}
+    </span>
+  );
+}
+
+// Always-visible scratchpad textarea. Saves on blur, never behind an edit button.
+function NotesEditor({ value, onSave, placeholder = "Add notes..." }) {
+  const [draft, setDraft] = useState(value || "");
+  useEffect(() => { setDraft(value || ""); }, [value]);
+  const commit = () => { if ((draft || "") !== (value || "")) onSave(draft); };
+  return (
+    <textarea
+      className="input notes-editor"
+      value={draft}
+      placeholder={placeholder}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+    />
+  );
+}
+
+// A colored pill that is a real <select>: click opens the native dropdown, the
+// chosen value saves immediately. Used for stage / tier / type / warmth / priority.
+function BadgeSelect({ options, value, color = "#9A8F7C", onChange, dot = false, title }) {
+  return (
+    <span className={`badge-select-wrap ${dot ? "has-dot" : ""}`} title={title}>
+      {dot && <span className="badge-select-dot" style={{ background: color }} />}
+      <select
+        className="badge-select"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={{ backgroundColor: color + "22", color, borderColor: color + "55" }}
+      >
+        {options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+      </select>
+    </span>
   );
 }
 
@@ -365,8 +434,19 @@ export default function App() {
   const [customOptions, setCustomOptions] = useState([]);
   const [contactRoles, setContactRoles] = useState([]);
   const [summarizing, setSummarizing] = useState(false);
+  const [researchingInst, setResearchingInst] = useState(null);
+  // Institution keys we've already auto-researched this session, so opening a
+  // sheet with an empty description does not re-hit the API on every render.
+  const autoResearched = useRef(new Set());
 
-  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
+  const toastTimer = useRef(null);
+  const showToast = (msg, duration = 2500) => {
+    setToast(msg);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), duration);
+  };
+  // Subtle "Saved" confirmation for inline PATCH edits.
+  const savedToast = () => showToast("Saved", 1000);
 
   const loadData = useCallback(async () => {
     try {
@@ -474,8 +554,93 @@ export default function App() {
   const setDealTier = async (dealId, tier) => {
     try {
       await api("deals", "PATCH", { tier: tier || "Untiered" }, `?id=eq.${dealId}`);
-      await loadData();
+      await loadData(); savedToast();
     } catch { showToast("Error updating tier"); }
+  };
+
+  // ---- Generic inline-edit PATCH helpers (single-field saves from the sheets) ----
+  const updateDeal = async (id, patch) => {
+    try {
+      await api("deals", "PATCH", { ...patch, last_activity_at: new Date().toISOString() }, `?id=eq.${id}`);
+      await loadData(); savedToast();
+    } catch { showToast("Error saving"); }
+  };
+  const updateContact = async (id, patch) => {
+    try {
+      await api("contacts", "PATCH", patch, `?id=eq.${id}`);
+      await loadData(); savedToast();
+    } catch { showToast("Error saving"); }
+  };
+  const updateEnabler = async (id, patch) => {
+    try {
+      await api("enablers", "PATCH", patch, `?id=eq.${id}`);
+      await loadData(); savedToast();
+    } catch { showToast("Error saving"); }
+  };
+  // Institution-level fields live on the organizations row. A Target-only
+  // institution (created from the Pipeline) may not have an org row yet, so
+  // create one on first edit before patching.
+  const ensureOrgId = async (inst) => {
+    if (inst.orgId) return inst.orgId;
+    const clean = { name: inst.name, type: inst.type || "hospital", country: "Saudi Arabia" };
+    if (inst.city) clean.city = inst.city;
+    if (inst.region) clean.region = inst.region;
+    const created = (await api("organizations", "POST", clean) || [])[0];
+    return created?.id || null;
+  };
+  const updateInstitution = async (inst, patch) => {
+    try {
+      const orgId = await ensureOrgId(inst);
+      if (!orgId) throw new Error("no org");
+      await api("organizations", "PATCH", patch, `?id=eq.${orgId}`);
+      await loadData(); savedToast();
+    } catch { showToast("Error saving"); }
+  };
+  // Renaming an institution renames every backing row and re-keys the open sheet.
+  const renameInstitution = async (inst, rawName) => {
+    const name = (rawName || "").trim();
+    if (!name || name === inst.name) return;
+    try {
+      if (inst.orgId) await api("organizations", "PATCH", { name }, `?id=eq.${inst.orgId}`);
+      if (inst.dealId) await api("deals", "PATCH", { company: name }, `?id=eq.${inst.dealId}`);
+      if (inst.enablerId) await api("enablers", "PATCH", { name }, `?id=eq.${inst.enablerId}`);
+      if (!inst.orgId && !inst.dealId && !inst.enablerId) return;
+      await loadData(); setInstitutionSheetKey(name.toLowerCase()); savedToast();
+    } catch { showToast("Error saving"); }
+  };
+
+  // AI research: fill description (+ oncology relevance), website, and sector for
+  // an institution. Runs on create, on demand via a button, and once automatically
+  // when a sheet opens with an empty description. `silent` suppresses toasts for
+  // the automatic runs. Accepts a plain { key, name, city, orgId } shape.
+  const autoFillInstitution = async (inst, { silent = false } = {}) => {
+    if (!inst || !inst.name) return;
+    if (inst.key) autoResearched.current.add(inst.key);
+    setResearchingInst(inst.key || inst.name);
+    try {
+      const data = await researchInstitution(inst.name, inst.city);
+      if (!data || data.unknown) { if (!silent) showToast("Could not research this institution", 1800); return; }
+      const orgId = await ensureOrgId(inst);
+      if (!orgId) return;
+      const patch = {};
+      const desc = (data.description || "").trim();
+      const onc = (data.oncology_relevance || "").trim();
+      const combined = [desc, onc].filter(Boolean).join(" ");
+      if (combined) patch.description = combined;
+      if ((data.website || "").trim()) patch.website = data.website.trim();
+      if ((data.sector || "").trim()) patch.sector = data.sector.trim();
+      if (Object.keys(patch).length > 0) {
+        await api("organizations", "PATCH", patch, `?id=eq.${orgId}`);
+        await loadData();
+        if (!silent) showToast("AI research complete", 1500);
+      } else if (!silent) {
+        showToast("Nothing to fill in", 1500);
+      }
+    } catch {
+      if (!silent) showToast("AI research failed");
+    } finally {
+      setResearchingInst(null);
+    }
   };
 
   // CONTACT CRUD
@@ -706,10 +871,14 @@ export default function App() {
     const name = (form.name || "").trim();
     if (!name) { showToast("Name is required"); return; }
     try {
-      await persistOrganization({ name, type: form.type, city: form.city, region: form.region, sector: form.sector, description: form.description, website: form.website });
+      const org = await persistOrganization({ name, type: form.type, city: form.city, region: form.region, sector: form.sector, description: form.description, website: form.website });
       if (form.isTarget) await createDealForInstitution({ name, city: form.city, region: form.region });
       if (form.isEnabler) await createEnablerForInstitution({ name, city: form.city, region: form.region });
       await loadData(); showToast(`${name} added. Click to add people.`);
+      // Auto-research the new institution unless the user supplied a description.
+      if (org?.id && !(form.description || "").trim()) {
+        autoFillInstitution({ key: name.toLowerCase(), name, city: form.city, orgId: org.id });
+      }
     } catch { showToast("Error adding institution"); }
   };
 
@@ -1127,7 +1296,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             customOptions={customOptions}
             onAddCustomOption={addCustomOption}
             dealEnablers={dealEnablers.filter((de) => de.deal_id === sheetDeal.id)}
-            onEdit={(d) => setModal({ type: "deal", data: d })}
+            onUpdate={(patch) => updateDeal(sheetDeal.id, patch)}
+            onChangeStage={(stage) => moveDeal(sheetDeal.id, stage)}
             onDelete={deleteDeal}
             onAddActivity={addActivity}
             onAddPerson={(contactId, role) => addDealContact(sheetDeal.id, contactId, role)}
@@ -1180,7 +1350,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             contactRoles={contactRoles}
             customOptions={customOptions}
             onAddCustomOption={addCustomOption}
-            onEdit={() => setModal({ type: "institution", data: inst })}
+            onUpdate={(patch) => updateInstitution(inst, patch)}
+            onRename={(name) => renameInstitution(inst, name)}
+            onAutoFill={() => autoFillInstitution(inst)}
+            onAutoFillIfEmpty={() => { if (!inst.description && !autoResearched.current.has(inst.key)) autoFillInstitution(inst, { silent: true }); }}
+            researching={researchingInst === inst.key}
             onDelete={() => deleteInstitution(inst)}
             onAddActivity={addActivity}
             onAddPersonRole={addPersonRole}
@@ -1218,7 +1392,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             institutions={institutions}
             customOptions={customOptions}
             onAddCustomOption={addCustomOption}
-            onEdit={(c) => setModal({ type: "contact", data: c })}
+            onUpdate={(patch) => updateContact(sheetContact.id, patch)}
             onDelete={deleteContact}
             onAddActivity={addActivity}
             onAddRole={addPersonRole}
@@ -1579,7 +1753,7 @@ const TASK_FILTER_TABS = [
   { id: "overdue", label: "Overdue" },
 ];
 
-function DealSheet({ deal, activities, people, todos, contacts, deals, enablers, organizations, networkEdges, contactRoles, dealEnablers, customOptions = [], onAddCustomOption = () => {}, onEdit, onDelete, onAddActivity, onAddPerson, onAddPersonNew, onRemovePerson, onChangeTier, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
+function DealSheet({ deal, activities, people, todos, contacts, deals, enablers, organizations, networkEdges, contactRoles, dealEnablers, customOptions = [], onAddCustomOption = () => {}, onUpdate, onChangeStage, onDelete, onAddActivity, onAddPerson, onAddPersonNew, onRemovePerson, onChangeTier, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
   const stage = STAGES.find(s => s.id === deal.stage);
   const tier = DEAL_TIERS.find(t => t.id === (deal.tier || "Untiered"));
   const [filter, setFilter] = useState("all");
@@ -1607,24 +1781,26 @@ function DealSheet({ deal, activities, people, todos, contacts, deals, enablers,
       <div className="sheet-top">
         <div className="sheet-top-row">
           <div>
-            <div className="sheet-company">{deal.company}</div>
+            <InlineText value={deal.company} onSave={(v) => v.trim() && onUpdate({ company: v.trim() })} className="sheet-company" placeholder="Company name" />
             <div className="sheet-meta-row">
-              {stage && <span className="badge" style={{background:stage.color+"22",color:stage.color,border:`1px solid ${stage.color}44`}}>{stage.label}</span>}
-              {tier && <span className="badge" style={{background:tier.color+"22",color:tier.color,border:`1px solid ${tier.color}44`}}>{tier.label}</span>}
+              <BadgeSelect options={STAGES} value={deal.stage || "prospecting"} color={stage?.color} onChange={(v) => onChangeStage(v)} dot title="Change stage" />
+              <BadgeSelect options={DEAL_TIERS} value={deal.tier || "Untiered"} color={tier?.color} onChange={(v) => onChangeTier(deal.id, v)} title="Change tier" />
               {deal.value > 0 && <span className="badge val-badge">${Number(deal.value).toLocaleString()}</span>}
-              <select className="input tier-select" value={deal.tier || "Untiered"} onChange={e => onChangeTier(deal.id, e.target.value)} title="Change tier">
-                {DEAL_TIERS.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
-              </select>
             </div>
-            {deal.contact_name && <div className="sheet-contact">{deal.contact_name}{deal.contact_role ? ` . ${deal.contact_role}` : ""}</div>}
+            <div className="sheet-contact">
+              <InlineText value={deal.contact_name} onSave={(v) => onUpdate({ contact_name: v })} placeholder="Contact name" />
+              <span className="sheet-contact-sep"> · </span>
+              <InlineText value={deal.contact_role} onSave={(v) => onUpdate({ contact_role: v })} placeholder="Role" />
+            </div>
           </div>
           <div className="sheet-actions">
-            <button onClick={() => onEdit(deal)} className="btn-sec">Edit</button>
             <button onClick={() => { if (confirm("Delete this deal?")) onDelete(deal.id); }} className="btn-sec btn-danger">Delete</button>
           </div>
         </div>
-        {deal.next_action && <div className="next-box sheet-next"><span className="next-label">Next:</span> {deal.next_action}</div>}
-        {deal.notes && <div className="detail-notes sheet-notes">{deal.notes}</div>}
+        <div className="next-box sheet-next">
+          <span className="next-label">Next:</span>{" "}
+          <InlineText value={deal.next_action} onSave={(v) => onUpdate({ next_action: v })} placeholder="Add next action" />
+        </div>
       </div>
 
       <SummaryCard
@@ -1634,6 +1810,11 @@ function DealSheet({ deal, activities, people, todos, contacts, deals, enablers,
         onSaveSummary={onSaveSummary}
         summarizing={summarizing}
       />
+
+      <div className="people-section">
+        <div className="section-label">Notes</div>
+        <NotesEditor value={deal.notes} onSave={(v) => onUpdate({ notes: v })} />
+      </div>
 
       <PeopleSection
         people={peopleNorm}
@@ -1759,7 +1940,7 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onEdit, onDelete, onAddActivity, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onAddActivity, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack }) {
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
   const [roleInst, setRoleInst] = useState("");
@@ -1835,24 +2016,30 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
           <div className="sheet-person-head">
             <Avatar name={contact.name} size={52} />
             <div>
-            <div className="sheet-company">{contact.name}<span className="warmth-dot warmth-dot-lg" style={{background: warmth?.color, marginLeft: 10, marginRight: 0}} title={`Warmth: ${warmth?.label}`} /></div>
+            <div className="sheet-company"><InlineText value={contact.name} onSave={(v) => v.trim() && onUpdate({ name: v.trim() })} placeholder="Name" /></div>
+            <div className="sheet-meta-row">
+              <BadgeSelect options={WARMTH_LEVELS} value={contact.warmth || "unknown"} color={warmth?.color} onChange={(v) => onUpdate({ warmth: v })} dot title="Change warmth" />
+            </div>
             <div className="contact-details mb-sm">
-              {contact.email && <div>📧 {contact.email}</div>}
-              {contact.phone && <div>📞 {contact.phone}</div>}
-              {contact.linkedin && <div>🔗 {contact.linkedin}</div>}
+              <div>📧 <InlineText value={contact.email} onSave={(v) => onUpdate({ email: v })} placeholder="Add email" /></div>
+              <div>📞 <InlineText value={contact.phone} onSave={(v) => onUpdate({ phone: v })} placeholder="Add phone" /></div>
+              <div>🔗 <InlineText value={contact.linkedin} onSave={(v) => onUpdate({ linkedin: v })} placeholder="Add LinkedIn" /></div>
             </div>
             {(contact.tags || []).length > 0 && <div className="tags-row">{contact.tags.map(t => <span key={t} className="tag">{t}</span>)}</div>}
             </div>
           </div>
           <div className="sheet-actions">
-            <button onClick={() => onEdit(contact)} className="btn-sec">Edit</button>
             <button onClick={() => { if (confirm("Delete this person?")) onDelete(contact.id); }} className="btn-sec btn-danger">Delete</button>
           </div>
         </div>
-        {contact.notes && <div className="detail-notes sheet-notes">{contact.notes}</div>}
       </div>
 
       <SummaryCard entity={contact} activities={activities} onGenerateSummary={onGenerateSummary} onSaveSummary={onSaveSummary} summarizing={summarizing} />
+
+      <div className="people-section">
+        <div className="section-label">Notes</div>
+        <NotesEditor value={contact.notes} onSave={(v) => onUpdate({ notes: v })} />
+      </div>
 
       <div className="people-section">
         <div className="ai-summary-header">
@@ -2252,7 +2439,9 @@ function TodoRow({ todo, contacts, deals = [], enablers = [], customOptions = []
         <div className="todo-title-row">
           <span className="todo-title">{todo.title}</span>
           {!done && onUpdate && <button onClick={startEdit} className="icon-btn" title="Edit task">✎</button>}
-          <PriorityBadge priority={todo.priority} />
+          {onUpdate
+            ? <BadgeSelect options={PRIORITIES} value={todo.priority} color={PRIORITIES.find(p => p.id === todo.priority)?.color} onChange={(v) => onUpdate(todo.id, { priority: v })} title="Change priority" />
+            : <PriorityBadge priority={todo.priority} />}
           {overdue && <span className="badge overdue-badge">Overdue</span>}
           {done && <button onClick={() => onToggle(todo)} className="btn-copy todo-reopen">Reopen</button>}
         </div>
@@ -2510,14 +2699,20 @@ function institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, 
 function InstitutionSheet({
   institution: inst, summaryEntity, activities, contacts, deals, enablers, organizations,
   dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {},
-  onEdit, onDelete, onAddActivity, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
+  onUpdate, onRename, onAutoFill, onAutoFillIfEmpty, researching, onDelete, onAddActivity, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onChangeStage, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack,
 }) {
   const [filter, setFilter] = useState("all");
   const [addPersonOpen, setAddPersonOpen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const meta = institutionTypeMeta(inst.type, customOptions);
-  const stageOpts = optionsWithCustom(STAGES, customOptions, "deal_stage");
+  const stage = STAGES.find(s => s.id === (inst.stage || "prospecting"));
+  const typeOpts = optionsWithCustom(INSTITUTION_TYPES, customOptions, "institution_type");
+  // Auto-research an institution the first time its sheet opens with no description.
+  useEffect(() => {
+    if (onAutoFillIfEmpty) onAutoFillIfEmpty();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inst.key]);
   const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
   const primary = institutionPrimaryEntity(inst);
 
@@ -2565,32 +2760,43 @@ function InstitutionSheet({
       <div className="sheet-top">
         <div className="sheet-top-row">
           <div>
-            <div className="sheet-company">{inst.name}</div>
+            <InlineText value={inst.name} onSave={(v) => v.trim() && onRename(v.trim())} className="sheet-company" placeholder="Institution name" />
             <div className="sheet-meta-row">
-              {inst.type && <span className="badge" style={{background:meta.color+"22",color:meta.color,border:`1px solid ${meta.color}44`}}>{meta.label}</span>}
+              <BadgeSelect options={typeOpts} value={inst.type || "hospital"} color={meta.color} onChange={(v) => onUpdate({ type: v })} title="Change type" />
               {inst.isTarget && <span className="inst-flag inst-flag-target">● Target</span>}
               {inst.isEnabler && <span className="inst-flag inst-flag-enabler">● Enabler</span>}
               {inst.city && <span className="city-pin">📍 {inst.city}{inst.region ? `, ${inst.region}` : ""}</span>}
             </div>
-            {inst.sector && <div className="sheet-contact">{inst.sector}</div>}
-            {inst.website && <div className="sheet-contact"><a href={inst.website} target="_blank" rel="noreferrer" className="task-link">{inst.website}</a></div>}
+            <div className="sheet-contact">Sector: <InlineText value={inst.sector} onSave={(v) => onUpdate({ sector: v })} placeholder="Add sector" /></div>
+            <div className="sheet-contact">Website: <InlineText value={inst.website} onSave={(v) => onUpdate({ website: v })} placeholder="Add website" /></div>
           </div>
           <div className="sheet-actions">
-            <button onClick={onEdit} className="btn-sec">Edit</button>
+            <button onClick={onAutoFill} className="btn-sec" disabled={researching}>{researching ? "AI researching..." : "Auto-fill with AI"}</button>
             <button onClick={() => { if (confirm("Delete this institution and all its linked records?")) onDelete(); }} className="btn-sec btn-danger">Delete</button>
           </div>
         </div>
         {inst.isTarget && (
           <div className="sheet-next inst-stage-row">
             <span className="next-label">Pipeline stage:</span>
-            <SelectWithCustom className="input inst-stage-select" options={stageOpts} value={inst.stage || "prospecting"} onChange={(v) => { onChangeStage(v); trackCustom("deal_stage", stageOpts, onAddCustomOption)(v); }} />
+            <BadgeSelect options={STAGES} value={inst.stage || "prospecting"} color={stage?.color} onChange={(v) => onChangeStage(v)} dot title="Change stage" />
           </div>
         )}
-        {inst.description && <div className="detail-notes sheet-notes">{inst.description}</div>}
-        {inst.notes && <div className="detail-notes sheet-notes">{inst.notes}</div>}
       </div>
 
       <SummaryCard entity={summaryEntity} activities={activities} onGenerateSummary={onGenerateSummary} onSaveSummary={onSaveSummary} summarizing={summarizing} />
+
+      <div className="people-section">
+        <div className="ai-summary-header">
+          <div className="section-label">Description</div>
+          {researching && <span className="empty-small">AI researching...</span>}
+        </div>
+        <NotesEditor value={inst.description} onSave={(v) => onUpdate({ description: v })} placeholder="What does this institution do? Click Auto-fill with AI to research." />
+      </div>
+
+      <div className="people-section">
+        <div className="section-label">Notes</div>
+        <NotesEditor value={inst.notes} onSave={(v) => onUpdate({ notes: v })} />
+      </div>
 
       <div className="people-section">
         <div className="ai-summary-header">

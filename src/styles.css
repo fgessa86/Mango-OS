@@ -507,3 +507,30 @@ select.tier-select { width: auto; max-width: 160px; padding: 6px 10px; font-size
   .map-paths-panel { width: calc(100% - 28px); }
   .stats-bar, .toolbar, .kanban, .section-pad, .deal-sheet, .page-header { padding-left: 18px; padding-right: 18px; }
 }
+
+/* ============================================================
+   Inline editing (single-user, click-to-edit everywhere)
+   ============================================================ */
+.inline-editable { cursor: text; border-radius: 6px; padding: 0 3px; margin: 0 -3px; transition: background 0.12s; box-decoration-break: clone; }
+.inline-editable:hover { background: var(--next-tint); box-shadow: inset 0 -1px 0 rgba(245,166,35,0.45); }
+.inline-empty { color: var(--dim); font-style: italic; font-weight: 500; }
+.inline-edit { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--mango); border-radius: 8px; padding: 2px 8px; outline: none; box-shadow: 0 0 0 3px rgba(245,166,35,0.15); min-width: 140px; max-width: 100%; }
+textarea.inline-edit { width: 100%; resize: vertical; line-height: 1.5; }
+/* keep flex containers from stretching the inline input full width oddly */
+.sheet-company.inline-edit { min-width: 260px; }
+.sheet-contact-sep { color: var(--dim); }
+
+/* Always-visible notes / description scratchpad */
+.notes-editor { width: 100%; min-height: 96px; resize: vertical; line-height: 1.6; font-size: 14px; color: var(--text-2); background: var(--card-tint); border: 1px solid transparent; }
+.notes-editor:hover { border-color: var(--divider); }
+.notes-editor:focus { background: var(--surface); border-color: var(--mango); box-shadow: 0 0 0 3px rgba(245,166,35,0.15); }
+
+/* Badge that is a real <select>: click opens the native dropdown */
+.badge-select-wrap { display: inline-flex; align-items: center; position: relative; }
+.badge-select-wrap.has-dot { padding-left: 15px; }
+.badge-select-dot { position: absolute; left: 4px; top: 50%; transform: translateY(-50%); width: 8px; height: 8px; border-radius: 50%; pointer-events: none; z-index: 1; }
+.badge-select { appearance: none; -webkit-appearance: none; border: 1px solid; border-radius: 20px; padding: 3px 24px 3px 11px; font-size: 11px; font-weight: 700; font-family: inherit; cursor: pointer; line-height: 1.2;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M2 3.5L5 6.5L8 3.5' stroke='%239A8F7C' stroke-width='1.5' fill='none' stroke-linecap='round'/></svg>");
+  background-repeat: no-repeat; background-position: right 8px center; }
+.badge-select-wrap.has-dot .badge-select { padding-left: 14px; }
+.badge-select:focus { outline: none; box-shadow: 0 0 0 3px rgba(245,166,35,0.2); }
