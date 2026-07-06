@@ -76,11 +76,13 @@ export const CONNECTION_RELATIONSHIPS = [
 // Pipeline tiers for deals. Stored as the raw string ("Tier 1"/"Untiered") on
 // the deals.tier column, so the id IS the stored value. Field name for
 // custom_options is not used (fixed vocabulary).
+// bg/fg are the exact badge design tokens; color mirrors fg for the editable
+// pill selector on the Deal Sheet.
 export const DEAL_TIERS = [
-  { id: "Tier 1", label: "Tier 1", color: "#EF4444" },
-  { id: "Tier 2", label: "Tier 2", color: "#F59E0B" },
-  { id: "Tier 3", label: "Tier 3", color: "#3B82F6" },
-  { id: "Untiered", label: "Untiered", color: "#7B8A9E" },
+  { id: "Tier 1", label: "Tier 1", color: "#B77400", bg: "#FDECCB", fg: "#B77400" },
+  { id: "Tier 2", label: "Tier 2", color: "#2A6FDB", bg: "#E4EDFB", fg: "#2A6FDB" },
+  { id: "Tier 3", label: "Tier 3", color: "#6B6B7B", bg: "#ECECEF", fg: "#6B6B7B" },
+  { id: "Untiered", label: "Untiered", color: "#8A8072", bg: "#F1EADD", fg: "#8A8072" },
 ];
 
 // Relationship vocabulary for person-to-person connections created from the

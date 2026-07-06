@@ -134,7 +134,18 @@ body {
 .toolbar { padding: 18px 34px 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .tier-filter { display: flex; gap: 7px; flex-wrap: wrap; background: #f1eadd; padding: 4px; border-radius: 12px; }
 select.tier-select { width: auto; max-width: 160px; padding: 6px 10px; font-size: 12px; }
-.tier-badge { font-size: 10.5px; margin: 0; display: inline-block; }
+/* Tier badge: exact design tokens, identical size in every view */
+.tier-badge { padding: 2px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; line-height: 1.35; display: inline-flex; align-items: center; white-space: nowrap; flex-shrink: 0; }
+/* Pipeline "All" view: deals grouped by tier within each stage column */
+.tier-group { display: flex; flex-direction: column; gap: 11px; }
+.tier-group-header { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #9A8F7C; margin: 2px 0 -1px 2px; }
+/* Institution type badge under a deal card's company name */
+.card-type-badge { align-self: flex-start; margin: 5px 0 0; font-size: 10.5px; padding: 2px 9px; }
+/* Target / Enabler pill badges (Institution Sheet header + cards) */
+.flag-badge-target { background: #E4EDFB; color: #2A6FDB; }
+.flag-badge-enabler { background: #FDF0DA; color: #B5791A; }
+.classification-row { display: flex; gap: 18px; flex-wrap: wrap; margin: 10px 0 4px; }
+.classification-row .checkbox-label { font-size: 13px; font-weight: 600; color: var(--text-2); }
 
 .btn-primary { padding: 10px 18px; border-radius: 11px; border: none; background: var(--mango); color: var(--mango-ink); font-size: 14px; font-weight: 700; cursor: pointer; box-shadow: var(--shadow-gold); font-family: inherit; transition: background 0.15s; }
 .btn-primary:hover { background: var(--mango-hover); }

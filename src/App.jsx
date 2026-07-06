@@ -982,6 +982,23 @@ export default function App() {
     } catch { showToast("Error saving institution"); }
   };
 
+  // Toggles an institution's Target or Enabler flag directly from the sheet:
+  // checking creates the linked deal/enabler, unchecking archives it (history kept).
+  const setInstitutionFlag = async (inst, flag, checked) => {
+    try {
+      if (flag === "target") {
+        if (checked && !inst.dealId) await createDealForInstitution({ name: inst.name, city: inst.city, region: inst.region });
+        else if (!checked && inst.dealId) await purgeDeal(inst.dealId);
+        else return;
+      } else {
+        if (checked && !inst.enablerId) await createEnablerForInstitution({ name: inst.name, city: inst.city, region: inst.region });
+        else if (!checked && inst.enablerId) await purgeEnabler(inst.enablerId);
+        else return;
+      }
+      await loadData(); savedToast();
+    } catch { showToast("Error updating institution"); }
+  };
+
   const deleteInstitution = async (inst) => {
     try {
       if (inst.dealId) await purgeDeal(inst.dealId);
@@ -1333,6 +1350,42 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const activeDeals = deals.filter((d) => !["won","lost"].includes(d.stage));
   const totalValue = activeDeals.reduce((s, d) => s + (Number(d.value) || 0), 0);
   const institutions = buildInstitutions(deals, enablers, organizations);
+  // Resolve a deal back to its institution (by normalized company name) so deal
+  // cards can show the institution type and fall back to its city.
+  const instByName = new Map(institutions.map((i) => [(i.name || "").trim().toLowerCase(), i]));
+
+  // Renders one pipeline deal card (shared by the grouped "All" view and the
+  // single-tier filtered view). Shows type badge, city with pin, and tier badge.
+  const renderDealCard = (deal) => {
+    const inst = instByName.get((deal.company || "").trim().toLowerCase());
+    const cityText = deal.city || inst?.city || "";
+    const typeMeta = inst?.type ? institutionTypeMeta(inst.type, customOptions) : null;
+    const t = DEAL_TIERS.find((x) => x.id === (deal.tier || "Untiered"));
+    return (
+      <div key={deal.id} draggable onDragStart={(e) => e.dataTransfer.setData("dealId", deal.id)}
+        onClick={() => { setDealSheetId(deal.id); setView("deal-sheet"); }}
+        className="deal-card">
+        <div className="deal-card-head">
+          <div className="card-company">{deal.company}</div>
+          {t && t.id !== "Untiered" && <span className="tier-badge" style={{ background: t.bg, color: t.fg }}>{t.label}</span>}
+        </div>
+        {typeMeta && <span className="badge card-type-badge" style={{ background: typeMeta.color + "22", color: typeMeta.color, border: `1px solid ${typeMeta.color}44` }}>{typeMeta.label}</span>}
+        {deal.contact_name && <div className="card-contact">{deal.contact_name}{deal.contact_role ? ` · ${deal.contact_role}` : ""}</div>}
+        {(cityText || deal.value > 0) && (
+          <div className="card-city-row">
+            {cityText && <span className="city-pin">📍 {cityText}</span>}
+            {deal.value > 0 && <span className="card-value">${Number(deal.value).toLocaleString()}</span>}
+          </div>
+        )}
+        {deal.next_action && (
+          <div className="card-next">
+            <div className="card-next-label">NEXT</div>
+            <div className="card-next-text">{deal.next_action}</div>
+          </div>
+        )}
+      </div>
+    );
+  };
   const openTodos = sortTodos(todos.filter((t) => t.status === "open"));
   const filteredTasks = openTodos.filter((t) => {
     if (taskFilter === "high") return t.priority === "high";
@@ -1441,6 +1494,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onSaveResearch={(data) => saveInstitutionResearch(inst, data)}
             onAddResearchedPerson={(person) => addResearchedPerson(inst, person)}
             onAddResearchedPeople={(people) => addResearchedPeople(inst, people)}
+            onSetFlag={(flag, checked) => setInstitutionFlag(inst, flag, checked)}
             onDelete={() => deleteInstitution(inst)}
             onAddActivity={addActivity}
             onAddPersonRole={addPersonRole}
@@ -1531,29 +1585,18 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
                     <span className="col-count">{sd.length}</span>
                   </div>
                   <div className="col-body">
-                    {sd.map((deal) => (
-                      <div key={deal.id} draggable onDragStart={(e) => e.dataTransfer.setData("dealId", deal.id)}
-                        onClick={() => { setDealSheetId(deal.id); setView("deal-sheet"); }}
-                        className="deal-card">
-                        <div className="deal-card-head">
-                          <div className="card-company">{deal.company}</div>
-                          {(() => { const t = DEAL_TIERS.find(x => x.id === (deal.tier || "Untiered")); return t && t.id !== "Untiered" ? <span className="badge tier-badge" style={{background:t.color+"22",color:t.color}}>{t.label}</span> : null; })()}
-                        </div>
-                        {deal.contact_name && <div className="card-contact">{deal.contact_name}{deal.contact_role ? ` · ${deal.contact_role}` : ""}</div>}
-                        {(deal.city || deal.value > 0) && (
-                          <div className="card-city-row">
-                            {deal.city && <><span className="deal-dot" /><span>{deal.city}</span></>}
-                            {deal.value > 0 && <span className="card-value">${Number(deal.value).toLocaleString()}</span>}
-                          </div>
-                        )}
-                        {deal.next_action && (
-                          <div className="card-next">
-                            <div className="card-next-label">NEXT</div>
-                            <div className="card-next-text">{deal.next_action}</div>
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                    {tierFilter === "all"
+                      ? DEAL_TIERS.map((tier) => {
+                          const td = sd.filter((d) => (d.tier || "Untiered") === tier.id);
+                          if (td.length === 0) return null;
+                          return (
+                            <div key={tier.id} className="tier-group">
+                              <div className="tier-group-header">{tier.label}</div>
+                              {td.map((deal) => renderDealCard(deal))}
+                            </div>
+                          );
+                        })
+                      : sd.map((deal) => renderDealCard(deal))}
                     {sd.length === 0 && <div className="empty-col">{stage.id === "prospecting" ? "Add your first deal" : "Drag deals here"}</div>}
                   </div>
                 </div>
@@ -2800,7 +2843,7 @@ function institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, 
 function InstitutionSheet({
   institution: inst, summaryEntity, activities, contacts, deals, enablers, organizations,
   dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {},
-  onUpdate, onRename, onAutoFill, onAutoFillIfEmpty, researching, onDelete, onAddActivity, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
+  onUpdate, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
   onChangeStage, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack,
 }) {
@@ -2939,9 +2982,13 @@ function InstitutionSheet({
             <InlineText value={inst.name} onSave={(v) => v.trim() && onRename(v.trim())} className="sheet-company" placeholder="Institution name" />
             <div className="sheet-meta-row">
               <BadgeSelect options={typeOpts} value={inst.type || "hospital"} color={meta.color} onChange={(v) => onUpdate({ type: v })} title="Change type" />
-              {inst.isTarget && <span className="inst-flag inst-flag-target">● Target</span>}
-              {inst.isEnabler && <span className="inst-flag inst-flag-enabler">● Enabler</span>}
+              {inst.isTarget && <span className="badge flag-badge-target">Target</span>}
+              {inst.isEnabler && <span className="badge flag-badge-enabler">Enabler</span>}
               {inst.city && <span className="city-pin">📍 {inst.city}{inst.region ? `, ${inst.region}` : ""}</span>}
+            </div>
+            <div className="classification-row">
+              <label className="checkbox-label"><input type="checkbox" checked={inst.isTarget} onChange={(e) => { if (!e.target.checked && inst.dealId && !confirm("Unchecking Target removes the linked pipeline deal (its people and stage). Activity history is kept. Continue?")) return; onSetFlag("target", e.target.checked); }} /> Target</label>
+              <label className="checkbox-label"><input type="checkbox" checked={inst.isEnabler} onChange={(e) => { if (!e.target.checked && inst.enablerId && !confirm("Unchecking Enabler removes the linked enabler record. Activity history is kept. Continue?")) return; onSetFlag("enabler", e.target.checked); }} /> Enabler</label>
             </div>
             <div className="sheet-contact">Sector: <InlineText value={inst.sector} onSave={(v) => onUpdate({ sector: v })} placeholder="Add sector" /></div>
             <div className="sheet-contact">Website: <InlineText value={inst.website} onSave={(v) => onUpdate({ website: v })} placeholder="Add website" /></div>
@@ -3495,8 +3542,8 @@ function NetworkTab({
                             <span className="badge" style={{background:meta.color+"22",color:meta.color,border:`1px solid ${meta.color}44`}}>{meta.label}</span>
                           </div>
                           <div className="institution-flags-row">
-                            {inst.isTarget && <span className="inst-dot inst-dot-target" title="Target" />}
-                            {inst.isEnabler && <span className="inst-dot inst-dot-enabler" title="Enabler" />}
+                            {inst.isTarget && <span className="badge flag-badge-target">Target</span>}
+                            {inst.isEnabler && <span className="badge flag-badge-enabler">Enabler</span>}
                             {inst.city && <span className="city-pin">📍 {inst.city}</span>}
                             {stage && <span className="badge" style={{background:stage.color+"22",color:stage.color,border:`1px solid ${stage.color}44`}}>{stage.label}</span>}
                           </div>
