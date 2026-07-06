@@ -75,64 +75,139 @@ export const researchInstitution = async (name, city) => {
   }
 };
 
-// Shared helper: run a web-search-enabled message and return the concatenated
-// text of every text block, with any markdown code fences stripped.
-const webSearchText = async (content, maxTokens = 4000) => {
+// Web search can be slow, so allow a generous timeout before aborting.
+const RESEARCH_TIMEOUT_MS = 60000;
+
+// Low-level Anthropic call with a 60 second timeout, readable error messages,
+// and a raw-response console.log for debugging in browser dev tools.
+const callAnthropic = async (body) => {
   if (!ANTHROPIC_API_KEY) throw new Error("Missing VITE_ANTHROPIC_API_KEY");
   bumpApiCalls();
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: maxTokens,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [{ role: "user", content }],
-    }),
-  });
-  if (!res.ok) throw new Error(`Anthropic API error: ${res.status}`);
-  const data = await res.json();
-  return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RESEARCH_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    if (e.name === "AbortError") throw new Error("request timed out after 60 seconds");
+    throw new Error(e.message || "network error reaching Anthropic");
+  }
+  clearTimeout(timer);
+  const data = await res.json().catch(() => null);
+  // eslint-disable-next-line no-console
+  console.log("[Research] raw Anthropic response:", data);
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Anthropic API error ${res.status}`);
+  }
+  return data;
 };
 
-// Pulls the first balanced JSON object out of a model response, tolerating
-// stray prose or markdown fences around it.
-const parseJsonBlock = (text, fallback) => {
+// Concatenate every text block from a (possibly multi-block) response. Web
+// search responses interleave text, server_tool_use, and web_search_tool_result
+// blocks, so we keep only the text and join it.
+const extractText = (data) => (data?.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+
+const webSearchText = async (content, maxTokens = 4000) => {
+  const data = await callAnthropic({
+    model: "claude-sonnet-4-6",
+    max_tokens: maxTokens,
+    tools: [{ type: "web_search_20250305", name: "web_search" }],
+    messages: [{ role: "user", content }],
+  });
+  return extractText(data);
+};
+
+const plainText = async (content, maxTokens = 2000) => {
+  const data = await callAnthropic({
+    model: "claude-sonnet-4-6",
+    max_tokens: maxTokens,
+    messages: [{ role: "user", content }],
+  });
+  return extractText(data);
+};
+
+// Pulls a JSON object out of a model response: strips markdown fences, then
+// keeps only the substring from the first { to the last }. Returns null (not a
+// fallback) so callers can decide whether to retry.
+const parseJsonBlock = (text) => {
   const cleaned = (text || "").replace(/```json/gi, "").replace(/```/g, "").trim();
-  const match = cleaned.match(/\{[\s\S]*\}/);
-  if (!match) return fallback;
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
+  if (first === -1 || last === -1 || last < first) return null;
   try {
-    return JSON.parse(match[0]);
+    return JSON.parse(cleaned.slice(first, last + 1));
   } catch {
-    return fallback;
+    return null;
   }
 };
 
-// Web-search research for key people at an institution, split into clinical
-// champions (oncologists) and decision makers, for an oncology data company.
-export const researchKeyPeople = async (name, city) => {
+// Whatever fields parsed correctly are returned; missing or malformed fields
+// degrade to empty so partial results still surface (graceful partial results).
+const normalizeKeyPeople = (parsed) => ({
+  clinical_champions: Array.isArray(parsed?.clinical_champions) ? parsed.clinical_champions : [],
+  decision_makers: Array.isArray(parsed?.decision_makers) ? parsed.decision_makers : [],
+  institution_notes: (parsed && parsed.institution_notes) || "",
+});
+
+const KEY_PEOPLE_SHAPE = `{"clinical_champions": [{"name": "", "title": "", "department": "", "education": "", "publications": "", "relevance": "", "confidence": ""}], "decision_makers": [{"name": "", "title": "", "department": "", "education": "", "relevance": "", "confidence": ""}], "institution_notes": ""}`;
+
+// Research key people at an institution: clinical champions (oncologists) and
+// decision makers, for an oncology data company. Tries a web search first; on
+// any failure (timeout, tool error, unparseable response) it automatically
+// retries once WITHOUT web search using the model's training knowledge. The
+// optional onStatus callback lets the UI show "Retrying without web search...".
+export const researchKeyPeople = async (name, city, onStatus = () => {}) => {
   const location = (city || "").trim() ? `${city}, Saudi Arabia` : "Saudi Arabia";
-  const content = `Research ${name} in ${location}. I need to find key people who would be relevant for a healthcare data and oncology analytics company. Focus on:\n\n1. CLINICAL CHAMPIONS (3-5 people): Oncologists specializing in breast cancer, lung cancer, or colorectal cancer. Include their full name, title, department, education background if findable, and any notable research or publications.\n\n2. DECISION MAKERS (3-5 people): Hospital leadership, heads of pharmacy, procurement directors, IT/digital health leads, CMOs, deputy directors, anyone involved in drug formulary decisions or technology partnerships.\n\nFor each person found, provide:\n- Full name\n- Title/role at the institution\n- Department\n- Education (if findable)\n- Notable research or publications (if applicable)\n- Why they would be relevant for an oncology data company\n- Confidence level: high (found on official sources), medium (found in publications/conferences), low (mentioned indirectly)\n\nRespond ONLY in JSON format, no markdown, no backticks:\n{"clinical_champions": [{"name": "", "title": "", "department": "", "education": "", "publications": "", "relevance": "", "confidence": ""}], "decision_makers": [{"name": "", "title": "", "department": "", "education": "", "relevance": "", "confidence": ""}], "institution_notes": ""}`;
-  const text = await webSearchText(content, 4000);
-  const parsed = parseJsonBlock(text, { clinical_champions: [], decision_makers: [], institution_notes: "" });
-  return {
-    clinical_champions: Array.isArray(parsed.clinical_champions) ? parsed.clinical_champions : [],
-    decision_makers: Array.isArray(parsed.decision_makers) ? parsed.decision_makers : [],
-    institution_notes: parsed.institution_notes || "",
-  };
+  const webPrompt = `Research ${name} in ${location}. I need to find key people who would be relevant for a healthcare data and oncology analytics company. Focus on:\n\n1. CLINICAL CHAMPIONS (3-5 people): Oncologists specializing in breast cancer, lung cancer, or colorectal cancer. Include their full name, title, department, education background if findable, and any notable research or publications.\n\n2. DECISION MAKERS (3-5 people): Hospital leadership, heads of pharmacy, procurement directors, IT/digital health leads, CMOs, deputy directors, anyone involved in drug formulary decisions or technology partnerships.\n\nFor each person found, provide:\n- Full name\n- Title/role at the institution\n- Department\n- Education (if findable)\n- Notable research or publications (if applicable)\n- Why they would be relevant for an oncology data company\n- Confidence level: high (found on official sources), medium (found in publications/conferences), low (mentioned indirectly)\n\nRespond ONLY in JSON format, no markdown, no backticks:\n${KEY_PEOPLE_SHAPE}`;
+
+  let webErr;
+  try {
+    const parsed = parseJsonBlock(await webSearchText(webPrompt, 4000));
+    if (parsed) return normalizeKeyPeople(parsed);
+    webErr = new Error("could not parse the research results");
+  } catch (e) {
+    webErr = e;
+  }
+
+  // Retry once without web search, using the model's own knowledge.
+  onStatus("Retrying without web search...");
+  const simplePrompt = `Based on what you already know about ${name} in ${location}, list key people relevant to a healthcare data and oncology analytics company: 3 to 5 clinical champions (oncologists in breast, lung, or colorectal cancer) and 3 to 5 decision makers (hospital leadership, heads of pharmacy, procurement, IT or digital health leads, CMOs). If you are not certain, give your best knowledge and mark confidence low. Respond ONLY in JSON, no markdown, no backticks:\n${KEY_PEOPLE_SHAPE}\nDo not use em dashes anywhere; use commas, periods, colons, or parentheses instead.`;
+  try {
+    const parsed = parseJsonBlock(await plainText(simplePrompt, 2000));
+    if (parsed) return normalizeKeyPeople(parsed);
+    throw new Error("could not parse the research results");
+  } catch (fallbackErr) {
+    throw new Error(webErr?.message || fallbackErr?.message || "unknown error");
+  }
 };
 
-// Web-search for active oncology clinical trials at an institution.
+// Web-search for active oncology clinical trials at an institution. Best effort:
+// falls back to model knowledge if the web search fails, and never throws (an
+// empty list is a valid, non-blocking result for this supplementary section).
 export const researchClinicalTrials = async (name) => {
-  const content = `Search for active clinical trials at ${name} in Saudi Arabia related to breast cancer, lung cancer, or colorectal cancer. List the trial names, NCT IDs, conditions, and sponsors. Respond ONLY in JSON format, no markdown, no backticks: {"trials": [{"name": "", "nct_id": "", "condition": "", "sponsor": ""}]}. If none are found, respond with {"trials": []}. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.`;
-  const text = await webSearchText(content, 2000);
-  const parsed = parseJsonBlock(text, { trials: [] });
-  return { trials: Array.isArray(parsed.trials) ? parsed.trials : [] };
+  const shape = `{"trials": [{"name": "", "nct_id": "", "condition": "", "sponsor": ""}]}`;
+  const content = `Search for active clinical trials at ${name} in Saudi Arabia related to breast cancer, lung cancer, or colorectal cancer. List the trial names, NCT IDs, conditions, and sponsors. Respond ONLY in JSON format, no markdown, no backticks: ${shape}. If none are found, respond with {"trials": []}. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.`;
+  try {
+    const parsed = parseJsonBlock(await webSearchText(content, 2000));
+    if (parsed) return { trials: Array.isArray(parsed.trials) ? parsed.trials : [] };
+  } catch { /* fall back below */ }
+  try {
+    const parsed = parseJsonBlock(await plainText(content, 1500));
+    return { trials: Array.isArray(parsed?.trials) ? parsed.trials : [] };
+  } catch {
+    return { trials: [] };
+  }
 };
 
 export const summarizeImage = async (base64, prompt) => {

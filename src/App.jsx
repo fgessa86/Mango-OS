@@ -804,7 +804,7 @@ export default function App() {
   };
 
   // ---- "Research Key People" workflow (web search) ----
-  const researchKeyPeopleFor = async (inst) => researchKeyPeople(inst.name, inst.city);
+  const researchKeyPeopleFor = async (inst, onStatus) => researchKeyPeople(inst.name, inst.city, onStatus);
   const researchTrialsFor = async (inst) => researchClinicalTrials(inst.name);
 
   // Persists a research run to the institution's organizations.research_data so
@@ -1592,7 +1592,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onAutoFill={() => autoFillInstitution(inst)}
             onAutoFillIfEmpty={() => { if (!inst.description && !autoResearched.current.has(inst.key)) autoFillInstitution(inst, { silent: true }); }}
             researching={researchingInst === inst.key}
-            onResearchKeyPeople={() => researchKeyPeopleFor(inst)}
+            onResearchKeyPeople={(onStatus) => researchKeyPeopleFor(inst, onStatus)}
             onResearchTrials={() => researchTrialsFor(inst)}
             onSaveResearch={(data) => saveInstitutionResearch(inst, data)}
             onAddResearchedPerson={(person) => addResearchedPerson(inst, person)}
@@ -2767,6 +2767,8 @@ function InstitutionSheet({
   // ---- "Research Key People" state ----
   const [researchOpen, setResearchOpen] = useState(false);
   const [researchLoading, setResearchLoading] = useState(false);
+  const [researchStatus, setResearchStatus] = useState("");
+  const [researchError, setResearchError] = useState(null);
   const [researchResults, setResearchResults] = useState(null);
   const [researchedAt, setResearchedAt] = useState(null);
   const [trials, setTrials] = useState(null);
@@ -2777,7 +2779,7 @@ function InstitutionSheet({
 
   // Hydrate previous research (from organizations.research_data) when the sheet opens.
   useEffect(() => {
-    setAddedKeys({}); setAddingAll(false); setResearchLoading(false); setTrialsLoading(false);
+    setAddedKeys({}); setAddingAll(false); setResearchLoading(false); setTrialsLoading(false); setResearchError(null); setResearchStatus("");
     let hydrated = false;
     if (inst.researchData) {
       try {
@@ -2806,14 +2808,18 @@ function InstitutionSheet({
   ].filter(x => (x.p.name || "").trim());
 
   const runResearch = async () => {
-    setResearchOpen(true); setResearchLoading(true);
+    setResearchOpen(true); setResearchLoading(true); setResearchError(null); setResearchStatus("");
     setResearchResults(null); setTrials(null); setResearchedAt(null); setAddedKeys({});
     let people;
     try {
-      people = await onResearchKeyPeople();
+      people = await onResearchKeyPeople((msg) => setResearchStatus(msg));
       setResearchResults(people);
-    } catch { setResearchLoading(false); showToast("Research failed"); return; }
-    setResearchLoading(false);
+    } catch (e) {
+      setResearchLoading(false); setResearchStatus("");
+      setResearchError(e?.message || "unknown error");
+      return;
+    }
+    setResearchLoading(false); setResearchStatus("");
     // Second call: clinical trials supplement.
     setTrialsLoading(true);
     let trialsRes = { trials: [] };
@@ -2998,7 +3004,12 @@ function InstitutionSheet({
           {researchedAt && !researchLoading && <div className="research-meta">Last researched {formatDate(researchedAt)}</div>}
 
           {researchLoading ? (
-            <div className="research-loading">Researching {inst.name}...</div>
+            <div className="research-loading">{researchStatus || `Researching ${inst.name}...`}</div>
+          ) : researchError ? (
+            <div className="research-error">
+              <div className="research-error-msg">Research failed: {researchError}. Try again.</div>
+              <button onClick={runResearch} className="btn-primary">Retry</button>
+            </div>
           ) : researchResults ? (
             <>
               {researchResults.institution_notes && <div className="detail-notes research-inst-notes">{researchResults.institution_notes}</div>}
