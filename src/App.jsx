@@ -6,6 +6,112 @@ import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, i
 import MapTab from "./MapTab";
 import "./styles.css";
 
+// Initial-based avatars: deterministic color per name (cycles the design palette),
+// first+last initials. Replaces emoji/photo avatars everywhere people are shown.
+const AVATAR_COLORS = ["#F5A623", "#2A6FDB", "#1F8A5B", "#8B5CF6", "#E5484D", "#0EA5A5"];
+const avatarColor = (name) => {
+  const s = (name || "?").trim();
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % AVATAR_COLORS.length;
+  return AVATAR_COLORS[h];
+};
+const initialsOf = (name) => {
+  const parts = (name || "?").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase();
+};
+function Avatar({ name, size = 40 }) {
+  return (
+    <div className="avatar" style={{ width: size, height: size, background: avatarColor(name), fontSize: Math.round(size * 0.36) }}>
+      {initialsOf(name)}
+    </div>
+  );
+}
+
+// Lightweight activity glyphs in colored circle badges (replaces emoji icons).
+const ACTIVITY_GLYPHS = {
+  email: { glyph: "✉", bg: "#E4EDFB", fg: "#2A6FDB" },
+  call: { glyph: "☎", bg: "#E6F4EC", fg: "#1F8A5B" },
+  meeting: { glyph: "◎", bg: "#E6F4EC", fg: "#1F8A5B" },
+  demo: { glyph: "◎", bg: "#EFEAFB", fg: "#8B5CF6" },
+  note: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
+  proposal_sent: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
+  transcript: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
+};
+function ActivityGlyph({ type }) {
+  const g = ACTIVITY_GLYPHS[type] || { glyph: "•", bg: "#F1EADD", fg: "#8A8072" };
+  return <span className="timeline-icon" style={{ background: g.bg, color: g.fg }}>{g.glyph}</span>;
+}
+
+// Minimal geometric nav icons (2px strokes). Active color is handled via CSS.
+function NavIcon({ shape }) {
+  if (shape === "square") return <span className="nav-icon nav-icon-square" />;
+  if (shape === "circle") return <span className="nav-icon nav-icon-circle" />;
+  if (shape === "diamond") return <span className="nav-icon nav-icon-diamond" />;
+  if (shape === "lines") return <span className="nav-icon nav-icon-lines"><i /><i /><i /></span>;
+  if (shape === "chart") return <span className="nav-icon nav-icon-square" style={{ borderRadius: 4 }} />;
+  return null;
+}
+
+// Left sidebar: wordmark, primary nav (geometric icons), a More section for
+// Reports/Boss View, static Saved Views, and a user card pinned to the bottom.
+function Sidebar({ view, setView, tasksCount }) {
+  const nav = [
+    { id: "pipeline", label: "Pipeline", shape: "square" },
+    { id: "network", label: "Network", shape: "circle" },
+    { id: "map", label: "Map", shape: "diamond" },
+    { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
+  ];
+  const more = [
+    { id: "reports", label: "Reports" },
+    { id: "boss", label: "Boss View" },
+  ];
+  const mapView = view === "deal-sheet" ? "pipeline" : view === "institution-sheet" || view === "person-sheet" ? "network" : view;
+  return (
+    <aside className="sidebar">
+      <div className="sidebar-brand">
+        <span className="sidebar-logo">🥭</span>
+        <span className="sidebar-wordmark">Mango OS</span>
+      </div>
+      <nav className="sidebar-nav">
+        {nav.map((n) => (
+          <button key={n.id} onClick={() => setView(n.id)} className={`nav-item ${mapView === n.id ? "active" : ""}`}>
+            <span className="nav-bar" />
+            <NavIcon shape={n.shape} />
+            <span className="nav-label">{n.label}</span>
+            {n.count > 0 && <span className="nav-count">{n.count}</span>}
+          </button>
+        ))}
+      </nav>
+
+      <div className="sidebar-section-label">More</div>
+      <div className="sidebar-more">
+        {more.map((n) => (
+          <button key={n.id} onClick={() => setView(n.id)} className={`nav-item nav-item-sm ${mapView === n.id ? "active" : ""}`}>
+            <span className="nav-bar" />
+            <span className="nav-label">{n.label}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="sidebar-section-label">Saved Views</div>
+      <div className="sidebar-saved">
+        {["Tier 1 targets", "Riyadh accounts", "Closing this quarter"].map((s) => (
+          <div key={s} className="saved-view">{s}</div>
+        ))}
+      </div>
+
+      <div className="sidebar-user">
+        <Avatar name="Abdullah R" size={34} />
+        <div className="sidebar-user-meta">
+          <div className="sidebar-user-name">Abdullah R.</div>
+          <div className="sidebar-user-role">VP, Commercial</div>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 // SelectWithCustom expects { id, label } options; cities/regions are plain string lists.
 const toOptions = (list) => list.map((v) => ({ id: v, label: v }));
 const CITY_OPTIONS = toOptions(SAUDI_CITIES);
@@ -259,29 +365,8 @@ export default function App() {
   const [customOptions, setCustomOptions] = useState([]);
   const [contactRoles, setContactRoles] = useState([]);
   const [summarizing, setSummarizing] = useState(false);
-  const [theme, setTheme] = useState(() => localStorage.getItem("mango-theme") || "dark");
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const settingsRef = useRef(null);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
-
-  useEffect(() => {
-    localStorage.setItem("mango-theme", theme);
-    // body sits outside .app, so it needs its own theme class: otherwise its
-    // inherited `color` falls back to the bare :root/media-query value instead
-    // of the explicit dark/light override, and anything inheriting straight
-    // from body (rather than an element with its own color rule) picks up
-    // the wrong theme.
-    document.body.classList.remove("dark-mode", "light-mode");
-    document.body.classList.add(theme === "light" ? "light-mode" : "dark-mode");
-  }, [theme]);
-
-  useEffect(() => {
-    if (!settingsOpen) return;
-    const handler = (e) => { if (settingsRef.current && !settingsRef.current.contains(e.target)) setSettingsOpen(false); };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [settingsOpen]);
 
   const loadData = useCallback(async () => {
     try {
@@ -1017,44 +1102,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   if (loading) return <div className="app loading-screen"><div className="loading-text">Loading Mango OS...</div></div>;
 
   return (
-    <div className={`app ${theme === "light" ? "light-mode" : "dark-mode"}`}>
+    <div className="app">
       {toast && <div className="toast">{toast}</div>}
 
-      <header className="header">
-        <div className="header-left">
-          <span className="logo">🥭</span>
-          <div><div className="title">Mango OS</div><div className="subtitle">Pipeline Command Center</div></div>
-        </div>
-        <div className="header-right">
-          <nav className="nav">
-            {[["pipeline","Pipeline"],["network","Network"],["map","Map"],["tasks","Tasks"],["reports","Reports"],["boss","Boss View"]].map(([k,l]) => (
-              <button key={k} onClick={() => setView(k)} className={`nav-tab ${view === k ? "active" : ""}`}>{l}</button>
-            ))}
-          </nav>
-          <div className="last-synced" title="Most recent auto-logged email or meeting activity">
-            <span className="last-synced-dot" />
-            {lastSyncedActivity ? `Synced: ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"}
-          </div>
-          <div className="settings-wrap" ref={settingsRef}>
-            <button onClick={() => setSettingsOpen((s) => !s)} className="settings-btn" title="Settings">⚙️</button>
-            {settingsOpen && (
-              <div className="settings-dropdown">
-                <div className="settings-dropdown-label">Theme</div>
-                <button onClick={() => { setTheme("dark"); setSettingsOpen(false); }} className={`settings-option ${theme === "dark" ? "active" : ""}`}>🌙 Dark Mode</button>
-                <button onClick={() => { setTheme("light"); setSettingsOpen(false); }} className={`settings-option ${theme === "light" ? "active" : ""}`}>☀️ Light Mode</button>
-              </div>
-            )}
-          </div>
-        </div>
-      </header>
+      <Sidebar view={view} setView={setView} tasksCount={openTodos.length} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} />
 
-      {view !== "deal-sheet" && view !== "institution-sheet" && view !== "person-sheet" && view !== "map" && (
-        <div className="stats-bar">
-          {[[activeDeals.length,"Pipeline Deals"],[totalValue > 0 ? `$${(totalValue/1000).toFixed(0)}K` : "N/A","Pipeline Value"],[contacts.length,"People"],[institutions.length,"Institutions"],[openTodos.length,"Open Tasks"]].map(([v,l],i) => (
-            <div key={i} className="stat"><div className="stat-value">{v}</div><div className="stat-label">{l}</div></div>
-          ))}
-        </div>
-      )}
+      <main className="main">
 
       {/* DEAL SHEET */}
       {view === "deal-sheet" && dealSheetId && (() => {
@@ -1186,13 +1239,24 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       {/* PIPELINE */}
       {view === "pipeline" && (
         <div>
+          <div className="page-header">
+            <div>
+              <div className="page-title">Pipeline</div>
+              <div className="page-sub">Your commercial deals across the Kingdom</div>
+            </div>
+            <button onClick={() => setModal({type:"deal",data:{stage:"prospecting"}})} className="btn-primary">+ New deal</button>
+          </div>
+          <div className="stats-bar">
+            {[[activeDeals.length,"Active deals"],[totalValue > 0 ? (totalValue >= 1000000 ? `$${(totalValue/1000000).toFixed(1)}M` : `$${(totalValue/1000).toFixed(0)}K`) : "N/A","Pipeline value"],[contacts.length,"People"],[institutions.length,"Institutions"],[openTodos.length,"Open tasks"]].map(([v,l],i) => (
+              <div key={i} className="stat"><div className="stat-label">{l}</div><div className="stat-value">{v}</div></div>
+            ))}
+          </div>
           <div className="toolbar">
             <div className="tier-filter">
               {[{ id: "all", label: "All" }, ...DEAL_TIERS.filter(t => t.id !== "Untiered")].map(t => (
                 <button key={t.id} onClick={() => setTierFilter(t.id)} className={`tag-btn ${tierFilter === t.id ? "active" : ""}`}>{t.label}</button>
               ))}
             </div>
-            <button onClick={() => setModal({type:"deal",data:{stage:"prospecting"}})} className="btn-primary">+ New Deal</button>
           </div>
           <div className="kanban">
             {STAGES.map((stage) => {
@@ -1210,14 +1274,24 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
                     {sd.map((deal) => (
                       <div key={deal.id} draggable onDragStart={(e) => e.dataTransfer.setData("dealId", deal.id)}
                         onClick={() => { setDealSheetId(deal.id); setView("deal-sheet"); }}
-                        className="deal-card" style={{borderLeftColor: stage.color}}>
-                        <div className="card-company">{deal.company}</div>
-                        {(() => { const t = DEAL_TIERS.find(x => x.id === (deal.tier || "Untiered")); return t && t.id !== "Untiered" ? <span className="badge tier-badge" style={{background:t.color+"22",color:t.color,border:`1px solid ${t.color}44`}}>{t.label}</span> : null; })()}
-                        {deal.contact_name && <div className="card-contact">{deal.contact_name}{deal.contact_role ? ` . ${deal.contact_role}` : ""}</div>}
-                        {deal.city && <span className="city-pin">📍 {deal.city}</span>}
-                        {deal.value > 0 && <div className="card-value">${Number(deal.value).toLocaleString()}</div>}
-                        {deal.next_action && <div className="card-next">Next: {deal.next_action}</div>}
-                        <div className="card-meta">{daysAgo(deal.created_at)}d in pipeline</div>
+                        className="deal-card">
+                        <div className="deal-card-head">
+                          <div className="card-company">{deal.company}</div>
+                          {(() => { const t = DEAL_TIERS.find(x => x.id === (deal.tier || "Untiered")); return t && t.id !== "Untiered" ? <span className="badge tier-badge" style={{background:t.color+"22",color:t.color}}>{t.label}</span> : null; })()}
+                        </div>
+                        {deal.contact_name && <div className="card-contact">{deal.contact_name}{deal.contact_role ? ` · ${deal.contact_role}` : ""}</div>}
+                        {(deal.city || deal.value > 0) && (
+                          <div className="card-city-row">
+                            {deal.city && <><span className="deal-dot" /><span>{deal.city}</span></>}
+                            {deal.value > 0 && <span className="card-value">${Number(deal.value).toLocaleString()}</span>}
+                          </div>
+                        )}
+                        {deal.next_action && (
+                          <div className="card-next">
+                            <div className="card-next-label">NEXT</div>
+                            <div className="card-next-text">{deal.next_action}</div>
+                          </div>
+                        )}
                       </div>
                     ))}
                     {sd.length === 0 && <div className="empty-col">{stage.id === "prospecting" ? "Add your first deal" : "Drag deals here"}</div>}
@@ -1232,6 +1306,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       {/* NETWORK */}
       {view === "network" && (
         <div className="section-pad">
+          <div className="page-header" style={{ padding: "0 0 18px" }}>
+            <div>
+              <div className="page-title">Network</div>
+              <div className="page-sub">Institutions and people across your ecosystem</div>
+            </div>
+          </div>
           <NetworkTab
             institutions={institutions}
             contacts={contacts}
@@ -1271,6 +1351,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       {/* TASKS */}
       {view === "tasks" && (
         <div className="section-pad">
+          <div className="page-header" style={{ padding: "0 0 16px" }}>
+            <div>
+              <div className="page-title">Tasks</div>
+              <div className="page-sub">Everything that needs your attention</div>
+            </div>
+          </div>
           <TaskQuickAdd deals={activeDeals} enablers={enablers} customOptions={customOptions} onAddCustomOption={addCustomOption} onAdd={saveTodo} />
           <div className="timeline-tabs mb">
             {TASK_FILTER_TABS.map(t => (
@@ -1406,6 +1492,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           <div className="center"><button onClick={() => copyReport("eow")} className="btn-copy btn-copy-lg">{reportCopied === "eow" ? "Copied!" : "Copy Weekly Report"}</button></div>
         </div>
       )}
+
+      </main>
 
       {/* MODALS */}
       {modal?.type === "deal" && <DealForm deal={modal.data} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveDeal} onClose={() => setModal(null)} />}
@@ -1630,7 +1718,7 @@ function DealSheet({ deal, activities, people, todos, contacts, deals, enablers,
           {filtered.length === 0 && <div className="empty-small">No activities yet</div>}
           {filtered.map(a => (
             <div key={a.id} className="timeline-item">
-              <span className="timeline-icon">{ACT_TYPES.find(t => t.id === a.type)?.icon || "."}</span>
+              <ActivityGlyph type={a.type} />
               <div>
                 <div className="act-desc">{a.description}</div>
                 <div className="act-date">{formatDate(a.created_at)}</div>
@@ -1744,14 +1832,17 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
 
       <div className="sheet-top">
         <div className="sheet-top-row">
-          <div>
-            <div className="sheet-company"><span className="warmth-dot warmth-dot-lg" style={{background: warmth?.color}} title={`Warmth: ${warmth?.label}`} />{contact.name}</div>
+          <div className="sheet-person-head">
+            <Avatar name={contact.name} size={52} />
+            <div>
+            <div className="sheet-company">{contact.name}<span className="warmth-dot warmth-dot-lg" style={{background: warmth?.color, marginLeft: 10, marginRight: 0}} title={`Warmth: ${warmth?.label}`} /></div>
             <div className="contact-details mb-sm">
               {contact.email && <div>📧 {contact.email}</div>}
               {contact.phone && <div>📞 {contact.phone}</div>}
               {contact.linkedin && <div>🔗 {contact.linkedin}</div>}
             </div>
             {(contact.tags || []).length > 0 && <div className="tags-row">{contact.tags.map(t => <span key={t} className="tag">{t}</span>)}</div>}
+            </div>
           </div>
           <div className="sheet-actions">
             <button onClick={() => onEdit(contact)} className="btn-sec">Edit</button>
@@ -1849,7 +1940,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
           {filtered.length === 0 && <div className="empty-small">No activities yet</div>}
           {filtered.map(a => (
             <div key={a.id} className="timeline-item">
-              <span className="timeline-icon">{ACT_TYPES.find(t => t.id === a.type)?.icon || "."}</span>
+              <ActivityGlyph type={a.type} />
               <div>
                 <div className="act-desc">{a.description}</div>
                 <div className="act-date">{formatDate(a.created_at)}</div>
@@ -1895,14 +1986,15 @@ function PeopleSection({ people, activities, contacts, institutionName, customOp
             return (
               <div key={p.id} className={`person-card ${active ? "active" : ""}`} onClick={() => onSelectPerson(p.contact_id)}>
                 <div className="person-card-top">
-                  <div>
-                    <div className="person-name"><span className="warmth-dot" style={{background:warmth?.color}} />{c.name}</div>
+                  <Avatar name={c.name} size={40} />
+                  <div className="person-card-body">
+                    <div className="person-name">{c.name}</div>
                     {p.role && <div className="person-role">{p.role}</div>}
                     {c.company && <div className="person-company">{c.company}</div>}
                   </div>
+                  <div className="person-warmth"><span className="warmth-dot" style={{background:warmth?.color}} />{warmth?.label}</div>
                   <button onClick={(e) => { e.stopPropagation(); if (confirm(`Remove ${c.name || "this person"}?`)) onRemove(p); }} className="person-remove" title="Remove">✕</button>
                 </div>
-                <div className="person-meta">{count} activit{count === 1 ? "y" : "ies"}</div>
               </div>
             );
           })}
@@ -2608,7 +2700,7 @@ function InstitutionSheet({
           {filtered.length === 0 && <div className="empty-small">No activities yet</div>}
           {filtered.map(a => (
             <div key={a.id} className="timeline-item">
-              <span className="timeline-icon">{ACT_TYPES.find(t => t.id === a.type)?.icon || "."}</span>
+              <ActivityGlyph type={a.type} />
               <div><div className="act-desc">{a.description}</div><div className="act-date">{formatDate(a.created_at)}</div></div>
             </div>
           ))}
@@ -2947,7 +3039,15 @@ function NetworkTab({
                           <div className="institution-people-count">{ppl.length} {ppl.length === 1 ? "person" : "people"}</div>
                           {preview.length > 0 && (
                             <div className="institution-people-preview">
-                              {preview.map((p, i) => <div key={i} className="institution-preview-person">{p.contact.name}{p.role ? ` (${p.role})` : ""}</div>)}
+                              {preview.map((p, i) => (
+                                <div key={i} className="institution-preview-person">
+                                  <Avatar name={p.contact.name} size={28} />
+                                  <div className="preview-person-text">
+                                    <div className="preview-person-name">{p.contact.name}</div>
+                                    {p.role && <div className="preview-person-role">{p.role}</div>}
+                                  </div>
+                                </div>
+                              ))}
                             </div>
                           )}
                           {inst.lastActivity && <div className="institution-last-activity">{daysAgo(inst.lastActivity)}d ago</div>}
@@ -2978,8 +3078,10 @@ function NetworkTab({
                 const warmth = WARMTH_LEVELS.find(w => w.id === (contact.warmth || "unknown"));
                 return (
                   <div key={contact.id} className="institution-card" onClick={() => onOpenPerson(contact.id)}>
-                    <div className="institution-card-top">
-                      <div className="institution-name"><span className="warmth-dot" style={{background:warmth?.color}} />{contact.name}</div>
+                    <div className="institution-card-top" style={{ alignItems: "center", gap: 11 }}>
+                      <Avatar name={contact.name} size={34} />
+                      <div className="institution-name" style={{ flex: 1 }}>{contact.name}</div>
+                      <span className="warmth-dot" style={{background:warmth?.color, marginRight: 0}} title={warmth?.label} />
                     </div>
                     {roleStr && <div className="person-net-roles">{roleStr}</div>}
                     {(contact.email || contact.phone) && <div className="person-net-contact">{contact.email}{contact.email && contact.phone ? " . " : ""}{contact.phone}</div>}
