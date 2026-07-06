@@ -3,7 +3,7 @@ import * as d3 from "d3";
 import { formatDate } from "./utils";
 import { ACT_TYPES } from "./constants";
 
-// Map-specific node styling (independent of the app badge colors).
+// Network Map node styling (independent of the app badge colors).
 const MAP_NODE_STYLES = {
   target: { r: 22, fill: "#3B82F6", label: "Target" },
   enabler: { r: 18, fill: "#F5A623", label: "Enabler" },

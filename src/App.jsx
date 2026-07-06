@@ -58,8 +58,8 @@ function NavIcon({ shape }) {
 function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0 }) {
   const nav = [
     { id: "pipeline", label: "Pipeline", shape: "square" },
-    { id: "network", label: "Network", shape: "circle" },
-    { id: "map", label: "Map", shape: "diamond" },
+    { id: "network", label: "Ecosystem", shape: "circle" },
+    { id: "map", label: "Network Map", shape: "diamond" },
     { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
   ];
   const more = [
@@ -640,7 +640,7 @@ export default function App() {
     } catch { showToast("Error posting comment"); }
   };
 
-  // Kick back to the Network tab if the open person's contact was deleted elsewhere
+  // Kick back to the Ecosystem tab if the open person's contact was deleted elsewhere
   useEffect(() => {
     if (view === "person-sheet" && personSheetId && contacts.length > 0 && !contacts.find((c) => c.id === personSheetId)) {
       setView("network"); setPersonSheetId(null);
@@ -834,7 +834,7 @@ export default function App() {
       if (created && primary) {
         await persistPersonRole({ contactId: created.id, entityType: primary.type, entityId: primary.id, roleTitle: person.title || "" });
       }
-      if (reload) { await loadData(); showToast(`${person.name} added to network`); }
+      if (reload) { await loadData(); showToast(`${person.name} added to ecosystem`); }
       return created;
     } catch {
       if (reload) showToast("Error adding person");
@@ -849,7 +849,7 @@ export default function App() {
         await addResearchedPerson(inst, p, { reload: false });
       }
       await loadData();
-      showToast(`${people.length} people added to network`);
+      showToast(`${people.length} people added to ecosystem`);
     } catch { showToast("Error adding people"); }
   };
 
@@ -981,7 +981,7 @@ export default function App() {
     } catch { showToast("Error removing person"); }
   };
 
-  // Creates a contact plus one or more contact_roles in one go, for the Network
+  // Creates a contact plus one or more contact_roles in one go, for the Ecosystem
   // tab's "+ Person" form (a primary role plus any "Add another role" rows).
   // Each role's institutionKey is "type:id" for an existing institution, or a
   // { newName, newType } object to create a fresh organization inline. Also
@@ -1074,7 +1074,7 @@ export default function App() {
     await api("enablers", "DELETE", null, `?id=eq.${id}`);
   };
 
-  // Network tab's "+ Institution" form. Always creates an organizations row, and
+  // Ecosystem tab's "+ Institution" form. Always creates an organizations row, and
   // creates a linked deal (Target) and/or enabler (Enabler) when those boxes are
   // checked, keeping the Pipeline in sync.
   const addInstitution = async (form) => {
@@ -1399,7 +1399,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   };
 
   // Task/link navigation. Deals open the Pipeline deal sheet; enablers are
-  // institutions, so open by name in the Network institution sheet.
+  // institutions, so open by name in the Ecosystem institution sheet.
   const openTaskLink = (link) => {
     if (link.type === "deal") { const d = deals.find((x) => x.id === link.id); if (d) openInstitution(d.company); }
     else if (link.type === "enabler") { const en = enablers.find((e) => e.id === link.id); if (en) openInstitution(en.name); }
@@ -1618,7 +1618,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             showToast={showToast}
             onOpenInstitution={openInstitution}
             onOpenPerson={openPerson}
-            backLabel={sheetOrigin === "pipeline" ? "Back to Pipeline" : "Back to Network"}
+            backLabel={sheetOrigin === "pipeline" ? "Back to Pipeline" : "Back to Ecosystem"}
             onBack={() => { setView(sheetOrigin); setInstitutionSheetKey(null); }}
           />
         );
@@ -1721,7 +1721,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         <div className="section-pad">
           <div className="page-header" style={{ padding: "0 0 18px" }}>
             <div>
-              <div className="page-title">Network</div>
+              <div className="page-title">Ecosystem</div>
               <div className="page-sub">Institutions and people across your ecosystem</div>
             </div>
           </div>
@@ -2033,7 +2033,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
 
   return (
     <div className="deal-sheet">
-      <button onClick={onBack} className="sheet-back">← Back to Network</button>
+      <button onClick={onBack} className="sheet-back">← Back to Ecosystem</button>
 
       <div className="sheet-top">
         <div className="sheet-top-row">
@@ -2748,7 +2748,7 @@ function InstitutionSheet({
   onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
   onChangeStage, onChangeTier, todos = [], onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
-  onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Network",
+  onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem",
 }) {
   const [filter, setFilter] = useState("all");
   const [addPersonOpen, setAddPersonOpen] = useState(false);
@@ -3025,7 +3025,7 @@ function InstitutionSheet({
                         <div className="research-person-actions">
                           {isAdded(key, p.name)
                             ? <span className="research-added">✓ Added</span>
-                            : <button onClick={() => addOne(p, key)} className="btn-copy">Add to Network</button>}
+                            : <button onClick={() => addOne(p, key)} className="btn-copy">Add to Ecosystem</button>}
                         </div>
                       </div>
                     );
@@ -3365,7 +3365,7 @@ function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOpt
 
 const NETWORK_SUBTABS = [{ id: "institutions", label: "Institutions" }, { id: "people", label: "People" }];
 
-// The unified Network tab: institutions grouped by type (Institutions sub-tab)
+// The unified Ecosystem tab: institutions grouped by type (Institutions sub-tab)
 // and everyone in the ecosystem (People sub-tab). Institutions are the derived
 // name-keyed union of deals/enablers/organizations; people are contacts.
 function NetworkTab({
