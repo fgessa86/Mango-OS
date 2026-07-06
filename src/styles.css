@@ -534,3 +534,37 @@ textarea.inline-edit { width: 100%; resize: vertical; line-height: 1.5; }
   background-repeat: no-repeat; background-position: right 8px center; }
 .badge-select-wrap.has-dot .badge-select { padding-left: 14px; }
 .badge-select:focus { outline: none; box-shadow: 0 0 0 3px rgba(245,166,35,0.2); }
+
+/* ============================================================
+   Research Key People
+   ============================================================ */
+.header-btn-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.btn-research { font-size: 13px; padding: 8px 14px; }
+.research-panel { border: 1px solid #f6e6c6; }
+.research-meta { font-size: 11.5px; color: var(--muted); margin: -4px 0 12px; }
+.research-loading { font-size: 14px; font-weight: 600; color: var(--accent-strong); padding: 18px 4px; }
+.research-inst-notes { margin-bottom: 16px; }
+.research-group { margin-bottom: 18px; }
+.research-group-title { font-size: 13px; font-weight: 800; letter-spacing: 0.02em; color: var(--text); margin-bottom: 10px; }
+.research-person-card { background: var(--card-tint); border-radius: 12px; padding: 13px 15px; margin-bottom: 10px; }
+.research-person-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.research-person-ident { min-width: 0; }
+.research-person-name { font-size: 14.5px; font-weight: 700; color: var(--text); }
+.research-person-title { font-size: 12.5px; color: var(--muted); margin-top: 1px; }
+.research-person-line { font-size: 12.5px; color: var(--text-2); margin-top: 7px; line-height: 1.45; }
+.research-person-key { font-weight: 700; color: var(--text); margin-right: 4px; }
+.research-person-relevance { font-size: 12.5px; color: var(--muted); font-style: italic; margin-top: 7px; line-height: 1.45; }
+.research-person-actions { margin-top: 11px; }
+.research-added { font-size: 12.5px; font-weight: 700; color: #1F8A5B; }
+.research-trials { border-top: 1px solid var(--divider); padding-top: 16px; margin-top: 6px; }
+.research-trials-list { display: flex; flex-direction: column; gap: 9px; }
+.research-trial-card { background: var(--card-tint); border-radius: 12px; padding: 12px 14px; }
+.research-trial-name { font-size: 13.5px; font-weight: 700; color: var(--text); line-height: 1.35; }
+.research-trial-meta { display: flex; align-items: center; gap: 9px; margin-top: 6px; flex-wrap: wrap; }
+.research-trial-cond { font-size: 12px; color: var(--muted); font-weight: 600; }
+.research-trial-sponsor { font-size: 12px; color: var(--muted); margin-top: 5px; }
+
+/* Person Sheet: Profile section (from researched notes) */
+.profile-line { font-size: 13.5px; color: var(--text-2); line-height: 1.5; margin-bottom: 8px; }
+.profile-line:last-child { margin-bottom: 0; }
+.profile-key { display: block; font-size: 11px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); margin-bottom: 1px; }

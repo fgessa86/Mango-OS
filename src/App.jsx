@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "./supabase";
-import { generateSummary, summarizeImage, researchInstitution } from "./anthropic";
+import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import MapTab from "./MapTab";
@@ -110,6 +110,36 @@ function Sidebar({ view, setView, tasksCount }) {
       </div>
     </aside>
   );
+}
+
+// Confidence levels on researched people: green (high) / yellow (medium) / gray (low).
+const CONFIDENCE_META = {
+  high: { label: "High", color: "#1F8A5B" },
+  medium: { label: "Medium", color: "#F5A623" },
+  low: { label: "Low", color: "#9B9BA7" },
+};
+
+// Structured, labeled profile text stored in a researched contact's notes field.
+// Rendered as a "Profile" section on the Person Sheet and kept human-editable.
+const RESEARCH_PROFILE_KEYS = ["Department", "Education", "Publications", "Relevance", "Confidence"];
+function buildProfileNotes(person) {
+  const lines = [];
+  if (person.department) lines.push(`Department: ${person.department}`);
+  if (person.education) lines.push(`Education: ${person.education}`);
+  if (person.publications) lines.push(`Publications: ${person.publications}`);
+  if (person.relevance) lines.push(`Relevance: ${person.relevance}`);
+  if (person.confidence) lines.push(`Confidence: ${person.confidence}`);
+  return lines.join("\n");
+}
+// Parses "Label: value" lines out of a notes field into { label: value } pairs
+// for the known profile keys, so the Profile section can render them.
+function parseProfileNotes(notes) {
+  const out = {};
+  (notes || "").split("\n").forEach((line) => {
+    const m = line.match(/^\s*([A-Za-z][A-Za-z ]*?):\s*(.+)$/);
+    if (m && RESEARCH_PROFILE_KEYS.includes(m[1].trim())) out[m[1].trim()] = m[2].trim();
+  });
+  return out;
 }
 
 // ---- Inline editing primitives ----
@@ -243,6 +273,7 @@ function finalizeInstitution(i) {
     website: org?.website || "",
     description: org?.description || "",
     notes: org?.notes || "",
+    researchData: org?.research_data || null,
     stage: deal?.stage || null,
     lastActivity: times.length ? times[times.length - 1] : null,
   };
@@ -641,6 +672,56 @@ export default function App() {
     } finally {
       setResearchingInst(null);
     }
+  };
+
+  // ---- "Research Key People" workflow (web search) ----
+  const researchKeyPeopleFor = async (inst) => researchKeyPeople(inst.name, inst.city);
+  const researchTrialsFor = async (inst) => researchClinicalTrials(inst.name);
+
+  // Persists a research run to the institution's organizations.research_data so
+  // results survive without re-running the (slow, paid) web search.
+  const saveInstitutionResearch = async (inst, data) => {
+    try {
+      const orgId = await ensureOrgId(inst);
+      if (!orgId) return;
+      await api("organizations", "PATCH", { research_data: JSON.stringify(data) }, `?id=eq.${orgId}`);
+      await loadData();
+    } catch { /* history save is best-effort */ }
+  };
+
+  // Creates a contact from a researched person and links them to this
+  // institution. `reload`/`toast` are off during batch "Add All" so we can
+  // reload and toast once at the end. Returns the created contact.
+  const addResearchedPerson = async (inst, person, { reload = true } = {}) => {
+    try {
+      const primary = institutionPrimaryEntity(inst);
+      const created = await persistContact({
+        name: person.name,
+        role: person.title || "",
+        company: inst.name,
+        notes: buildProfileNotes(person),
+        warmth: "unknown",
+      });
+      if (created && primary) {
+        await persistPersonRole({ contactId: created.id, entityType: primary.type, entityId: primary.id, roleTitle: person.title || "" });
+      }
+      if (reload) { await loadData(); showToast(`${person.name} added to network`); }
+      return created;
+    } catch {
+      if (reload) showToast("Error adding person");
+      return null;
+    }
+  };
+
+  const addResearchedPeople = async (inst, people) => {
+    try {
+      for (const p of people) {
+        // eslint-disable-next-line no-await-in-loop
+        await addResearchedPerson(inst, p, { reload: false });
+      }
+      await loadData();
+      showToast(`${people.length} people added to network`);
+    } catch { showToast("Error adding people"); }
   };
 
   // CONTACT CRUD
@@ -1355,6 +1436,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onAutoFill={() => autoFillInstitution(inst)}
             onAutoFillIfEmpty={() => { if (!inst.description && !autoResearched.current.has(inst.key)) autoFillInstitution(inst, { silent: true }); }}
             researching={researchingInst === inst.key}
+            onResearchKeyPeople={() => researchKeyPeopleFor(inst)}
+            onResearchTrials={() => researchTrialsFor(inst)}
+            onSaveResearch={(data) => saveInstitutionResearch(inst, data)}
+            onAddResearchedPerson={(person) => addResearchedPerson(inst, person)}
+            onAddResearchedPeople={(people) => addResearchedPeople(inst, people)}
             onDelete={() => deleteInstitution(inst)}
             onAddActivity={addActivity}
             onAddPersonRole={addPersonRole}
@@ -2036,6 +2122,21 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
 
       <SummaryCard entity={contact} activities={activities} onGenerateSummary={onGenerateSummary} onSaveSummary={onSaveSummary} summarizing={summarizing} />
 
+      {(() => {
+        const profile = parseProfileNotes(contact.notes);
+        if (Object.keys(profile).length === 0) return null;
+        return (
+          <div className="people-section">
+            <div className="section-label">Profile</div>
+            {profile.Department && <div className="profile-line"><span className="profile-key">Department</span>{profile.Department}</div>}
+            {profile.Education && <div className="profile-line"><span className="profile-key">Education</span>{profile.Education}</div>}
+            {profile.Publications && <div className="profile-line"><span className="profile-key">Publications</span>{profile.Publications}</div>}
+            {profile.Relevance && <div className="profile-line"><span className="profile-key">Why relevant</span>{profile.Relevance}</div>}
+            {profile.Confidence && <div className="profile-line"><span className="profile-key">Confidence</span>{profile.Confidence}</div>}
+          </div>
+        );
+      })()}
+
       <div className="people-section">
         <div className="section-label">Notes</div>
         <NotesEditor value={contact.notes} onSave={(v) => onUpdate({ notes: v })} />
@@ -2700,6 +2801,7 @@ function InstitutionSheet({
   institution: inst, summaryEntity, activities, contacts, deals, enablers, organizations,
   dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {},
   onUpdate, onRename, onAutoFill, onAutoFillIfEmpty, researching, onDelete, onAddActivity, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
+  onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
   onChangeStage, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack,
 }) {
   const [filter, setFilter] = useState("all");
@@ -2713,10 +2815,84 @@ function InstitutionSheet({
     if (onAutoFillIfEmpty) onAutoFillIfEmpty();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inst.key]);
+
+  // ---- "Research Key People" state ----
+  const [researchOpen, setResearchOpen] = useState(false);
+  const [researchLoading, setResearchLoading] = useState(false);
+  const [researchResults, setResearchResults] = useState(null);
+  const [researchedAt, setResearchedAt] = useState(null);
+  const [trials, setTrials] = useState(null);
+  const [trialsLoading, setTrialsLoading] = useState(false);
+  const [addedKeys, setAddedKeys] = useState({});
+  const [addingAll, setAddingAll] = useState(false);
+  const [addAllCount, setAddAllCount] = useState(0);
+
+  // Hydrate previous research (from organizations.research_data) when the sheet opens.
+  useEffect(() => {
+    setAddedKeys({}); setAddingAll(false); setResearchLoading(false); setTrialsLoading(false);
+    let hydrated = false;
+    if (inst.researchData) {
+      try {
+        const d = JSON.parse(inst.researchData);
+        setResearchResults(d.people || null);
+        setTrials(d.trials ? { trials: d.trials } : null);
+        setResearchedAt(d.researchedAt || null);
+        setResearchOpen(!!(d.people));
+        hydrated = true;
+      } catch { /* ignore malformed history */ }
+    }
+    if (!hydrated) { setResearchResults(null); setTrials(null); setResearchedAt(null); setResearchOpen(false); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inst.key]);
+
+  const people = institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, networkEdges, contacts });
+  // A researched person counts as "added" if this session added them, or a
+  // person with the same name is already linked to this institution (so
+  // reopening the sheet and Add All never create duplicates).
+  const networkNames = new Set(people.map(p => (p.contact.name || "").trim().toLowerCase()));
+  const isAdded = (key, name) => !!addedKeys[key] || networkNames.has((name || "").trim().toLowerCase());
+
+  const researchPeopleList = () => [
+    ...((researchResults?.clinical_champions) || []).map((p, i) => ({ p, key: `cc:${i}` })),
+    ...((researchResults?.decision_makers) || []).map((p, i) => ({ p, key: `dm:${i}` })),
+  ].filter(x => (x.p.name || "").trim());
+
+  const runResearch = async () => {
+    setResearchOpen(true); setResearchLoading(true);
+    setResearchResults(null); setTrials(null); setResearchedAt(null); setAddedKeys({});
+    let people;
+    try {
+      people = await onResearchKeyPeople();
+      setResearchResults(people);
+    } catch { setResearchLoading(false); showToast("Research failed"); return; }
+    setResearchLoading(false);
+    // Second call: clinical trials supplement.
+    setTrialsLoading(true);
+    let trialsRes = { trials: [] };
+    try { trialsRes = await onResearchTrials(); } catch { trialsRes = { trials: [] }; }
+    setTrials(trialsRes); setTrialsLoading(false);
+    const at = new Date().toISOString();
+    setResearchedAt(at);
+    onSaveResearch({ people, trials: trialsRes.trials || [], researchedAt: at });
+  };
+
+  const addOne = async (person, key) => {
+    const created = await onAddResearchedPerson(person);
+    if (created) setAddedKeys(a => ({ ...a, [key]: true }));
+  };
+  const addAll = async () => {
+    const pending = researchPeopleList().filter(x => !isAdded(x.key, x.p.name));
+    if (pending.length === 0) return;
+    setAddAllCount(pending.length); setAddingAll(true);
+    await onAddResearchedPeople(pending.map(x => x.p));
+    setAddedKeys(a => { const n = { ...a }; pending.forEach(x => { n[x.key] = true; }); return n; });
+    setAddingAll(false);
+  };
+  const pendingCount = researchPeopleList().filter(x => !isAdded(x.key, x.p.name)).length;
+
   const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
   const primary = institutionPrimaryEntity(inst);
 
-  const people = institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, networkEdges, contacts });
   const targets = [["deal", inst.dealId], ["enabler", inst.enablerId], ["organization", inst.orgId]].filter(([, id]) => id);
   const alsoAt = (contactId) => contactRoles
     .filter(r => r.contact_id === contactId && !targets.some(([t, id]) => r.entity_type === t && r.entity_id === id))
@@ -2801,7 +2977,10 @@ function InstitutionSheet({
       <div className="people-section">
         <div className="ai-summary-header">
           <div className="section-label">People at {inst.name}</div>
-          <button onClick={() => setAddPersonOpen(v => !v)} className="btn-copy">{addPersonOpen ? "Cancel" : "+ Add Person"}</button>
+          <div className="header-btn-group">
+            <button onClick={runResearch} className="btn-primary btn-research" disabled={researchLoading}>{researchLoading ? "Researching..." : "🔍 Research Key People"}</button>
+            <button onClick={() => setAddPersonOpen(v => !v)} className="btn-copy">{addPersonOpen ? "Cancel" : "+ Add Person"}</button>
+          </div>
         </div>
         {addPersonOpen && primary && (
           <InstitutionAddPerson
@@ -2839,6 +3018,85 @@ function InstitutionSheet({
           </div>
         )}
       </div>
+
+      {researchOpen && (
+        <div className="people-section research-panel">
+          <div className="ai-summary-header">
+            <div className="section-label">Key People Research</div>
+            <div className="header-btn-group">
+              {researchResults && !researchLoading && pendingCount > 0 && (
+                <button onClick={addAll} className="btn-copy" disabled={addingAll}>{addingAll ? `Adding ${addAllCount} people...` : `Add All (${pendingCount})`}</button>
+              )}
+              <button onClick={() => setResearchOpen(false)} className="btn-sec">Done</button>
+            </div>
+          </div>
+          {researchedAt && !researchLoading && <div className="research-meta">Last researched {formatDate(researchedAt)}</div>}
+
+          {researchLoading ? (
+            <div className="research-loading">Researching {inst.name}...</div>
+          ) : researchResults ? (
+            <>
+              {researchResults.institution_notes && <div className="detail-notes research-inst-notes">{researchResults.institution_notes}</div>}
+              {[["Clinical Champions", researchResults.clinical_champions || [], "cc", true], ["Decision Makers", researchResults.decision_makers || [], "dm", false]].map(([title, list, section, showPubs]) => (
+                <div key={section} className="research-group">
+                  <div className="research-group-title">{title} ({list.length})</div>
+                  {list.length === 0 ? (
+                    <div className="empty-small">None found.</div>
+                  ) : list.map((p, i) => {
+                    const key = `${section}:${i}`;
+                    const cm = CONFIDENCE_META[(p.confidence || "").toLowerCase()] || CONFIDENCE_META.low;
+                    return (
+                      <div key={key} className="research-person-card">
+                        <div className="research-person-head">
+                          <div className="research-person-ident">
+                            <div className="research-person-name">{p.name}</div>
+                            {(p.title || p.department) && <div className="research-person-title">{p.title}{p.title && p.department ? " · " : ""}{p.department}</div>}
+                          </div>
+                          <span className="badge" style={{ background: cm.color + "22", color: cm.color }}>{cm.label}</span>
+                        </div>
+                        {p.education && <div className="research-person-line"><span className="research-person-key">Education:</span> {p.education}</div>}
+                        {showPubs && p.publications && <div className="research-person-line"><span className="research-person-key">Research:</span> {p.publications}</div>}
+                        {p.relevance && <div className="research-person-relevance">{p.relevance}</div>}
+                        <div className="research-person-actions">
+                          {isAdded(key, p.name)
+                            ? <span className="research-added">✓ Added</span>
+                            : <button onClick={() => addOne(p, key)} className="btn-copy">Add to Network</button>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </>
+          ) : (
+            <div className="empty-small">No research yet.</div>
+          )}
+
+          {(trialsLoading || trials) && !researchLoading && (
+            <div className="research-trials">
+              <div className="research-group-title">Clinical Trials at {inst.name}</div>
+              {trialsLoading ? (
+                <div className="empty-small">Searching clinical trials...</div>
+              ) : (trials.trials || []).length === 0 ? (
+                <div className="empty-small">No active oncology trials found.</div>
+              ) : (
+                <div className="research-trials-list">
+                  {(trials.trials || []).map((t, i) => (
+                    <div key={i} className="research-trial-card">
+                      <div className="research-trial-name">{t.name || "Untitled trial"}</div>
+                      <div className="research-trial-meta">
+                        {t.nct_id && <span className="badge date-badge">{t.nct_id}</span>}
+                        {t.condition && <span className="research-trial-cond">{t.condition}</span>}
+                      </div>
+                      {t.sponsor && <div className="research-trial-sponsor">Sponsor: {t.sponsor}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="people-section">
         <div className="ai-summary-header">
