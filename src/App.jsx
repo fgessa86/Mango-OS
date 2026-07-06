@@ -211,6 +211,37 @@ function BadgeSelect({ options, value, color = "#9A8F7C", onChange, dot = false,
   );
 }
 
+// Click a rendered value (a badge, a city pin, etc.) to reveal a SelectWithCustom
+// dropdown that includes custom options and "+ Add custom"; picking a value saves
+// immediately. Used for institution type and city on cards and sheets.
+function InlineSelectField({ value, options, onSave, onAddCustomOption = () => {}, fieldName, render, placeholder = "Add..." }) {
+  const [editing, setEditing] = useState(false);
+  const wrapRef = useRef(null);
+  useEffect(() => {
+    if (!editing || !wrapRef.current) return;
+    const el = wrapRef.current.querySelector("select, input");
+    if (el) { el.focus(); try { el.showPicker && el.showPicker(); } catch { /* not user-activated, stays focused */ } }
+  }, [editing]);
+  if (editing) {
+    return (
+      <span ref={wrapRef} className="inline-select-wrap" onClick={(e) => e.stopPropagation()}
+        onBlur={(e) => { if (!wrapRef.current || !wrapRef.current.contains(e.relatedTarget)) setEditing(false); }}>
+        <SelectWithCustom
+          className="input inline-select"
+          options={options}
+          value={value || ""}
+          onChange={(v) => { if (fieldName) trackCustom(fieldName, options, onAddCustomOption)(v); onSave(v); setEditing(false); }}
+        />
+      </span>
+    );
+  }
+  return (
+    <span className={`inline-editable inline-editable-select ${!value ? "inline-empty" : ""}`} onClick={(e) => { e.stopPropagation(); setEditing(true); }} title="Click to edit">
+      {render ? render(value) : (value || placeholder)}
+    </span>
+  );
+}
+
 // SelectWithCustom expects { id, label } options; cities/regions are plain string lists.
 const toOptions = (list) => list.map((v) => ({ id: v, label: v }));
 const CITY_OPTIONS = toOptions(SAUDI_CITIES);
@@ -624,6 +655,18 @@ export default function App() {
       const orgId = await ensureOrgId(inst);
       if (!orgId) throw new Error("no org");
       await api("organizations", "PATCH", patch, `?id=eq.${orgId}`);
+      await loadData(); savedToast();
+    } catch { showToast("Error saving"); }
+  };
+  // City lives on every backing row, so keep the organization, deal, and enabler
+  // in sync when it changes (a Target's deal card reads the deal's city).
+  const updateInstitutionCity = async (inst, city) => {
+    const c = (city || "").trim() || null;
+    try {
+      const orgId = await ensureOrgId(inst);
+      if (orgId) await api("organizations", "PATCH", { city: c }, `?id=eq.${orgId}`);
+      if (inst.dealId) await api("deals", "PATCH", { city: c }, `?id=eq.${inst.dealId}`);
+      if (inst.enablerId) await api("enablers", "PATCH", { city: c }, `?id=eq.${inst.enablerId}`);
       await loadData(); savedToast();
     } catch { showToast("Error saving"); }
   };
@@ -1353,14 +1396,17 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // Resolve a deal back to its institution (by normalized company name) so deal
   // cards can show the institution type and fall back to its city.
   const instByName = new Map(institutions.map((i) => [(i.name || "").trim().toLowerCase(), i]));
+  const dealCityOpts = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
 
   // Renders one pipeline deal card (shared by the grouped "All" view and the
-  // single-tier filtered view). Shows type badge, city with pin, and tier badge.
+  // single-tier filtered view). Shows type badge, an inline-editable city with
+  // pin, and tier badge.
   const renderDealCard = (deal) => {
     const inst = instByName.get((deal.company || "").trim().toLowerCase());
     const cityText = deal.city || inst?.city || "";
     const typeMeta = inst?.type ? institutionTypeMeta(inst.type, customOptions) : null;
     const t = DEAL_TIERS.find((x) => x.id === (deal.tier || "Untiered"));
+    const saveCity = (v) => (inst ? updateInstitutionCity(inst, v) : updateDeal(deal.id, { city: v || null }));
     return (
       <div key={deal.id} draggable onDragStart={(e) => e.dataTransfer.setData("dealId", deal.id)}
         onClick={() => { setDealSheetId(deal.id); setView("deal-sheet"); }}
@@ -1371,12 +1417,18 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         </div>
         {typeMeta && <span className="badge card-type-badge" style={{ background: typeMeta.color + "22", color: typeMeta.color, border: `1px solid ${typeMeta.color}44` }}>{typeMeta.label}</span>}
         {deal.contact_name && <div className="card-contact">{deal.contact_name}{deal.contact_role ? ` · ${deal.contact_role}` : ""}</div>}
-        {(cityText || deal.value > 0) && (
-          <div className="card-city-row">
-            {cityText && <span className="city-pin">📍 {cityText}</span>}
-            {deal.value > 0 && <span className="card-value">${Number(deal.value).toLocaleString()}</span>}
-          </div>
-        )}
+        <div className="card-city-row">
+          <InlineSelectField
+            value={cityText}
+            options={dealCityOpts}
+            fieldName="city"
+            onAddCustomOption={addCustomOption}
+            onSave={saveCity}
+            placeholder="📍 Add city"
+            render={(v) => <span className="city-pin">📍 {v || "Add city"}</span>}
+          />
+          {deal.value > 0 && <span className="card-value">${Number(deal.value).toLocaleString()}</span>}
+        </div>
         {deal.next_action && (
           <div className="card-next">
             <div className="card-next-label">NEXT</div>
@@ -1485,6 +1537,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             customOptions={customOptions}
             onAddCustomOption={addCustomOption}
             onUpdate={(patch) => updateInstitution(inst, patch)}
+            onUpdateCity={(city) => updateInstitutionCity(inst, city)}
             onRename={(name) => renameInstitution(inst, name)}
             onAutoFill={() => autoFillInstitution(inst)}
             onAutoFillIfEmpty={() => { if (!inst.description && !autoResearched.current.has(inst.key)) autoFillInstitution(inst, { silent: true }); }}
@@ -1629,6 +1682,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onAddCustomOption={addCustomOption}
             onAddInstitution={addInstitution}
             onAddPersonWithRoles={addPersonWithRoles}
+            onUpdateInstitution={updateInstitution}
+            onUpdateInstitutionCity={updateInstitutionCity}
             onOpenInstitution={openInstitution}
             onOpenPerson={openPerson}
           />
@@ -1885,6 +1940,7 @@ const TASK_FILTER_TABS = [
 function DealSheet({ deal, activities, people, todos, contacts, deals, enablers, organizations, networkEdges, contactRoles, dealEnablers, customOptions = [], onAddCustomOption = () => {}, onUpdate, onChangeStage, onDelete, onAddActivity, onAddPerson, onAddPersonNew, onRemovePerson, onChangeTier, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
   const stage = STAGES.find(s => s.id === deal.stage);
   const tier = DEAL_TIERS.find(t => t.id === (deal.tier || "Untiered"));
+  const cityOpts = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
   const [filter, setFilter] = useState("all");
   const [personFilter, setPersonFilter] = useState(null);
 
@@ -1914,6 +1970,15 @@ function DealSheet({ deal, activities, people, todos, contacts, deals, enablers,
             <div className="sheet-meta-row">
               <BadgeSelect options={STAGES} value={deal.stage || "prospecting"} color={stage?.color} onChange={(v) => onChangeStage(v)} dot title="Change stage" />
               <BadgeSelect options={DEAL_TIERS} value={deal.tier || "Untiered"} color={tier?.color} onChange={(v) => onChangeTier(deal.id, v)} title="Change tier" />
+              <InlineSelectField
+                value={deal.city || ""}
+                options={cityOpts}
+                fieldName="city"
+                onAddCustomOption={onAddCustomOption}
+                onSave={(v) => onUpdate({ city: v || null })}
+                placeholder="📍 Add city"
+                render={(v) => <span className="city-pin">📍 {v || "Add city"}</span>}
+              />
               {deal.value > 0 && <span className="badge val-badge">${Number(deal.value).toLocaleString()}</span>}
             </div>
             <div className="sheet-contact">
@@ -2843,7 +2908,7 @@ function institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, 
 function InstitutionSheet({
   institution: inst, summaryEntity, activities, contacts, deals, enablers, organizations,
   dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {},
-  onUpdate, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
+  onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
   onChangeStage, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack,
 }) {
@@ -2853,6 +2918,7 @@ function InstitutionSheet({
   const meta = institutionTypeMeta(inst.type, customOptions);
   const stage = STAGES.find(s => s.id === (inst.stage || "prospecting"));
   const typeOpts = optionsWithCustom(INSTITUTION_TYPES, customOptions, "institution_type");
+  const cityOpts = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
   // Auto-research an institution the first time its sheet opens with no description.
   useEffect(() => {
     if (onAutoFillIfEmpty) onAutoFillIfEmpty();
@@ -2981,10 +3047,25 @@ function InstitutionSheet({
           <div>
             <InlineText value={inst.name} onSave={(v) => v.trim() && onRename(v.trim())} className="sheet-company" placeholder="Institution name" />
             <div className="sheet-meta-row">
-              <BadgeSelect options={typeOpts} value={inst.type || "hospital"} color={meta.color} onChange={(v) => onUpdate({ type: v })} title="Change type" />
+              <InlineSelectField
+                value={inst.type || "hospital"}
+                options={typeOpts}
+                fieldName="institution_type"
+                onAddCustomOption={onAddCustomOption}
+                onSave={(v) => onUpdate({ type: v })}
+                render={(v) => { const m = institutionTypeMeta(v, customOptions); return <span className="badge" style={{ background: m.color + "22", color: m.color, border: `1px solid ${m.color}44` }}>{m.label}</span>; }}
+              />
               {inst.isTarget && <span className="badge flag-badge-target">Target</span>}
               {inst.isEnabler && <span className="badge flag-badge-enabler">Enabler</span>}
-              {inst.city && <span className="city-pin">📍 {inst.city}{inst.region ? `, ${inst.region}` : ""}</span>}
+              <InlineSelectField
+                value={inst.city || ""}
+                options={cityOpts}
+                fieldName="city"
+                onAddCustomOption={onAddCustomOption}
+                onSave={(v) => onUpdateCity(v)}
+                placeholder="📍 Add city"
+                render={(v) => <span className="city-pin">📍 {v ? `${v}${inst.region ? `, ${inst.region}` : ""}` : "Add city"}</span>}
+              />
             </div>
             <div className="classification-row">
               <label className="checkbox-label"><input type="checkbox" checked={inst.isTarget} onChange={(e) => { if (!e.target.checked && inst.dealId && !confirm("Unchecking Target removes the linked pipeline deal (its people and stage). Activity history is kept. Continue?")) return; onSetFlag("target", e.target.checked); }} /> Target</label>
@@ -3448,7 +3529,7 @@ const NETWORK_SUBTABS = [{ id: "institutions", label: "Institutions" }, { id: "p
 // name-keyed union of deals/enablers/organizations; people are contacts.
 function NetworkTab({
   institutions, contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles,
-  customOptions, onAddCustomOption, onAddInstitution, onAddPersonWithRoles, onOpenInstitution, onOpenPerson,
+  customOptions, onAddCustomOption, onAddInstitution, onAddPersonWithRoles, onUpdateInstitution, onUpdateInstitutionCity, onOpenInstitution, onOpenPerson,
 }) {
   const [subtab, setSubtab] = useState("institutions");
   const [search, setSearch] = useState("");
@@ -3489,6 +3570,8 @@ function NetworkTab({
     (!cityFilter || p.cities.includes(cityFilter)) &&
     (!instFilter || p.roles.some(r => r.institutionName === instFilter)));
   const instNames = Array.from(new Set(institutions.map(i => i.name))).sort();
+  const typeOptsAll = optionsWithCustom(INSTITUTION_TYPES, customOptions, "institution_type");
+  const cityOptsAll = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
 
   return (
     <div className="network-directory">
@@ -3539,12 +3622,27 @@ function NetworkTab({
                         <div key={inst.key} className="institution-card" onClick={() => onOpenInstitution(inst.name)}>
                           <div className="institution-card-top">
                             <div className="institution-name">{inst.name}</div>
-                            <span className="badge" style={{background:meta.color+"22",color:meta.color,border:`1px solid ${meta.color}44`}}>{meta.label}</span>
+                            <InlineSelectField
+                              value={inst.type || "hospital"}
+                              options={typeOptsAll}
+                              fieldName="institution_type"
+                              onAddCustomOption={onAddCustomOption}
+                              onSave={(v) => onUpdateInstitution(inst, { type: v })}
+                              render={(v) => { const m = institutionTypeMeta(v, customOptions); return <span className="badge" style={{ background: m.color + "22", color: m.color, border: `1px solid ${m.color}44` }}>{m.label}</span>; }}
+                            />
                           </div>
                           <div className="institution-flags-row">
                             {inst.isTarget && <span className="badge flag-badge-target">Target</span>}
                             {inst.isEnabler && <span className="badge flag-badge-enabler">Enabler</span>}
-                            {inst.city && <span className="city-pin">📍 {inst.city}</span>}
+                            <InlineSelectField
+                              value={inst.city || ""}
+                              options={cityOptsAll}
+                              fieldName="city"
+                              onAddCustomOption={onAddCustomOption}
+                              onSave={(v) => onUpdateInstitutionCity(inst, v)}
+                              placeholder="📍 Add city"
+                              render={(v) => <span className="city-pin">📍 {v || "Add city"}</span>}
+                            />
                             {stage && <span className="badge" style={{background:stage.color+"22",color:stage.color,border:`1px solid ${stage.color}44`}}>{stage.label}</span>}
                           </div>
                           <div className="institution-people-count">{ppl.length} {ppl.length === 1 ? "person" : "people"}</div>
