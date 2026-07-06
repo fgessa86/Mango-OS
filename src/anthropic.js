@@ -1,7 +1,28 @@
 const ANTHROPIC_API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
 
-export const generateSummary = async (prompt) => {
+// Daily Anthropic API call counter, persisted in localStorage and reset at
+// midnight (keyed by date). bumpApiCalls is called once per real request.
+export const getApiCallsToday = () => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const raw = JSON.parse(localStorage.getItem("mango-api-calls") || "{}");
+    return raw.date === today ? (raw.count || 0) : 0;
+  } catch { return 0; }
+};
+export const bumpApiCalls = () => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const raw = JSON.parse(localStorage.getItem("mango-api-calls") || "{}");
+    const count = raw.date === today ? (raw.count || 0) + 1 : 1;
+    localStorage.setItem("mango-api-calls", JSON.stringify({ date: today, count }));
+    window.dispatchEvent(new CustomEvent("mango-api-call", { detail: count }));
+    return count;
+  } catch { return 0; }
+};
+
+export const generateSummary = async (prompt, maxTokens = 500) => {
   if (!ANTHROPIC_API_KEY) throw new Error("Missing VITE_ANTHROPIC_API_KEY");
+  bumpApiCalls();
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -12,7 +33,7 @@ export const generateSummary = async (prompt) => {
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 1000,
+      max_tokens: maxTokens,
       messages: [{ role: "user", content: prompt }],
     }),
   });
@@ -27,6 +48,7 @@ export const researchInstitution = async (name, city) => {
   if (!ANTHROPIC_API_KEY) throw new Error("Missing VITE_ANTHROPIC_API_KEY");
   const location = (city || "").trim() ? `${city}, Saudi Arabia` : "Saudi Arabia";
   const prompt = `Provide a brief 2-3 sentence description of ${name} in ${location}. Include what they do, their relevance to healthcare and oncology if any, their website URL, and their sector. Respond in JSON format: {description, oncology_relevance, website, sector}. If you don't know the institution, respond with {unknown: true}. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.`;
+  bumpApiCalls();
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -37,7 +59,7 @@ export const researchInstitution = async (name, city) => {
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 600,
+      max_tokens: 300,
       messages: [{ role: "user", content: prompt }],
     }),
   });
@@ -57,6 +79,7 @@ export const researchInstitution = async (name, city) => {
 // text of every text block, with any markdown code fences stripped.
 const webSearchText = async (content, maxTokens = 4000) => {
   if (!ANTHROPIC_API_KEY) throw new Error("Missing VITE_ANTHROPIC_API_KEY");
+  bumpApiCalls();
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -114,6 +137,7 @@ export const researchClinicalTrials = async (name) => {
 
 export const summarizeImage = async (base64, prompt) => {
   if (!ANTHROPIC_API_KEY) throw new Error("Missing VITE_ANTHROPIC_API_KEY");
+  bumpApiCalls();
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -124,7 +148,7 @@ export const summarizeImage = async (base64, prompt) => {
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 1000,
+      max_tokens: 500,
       messages: [{
         role: "user",
         content: [

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "./supabase";
-import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials } from "./anthropic";
+import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import MapTab from "./MapTab";
@@ -55,7 +55,7 @@ function NavIcon({ shape }) {
 
 // Left sidebar: wordmark, primary nav (geometric icons), a More section for
 // Reports/Boss View, static Saved Views, and a user card pinned to the bottom.
-function Sidebar({ view, setView, tasksCount, sheetOrigin = "network" }) {
+function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0 }) {
   const nav = [
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Network", shape: "circle" },
@@ -108,6 +108,7 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network" }) {
           <div className="sidebar-user-role">VP of Commercial</div>
         </div>
       </div>
+      <div className="sidebar-api-calls" title="Anthropic API calls made today (resets at midnight)">API calls today: {apiCallsToday}</div>
     </aside>
   );
 }
@@ -288,7 +289,7 @@ function CityEditor({ city, options, onSave, onAddCustomOption = () => {} }) {
       ))}
       {adding ? (
         <span className="inline-select-wrap" onClick={(e) => e.stopPropagation()} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setAdding(false); }}>
-          <SelectWithCustom className="input inline-select" options={options} value="" onChange={(v) => { trackCustom("city", options, onAddCustomOption)(v); add(v); }} />
+          <SelectWithCustom className="input inline-select" options={[{ id: "", label: "Select city..." }, ...options.filter((o) => o.id)]} value="" onChange={(v) => { if (!v) { setAdding(false); return; } trackCustom("city", options, onAddCustomOption)(v); add(v); }} />
         </span>
       ) : (
         <button className="city-add-btn" onClick={(e) => { e.stopPropagation(); setAdding(true); }}>{cities.length ? "+ city" : "📍 Add city"}</button>
@@ -551,6 +552,7 @@ export default function App() {
   const [contacts, setContacts] = useState([]);
   const [activities, setActivities] = useState([]);
   const [bossComments, setBossComments] = useState([]);
+  const [apiCallsToday, setApiCallsToday] = useState(() => getApiCallsToday());
   const [enablers, setEnablers] = useState([]);
   const [dealContacts, setDealContacts] = useState([]);
   const [enablerContacts, setEnablerContacts] = useState([]);
@@ -616,6 +618,15 @@ export default function App() {
   // Boss View can be opened standalone via ?view=boss (shareable link, no sidebar).
   const [bossStandalone] = useState(() => new URLSearchParams(window.location.search).get("view") === "boss");
   useEffect(() => { if (bossStandalone) setView("boss"); }, [bossStandalone]);
+
+  // Keep the sidebar API-call counter in sync. bumpApiCalls dispatches this event;
+  // also refresh on focus so a day rollover shows the reset count.
+  useEffect(() => {
+    const sync = () => setApiCallsToday(getApiCallsToday());
+    window.addEventListener("mango-api-call", sync);
+    window.addEventListener("focus", sync);
+    return () => { window.removeEventListener("mango-api-call", sync); window.removeEventListener("focus", sync); };
+  }, []);
 
   const postBossComment = async ({ author, content, file_name, file_data }) => {
     const text = (content || "").trim();
@@ -1538,7 +1549,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     <div className="app">
       {toast && <div className="toast">{toast}</div>}
 
-      <Sidebar view={view} setView={setView} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} />
+      <Sidebar view={view} setView={setView} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} apiCallsToday={apiCallsToday} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} />
 
       <main className="main">
 
@@ -2245,7 +2256,7 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
     setSummarizingText(true);
     try {
       const prompt = `Summarize this meeting transcript. Provide key points, decisions made, and action items. Be concise. Do not use em dashes; use commas, periods, colons, or parentheses instead.\n\nTranscript:\n${text}`;
-      setQDesc(await generateSummary(prompt));
+      setQDesc(await generateSummary(prompt, 1000));
     } catch { showToast("Error summarizing transcript"); }
     setSummarizingText(false);
   };
@@ -2336,14 +2347,17 @@ function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, sum
   const [collapsed, setCollapsed] = useState(true);
   const [draft, setDraft] = useState(entity.ai_summary || "");
 
+  // Only auto-generate when there is NO cached summary at all. An existing (even
+  // stale) summary is shown instantly with no API call; the "New activity" hint
+  // below prompts the user to Regenerate manually.
   useEffect(() => {
-    const mostRecent = activities.length > 0 ? Math.max(...activities.map(a => new Date(a.created_at).getTime())) : 0;
-    const summaryTime = entity.ai_summary_updated_at ? new Date(entity.ai_summary_updated_at).getTime() : 0;
-    if (!entity.ai_summary || mostRecent > summaryTime) {
-      onGenerateSummary(entity, activities);
-    }
+    if (!entity.ai_summary) onGenerateSummary(entity, activities);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entity.id]);
+
+  const mostRecent = activities.length > 0 ? Math.max(...activities.map(a => new Date(a.created_at).getTime())) : 0;
+  const summaryTime = entity.ai_summary_updated_at ? new Date(entity.ai_summary_updated_at).getTime() : 0;
+  const isStale = !!entity.ai_summary && mostRecent > summaryTime;
 
   const startEdit = (e) => { e && e.stopPropagation(); setDraft(entity.ai_summary || ""); setCollapsed(false); setEditing(true); };
   const save = async () => { await onSaveSummary(entity.id, draft); setEditing(false); };
@@ -2353,6 +2367,7 @@ function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, sum
       <div className="ai-summary-header ai-summary-toggle" onClick={() => !editing && setCollapsed(c => !c)}>
         <div className="section-label">AI Summary</div>
         <div className="ai-summary-header-right">
+          {isStale && !summarizing && <span className="ai-summary-stale" title="Activity has been logged since this summary was written">New activity since last summary</span>}
           <button onClick={(e) => { e.stopPropagation(); onGenerateSummary(entity, activities); }} className="link-btn" disabled={summarizing}>Regenerate</button>
           {!editing && <span className="ai-summary-chevron">{collapsed ? "▸" : "▾"}</span>}
         </div>
@@ -2925,7 +2940,10 @@ function InstitutionSheet({
         <div className="ai-summary-header">
           <div className="section-label">People at {inst.name}</div>
           <div className="header-btn-group">
-            <button onClick={runResearch} className="btn-primary btn-research" disabled={researchLoading}>{researchLoading ? "Researching..." : "🔍 Research Key People"}</button>
+            <div className="research-btn-wrap">
+              <button onClick={runResearch} className="btn-primary btn-research" disabled={researchLoading}>{researchLoading ? "Researching..." : "🔍 Research Key People"}</button>
+              <div className="research-credits-note">Uses AI credits</div>
+            </div>
             <button onClick={() => setAddPersonOpen(v => !v)} className="btn-copy">{addPersonOpen ? "Cancel" : "+ Add Person"}</button>
           </div>
         </div>
