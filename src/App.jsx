@@ -20,10 +20,10 @@ const initialsOf = (name) => {
   if (parts.length === 0) return "?";
   return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase();
 };
-function Avatar({ name, size = 40 }) {
+function Avatar({ name, size = 40, initials }) {
   return (
     <div className="avatar" style={{ width: size, height: size, background: avatarColor(name), fontSize: Math.round(size * 0.36) }}>
-      {initialsOf(name)}
+      {initials || initialsOf(name)}
     </div>
   );
 }
@@ -55,7 +55,7 @@ function NavIcon({ shape }) {
 
 // Left sidebar: wordmark, primary nav (geometric icons), a More section for
 // Reports/Boss View, static Saved Views, and a user card pinned to the bottom.
-function Sidebar({ view, setView, tasksCount }) {
+function Sidebar({ view, setView, tasksCount, sheetOrigin = "network" }) {
   const nav = [
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Network", shape: "circle" },
@@ -66,7 +66,7 @@ function Sidebar({ view, setView, tasksCount }) {
     { id: "reports", label: "Reports" },
     { id: "boss", label: "Boss View" },
   ];
-  const mapView = view === "deal-sheet" ? "pipeline" : view === "institution-sheet" || view === "person-sheet" ? "network" : view;
+  const mapView = view === "institution-sheet" ? sheetOrigin : view === "person-sheet" ? "network" : view;
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -102,10 +102,10 @@ function Sidebar({ view, setView, tasksCount }) {
       </div>
 
       <div className="sidebar-user">
-        <Avatar name="Abdullah R" size={34} />
+        <Avatar name="Fahed Al Essa" size={34} initials="FA" />
         <div className="sidebar-user-meta">
-          <div className="sidebar-user-name">Abdullah R.</div>
-          <div className="sidebar-user-role">VP, Commercial</div>
+          <div className="sidebar-user-name">Fahed Al Essa</div>
+          <div className="sidebar-user-role">VP of Commercial</div>
         </div>
       </div>
     </aside>
@@ -238,6 +238,81 @@ function InlineSelectField({ value, options, onSave, onAddCustomOption = () => {
   return (
     <span className={`inline-editable inline-editable-select ${!value ? "inline-empty" : ""}`} onClick={(e) => { e.stopPropagation(); setEditing(true); }} title="Click to edit">
       {render ? render(value) : (value || placeholder)}
+    </span>
+  );
+}
+
+// An institution can operate in several cities. The city column stores either a
+// plain string (one city, back-compatible) or a JSON array string (many).
+const parseCities = (city) => {
+  if (!city) return [];
+  if (Array.isArray(city)) return city.map((c) => String(c).trim()).filter(Boolean);
+  const s = String(city).trim();
+  if (s.startsWith("[")) { try { const a = JSON.parse(s); return Array.isArray(a) ? a.map((c) => String(c).trim()).filter(Boolean) : []; } catch { return s ? [s] : []; } }
+  return s ? [s] : [];
+};
+const serializeCities = (list) => {
+  const clean = Array.from(new Set((list || []).map((c) => String(c).trim()).filter(Boolean)));
+  if (clean.length === 0) return null;
+  if (clean.length === 1) return clean[0];
+  return JSON.stringify(clean);
+};
+
+// Displays cities as pin pills. On compact cards, shows the first with a
+// "+N more" indicator; on sheets, shows them all.
+function CityPills({ city, compact = false }) {
+  const cities = parseCities(city);
+  if (cities.length === 0) return null;
+  if (compact) {
+    return <span className="city-pin">📍 {cities[0]}{cities.length > 1 ? <span className="city-more"> +{cities.length - 1} more</span> : null}</span>;
+  }
+  return (
+    <span className="city-pills">
+      {cities.map((c) => <span key={c} className="city-pin">📍 {c}</span>)}
+    </span>
+  );
+}
+
+// Editable multi-city control: current cities as removable pills plus an
+// "Add city" dropdown (with custom options and "+ Add custom"). Saves the
+// serialized value immediately.
+function CityEditor({ city, options, onSave, onAddCustomOption = () => {} }) {
+  const [adding, setAdding] = useState(false);
+  const cities = parseCities(city);
+  const remove = (c) => onSave(serializeCities(cities.filter((x) => x !== c)));
+  const add = (c) => { if (c && !cities.includes(c)) onSave(serializeCities([...cities, c])); setAdding(false); };
+  return (
+    <span className="city-editor">
+      {cities.map((c) => (
+        <span key={c} className="city-pill-edit">📍 {c}<button className="city-pill-x" title="Remove" onClick={(e) => { e.stopPropagation(); remove(c); }}>✕</button></span>
+      ))}
+      {adding ? (
+        <span className="inline-select-wrap" onClick={(e) => e.stopPropagation()} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setAdding(false); }}>
+          <SelectWithCustom className="input inline-select" options={options} value="" onChange={(v) => { trackCustom("city", options, onAddCustomOption)(v); add(v); }} />
+        </span>
+      ) : (
+        <button className="city-add-btn" onClick={(e) => { e.stopPropagation(); setAdding(true); }}>{cities.length ? "+ city" : "📍 Add city"}</button>
+      )}
+    </span>
+  );
+}
+
+// Compact-by-default city control. Shows pins (first + "N more" on cards); click
+// to expand into the multi-city editor. Used on cards; sheets use CityEditor.
+function InlineCity({ city, options, onSave, onAddCustomOption = () => {}, compact = false }) {
+  const [editing, setEditing] = useState(false);
+  const cities = parseCities(city);
+  if (editing) {
+    return (
+      <span className="inline-city-editing" onClick={(e) => e.stopPropagation()}>
+        <CityEditor city={city} options={options} onSave={onSave} onAddCustomOption={onAddCustomOption} />
+        <button className="city-done-btn" onClick={(e) => { e.stopPropagation(); setEditing(false); }}>done</button>
+      </span>
+    );
+  }
+  return (
+    <span className="inline-editable inline-editable-select" title="Click to edit" onClick={(e) => { e.stopPropagation(); setEditing(true); }}>
+      {cities.length ? <CityPills city={city} compact={compact} /> : <span className="city-pin inline-empty">📍 Add city</span>}
     </span>
   );
 }
@@ -475,6 +550,7 @@ export default function App() {
   const [deals, setDeals] = useState([]);
   const [contacts, setContacts] = useState([]);
   const [activities, setActivities] = useState([]);
+  const [bossComments, setBossComments] = useState([]);
   const [enablers, setEnablers] = useState([]);
   const [dealContacts, setDealContacts] = useState([]);
   const [enablerContacts, setEnablerContacts] = useState([]);
@@ -490,8 +566,8 @@ export default function App() {
   const [tierFilter, setTierFilter] = useState("all");
   const [showCompletedTasks, setShowCompletedTasks] = useState(false);
   const [toast, setToast] = useState(null);
-  const [dealSheetId, setDealSheetId] = useState(null);
   const [institutionSheetKey, setInstitutionSheetKey] = useState(null);
+  const [sheetOrigin, setSheetOrigin] = useState("network");
   const [personSheetId, setPersonSheetId] = useState(null);
   const [customOptions, setCustomOptions] = useState([]);
   const [contactRoles, setContactRoles] = useState([]);
@@ -512,7 +588,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr, bc] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -525,23 +601,33 @@ export default function App() {
         api("network_edges", "GET", null, "?select=*&order=created_at.desc"),
         api("custom_options", "GET", null, "?select=*&order=created_at.asc"),
         api("contact_roles", "GET", null, "?select=*,contacts(*)&order=created_at.asc"),
+        api("boss_comments", "GET", null, "?select=*&order=created_at.desc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []);
       setOrganizations(orgs || []); setDealEnablers(de || []); setNetworkEdges(ne || []);
-      setCustomOptions(co || []); setContactRoles(cr || []);
+      setCustomOptions(co || []); setContactRoles(cr || []); setBossComments(bc || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // Kick back to pipeline if the open deal sheet's deal was deleted elsewhere
-  useEffect(() => {
-    if (view === "deal-sheet" && dealSheetId && deals.length > 0 && !deals.find((d) => d.id === dealSheetId)) {
-      setView("pipeline"); setDealSheetId(null);
-    }
-  }, [deals, view, dealSheetId]);
+  // Boss View can be opened standalone via ?view=boss (shareable link, no sidebar).
+  const [bossStandalone] = useState(() => new URLSearchParams(window.location.search).get("view") === "boss");
+  useEffect(() => { if (bossStandalone) setView("boss"); }, [bossStandalone]);
+
+  const postBossComment = async ({ author, content, file_name, file_data }) => {
+    const text = (content || "").trim();
+    if (!text && !file_data) return;
+    try {
+      const clean = { author, content: text };
+      if (file_name) clean.file_name = file_name;
+      if (file_data) clean.file_data = file_data;
+      await api("boss_comments", "POST", clean);
+      await loadData();
+    } catch { showToast("Error posting comment"); }
+  };
 
   // Kick back to the Network tab if the open person's contact was deleted elsewhere
   useEffect(() => {
@@ -593,17 +679,6 @@ export default function App() {
     } catch { showToast("Error saving deal"); }
   };
 
-  const deleteDeal = async (id) => {
-    try {
-      await api("activities", "DELETE", null, `?deal_id=eq.${id}`);
-      await api("deal_contacts", "DELETE", null, `?deal_id=eq.${id}`);
-      await api("contact_roles", "DELETE", null, `?entity_type=eq.deal&entity_id=eq.${id}`);
-      await api("todos", "DELETE", null, `?deal_id=eq.${id}`);
-      await api("deals", "DELETE", null, `?id=eq.${id}`);
-      await loadData(); setModal(null); showToast("Deal deleted");
-      setView("pipeline"); setDealSheetId(null);
-    } catch { showToast("Error deleting deal"); }
-  };
 
   const moveDeal = async (dealId, newStage) => {
     try {
@@ -1315,7 +1390,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // Task/link navigation. Deals open the Pipeline deal sheet; enablers are
   // institutions, so open by name in the Network institution sheet.
   const openTaskLink = (link) => {
-    if (link.type === "deal") { setDealSheetId(link.id); setView("deal-sheet"); }
+    if (link.type === "deal") { const d = deals.find((x) => x.id === link.id); if (d) openInstitution(d.company); }
     else if (link.type === "enabler") { const en = enablers.find((e) => e.id === link.id); if (en) openInstitution(en.name); }
   };
 
@@ -1409,7 +1484,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     const saveCity = (v) => (inst ? updateInstitutionCity(inst, v) : updateDeal(deal.id, { city: v || null }));
     return (
       <div key={deal.id} draggable onDragStart={(e) => e.dataTransfer.setData("dealId", deal.id)}
-        onClick={() => { setDealSheetId(deal.id); setView("deal-sheet"); }}
+        onClick={() => openInstitution(deal.company, "pipeline")}
         className="deal-card">
         <div className="deal-card-head">
           <div className="card-company">{deal.company}</div>
@@ -1418,15 +1493,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         {typeMeta && <span className="badge card-type-badge" style={{ background: typeMeta.color + "22", color: typeMeta.color, border: `1px solid ${typeMeta.color}44` }}>{typeMeta.label}</span>}
         {deal.contact_name && <div className="card-contact">{deal.contact_name}{deal.contact_role ? ` · ${deal.contact_role}` : ""}</div>}
         <div className="card-city-row">
-          <InlineSelectField
-            value={cityText}
-            options={dealCityOpts}
-            fieldName="city"
-            onAddCustomOption={addCustomOption}
-            onSave={saveCity}
-            placeholder="📍 Add city"
-            render={(v) => <span className="city-pin">📍 {v || "Add city"}</span>}
-          />
+          <InlineCity city={cityText} options={dealCityOpts} onAddCustomOption={addCustomOption} onSave={saveCity} compact />
           {deal.value > 0 && <span className="card-value">${Number(deal.value).toLocaleString()}</span>}
         </div>
         {deal.next_action && (
@@ -1451,59 +1518,31 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const lastSyncedActivity = activities.find((a) => a.type === "email" || a.type === "meeting");
 
   // NAVIGATION: institutions are keyed by normalized name; people by contact id.
-  const openInstitution = (name) => { if (name) { setInstitutionSheetKey(name.trim().toLowerCase()); setView("institution-sheet"); } };
+  const openInstitution = (name, origin = "network") => { if (name) { setInstitutionSheetKey(name.trim().toLowerCase()); setSheetOrigin(origin); setView("institution-sheet"); } };
   const openPerson = (id) => { setPersonSheetId(id); setView("person-sheet"); };
 
   if (loading) return <div className="app loading-screen"><div className="loading-text">Loading Mango OS...</div></div>;
+
+  if (bossStandalone) {
+    return (
+      <div className="app">
+        {toast && <div className="toast">{toast}</div>}
+        <main className="main">
+          <BossView deals={deals} activeDeals={activeDeals} enablers={enablers} institutions={institutions} instByName={instByName} todos={todos} activities={activities} contacts={contacts} customOptions={customOptions} comments={bossComments} onPostComment={postBossComment} standalone />
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="app">
       {toast && <div className="toast">{toast}</div>}
 
-      <Sidebar view={view} setView={setView} tasksCount={openTodos.length} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} />
+      <Sidebar view={view} setView={setView} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} />
 
       <main className="main">
 
-      {/* DEAL SHEET */}
-      {view === "deal-sheet" && dealSheetId && (() => {
-        const sheetDeal = deals.find((d) => d.id === dealSheetId);
-        return sheetDeal ? (
-          <DealSheet
-            deal={sheetDeal}
-            activities={activities.filter((a) => a.deal_id === sheetDeal.id)}
-            people={dealContacts.filter((dc) => dc.deal_id === sheetDeal.id)}
-            todos={todos.filter((t) => t.deal_id === sheetDeal.id)}
-            contacts={contacts}
-            deals={deals}
-            enablers={enablers}
-            organizations={organizations}
-            networkEdges={networkEdges}
-            contactRoles={contactRoles}
-            customOptions={customOptions}
-            onAddCustomOption={addCustomOption}
-            dealEnablers={dealEnablers.filter((de) => de.deal_id === sheetDeal.id)}
-            onUpdate={(patch) => updateDeal(sheetDeal.id, patch)}
-            onChangeStage={(stage) => moveDeal(sheetDeal.id, stage)}
-            onDelete={deleteDeal}
-            onAddActivity={addActivity}
-            onAddPerson={(contactId, role) => addDealContact(sheetDeal.id, contactId, role)}
-            onAddPersonNew={(form) => addPersonWithRoles({ ...form, company: sheetDeal.company, roles: [{ institutionKey: `deal:${sheetDeal.id}`, role: form.role }] })}
-            onChangeTier={setDealTier}
-            onRemovePerson={(p) => (p.source === "edge" ? removeNetworkEdge(p.id) : removeDealContact(p.id))}
-            onAddTodo={(form) => saveTodo({ ...form, deal_id: sheetDeal.id })}
-            onToggleTodo={toggleTodo}
-            onUpdateTodo={updateTodo}
-            onNavigate={openTaskLink}
-            onGenerateSummary={generateDealSummary}
-            onSaveSummary={saveDealSummary}
-            summarizing={summarizing}
-            showToast={showToast}
-            onBack={() => { setView("pipeline"); setDealSheetId(null); }}
-          />
-        ) : null;
-      })()}
-
-      {/* INSTITUTION SHEET */}
+      {/* UNIFIED INSTITUTION / DEAL SHEET */}
       {view === "institution-sheet" && institutionSheetKey && (() => {
         const inst = institutions.find((i) => i.key === institutionSheetKey);
         if (!inst) return null;
@@ -1556,13 +1595,20 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onRemoveNetworkEdge={removeNetworkEdge}
             onAddConnection={addConnection}
             onChangeStage={(stage) => inst.dealId && moveDeal(inst.dealId, stage)}
+            onChangeTier={inst.dealId ? ((t) => setDealTier(inst.dealId, t)) : null}
+            todos={todos.filter((t) => (inst.dealId && t.deal_id === inst.dealId) || (inst.enablerId && t.enabler_id === inst.enablerId))}
+            onAddTodo={(form) => saveTodo({ ...form, deal_id: inst.dealId || null, enabler_id: inst.dealId ? null : (inst.enablerId || null) })}
+            onToggleTodo={toggleTodo}
+            onUpdateTodo={updateTodo}
+            onNavigate={openTaskLink}
             onGenerateSummary={genSummary}
             onSaveSummary={saveSummary}
             summarizing={summarizing}
             showToast={showToast}
             onOpenInstitution={openInstitution}
             onOpenPerson={openPerson}
-            onBack={() => { setView("network"); setInstitutionSheetKey(null); }}
+            backLabel={sheetOrigin === "pipeline" ? "Back to Pipeline" : "Back to Network"}
+            onBack={() => { setView(sheetOrigin); setInstitutionSheetKey(null); }}
           />
         );
       })()}
@@ -1684,6 +1730,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onAddPersonWithRoles={addPersonWithRoles}
             onUpdateInstitution={updateInstitution}
             onUpdateInstitutionCity={updateInstitutionCity}
+            onUpdateContact={updateContact}
+            onLinkPersonToInstitution={(contactId, name) => {
+              const i = institutions.find((x) => x.name.toLowerCase() === (name || "").toLowerCase());
+              const primary = i && institutionPrimaryEntity(i);
+              if (primary) addPersonRole({ contactId, entityType: primary.type, entityId: primary.id });
+            }}
             onOpenInstitution={openInstitution}
             onOpenPerson={openPerson}
           />
@@ -1784,71 +1836,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
       {/* BOSS VIEW */}
       {view === "boss" && (
-        <div className="section-pad">
-          <div className="boss-header"><div className="boss-title">Pipeline Overview</div><div className="boss-date">{formatFull(new Date())}</div></div>
-          <div className="pipeline-bar">
-            {STAGES.filter(s => !["won","lost"].includes(s.id)).map(s => {
-              const c = deals.filter(d => d.stage === s.id).length;
-              if (!c) return null;
-              return <div key={s.id} className="bar-seg" style={{background: s.color, flex: c}}><span className="bar-label">{s.label} ({c})</span></div>;
-            })}
-            {activeDeals.length === 0 && <div className="bar-seg bar-empty">No active deals</div>}
-          </div>
-          <div className="boss-stages">
-            {STAGES.map(s => {
-              const sd = deals.filter(d => d.stage === s.id);
-              if (!sd.length) return null;
-              const v = sd.reduce((sum,d) => sum + (Number(d.value)||0), 0);
-              return (
-                <div key={s.id} className="boss-stage-card">
-                  <div className="boss-stage-head"><div className="col-title-wrap"><div className="dot" style={{background:s.color}} /><span className="boss-stage-name">{s.label}</span></div><span className="boss-stage-count">{sd.length} deal{sd.length!==1?"s":""}{v > 0 ? ` . $${v.toLocaleString()}` : ""}</span></div>
-                  {sd.map(d => <div key={d.id} className="boss-deal"><span>{d.company}</span>{d.value > 0 && <span className="boss-deal-val">${Number(d.value).toLocaleString()}</span>}</div>)}
-                </div>
-              );
-            })}
-          </div>
-          <div className="boss-activity">
-            <div className="boss-act-title">This Week</div>
-            <div className="boss-act-row">
-              {[[deals.filter(d=>isThisWeek(d.last_activity_at)).length,"deals touched"],[activities.filter(a=>isThisWeek(a.created_at)).length,"activities"],[deals.filter(d=>isThisWeek(d.created_at)).length,"new deals"]].map(([n,l],i) => (
-                <div key={i}><span className="boss-num">{n}</span> <span className="boss-num-label">{l}</span></div>
-              ))}
-            </div>
-          </div>
-          <div className="section-label boss-section-label">Key Summaries</div>
-          <div className="key-summaries">
-            {[...activeDeals.filter(d => d.ai_summary).map(d => ({ id: d.id, name: d.company, summary: d.ai_summary })),
-              ...enablers.filter(en => en.ai_summary).map(en => ({ id: en.id, name: en.name, summary: en.ai_summary }))]
-              .map(item => (
-                <div key={item.id} className="key-summary-card">
-                  <div className="key-summary-header">{item.name}</div>
-                  <div className="key-summary-text">{item.summary}</div>
-                </div>
-              ))}
-            {activeDeals.filter(d => d.ai_summary).length === 0 && enablers.filter(en => en.ai_summary).length === 0 && (
-              <div className="empty-small">No summaries yet.</div>
-            )}
-          </div>
-
-          <div className="section-label boss-section-label">Action Items</div>
-          <div className="action-items">
-            {sortTodos(todos.filter(t => t.status === "open")).slice(0, 10).map(t => {
-              const linkedDeal = t.deal_id ? deals.find(d => d.id === t.deal_id) : null;
-              const linkedEnabler = t.enabler_id ? enablers.find(en => en.id === t.enabler_id) : null;
-              return (
-                <div key={t.id} className="action-item-row">
-                  <PriorityBadge priority={t.priority} />
-                  <span className="action-item-title">{t.title}</span>
-                  {(linkedDeal || linkedEnabler) && <span className="action-item-link">{linkedDeal ? linkedDeal.company : linkedEnabler.name}</span>}
-                  {t.due_date && <span className="todo-due">Due {formatDate(t.due_date)}</span>}
-                </div>
-              );
-            })}
-            {todos.filter(t => t.status === "open").length === 0 && <div className="empty-small">No open action items.</div>}
-          </div>
-
-          <div className="center"><button onClick={() => copyReport("eow")} className="btn-copy btn-copy-lg">{reportCopied === "eow" ? "Copied!" : "Copy Weekly Report"}</button></div>
-        </div>
+        <BossView deals={deals} activeDeals={activeDeals} enablers={enablers} institutions={institutions} instByName={instByName} todos={todos} activities={activities} contacts={contacts} customOptions={customOptions} comments={bossComments} onPostComment={postBossComment} />
       )}
 
       </main>
@@ -1936,175 +1924,6 @@ const TASK_FILTER_TABS = [
   { id: "due_today", label: "Due Today" },
   { id: "overdue", label: "Overdue" },
 ];
-
-function DealSheet({ deal, activities, people, todos, contacts, deals, enablers, organizations, networkEdges, contactRoles, dealEnablers, customOptions = [], onAddCustomOption = () => {}, onUpdate, onChangeStage, onDelete, onAddActivity, onAddPerson, onAddPersonNew, onRemovePerson, onChangeTier, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate, onGenerateSummary, onSaveSummary, summarizing, showToast, onBack }) {
-  const stage = STAGES.find(s => s.id === deal.stage);
-  const tier = DEAL_TIERS.find(t => t.id === (deal.tier || "Untiered"));
-  const cityOpts = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
-  const [filter, setFilter] = useState("all");
-  const [personFilter, setPersonFilter] = useState(null);
-
-  const junctionPeople = people.map(p => ({ id: p.id, contact_id: p.contact_id, role: p.role_in_deal, contact: p.contacts, source: "junction" }));
-  const edgePeople = networkEdges
-    .filter(ne => ne.source_type === "contact" && ne.target_type === "deal" && ne.target_id === deal.id)
-    .map(ne => ({ id: ne.id, contact_id: ne.source_id, role: ne.notes || NETWORK_EDGE_RELATIONSHIPS.find(r => r.id === ne.relationship)?.label, contact: contacts.find(c => c.id === ne.source_id), source: "edge" }))
-    .filter(p => p.contact && !junctionPeople.some(jp => jp.contact_id === p.contact_id));
-  const peopleNorm = [...junctionPeople, ...edgePeople];
-  const filtered = activities
-    .filter(a => filter === "all" || a.type === filter)
-    .filter(a => !personFilter || a.contact_id === personFilter)
-    .slice().reverse();
-  const filteredPersonName = personFilter ? peopleNorm.find(p => p.contact_id === personFilter)?.contact?.name : null;
-
-  const dealOrg = organizations.find(o => (o.name || "").toLowerCase() === (deal.company || "").toLowerCase());
-  const pathsIn = findNetworkPaths(deal, dealOrg, networkEdges, organizations, enablers, contacts, contactRoles);
-
-  return (
-    <div className="deal-sheet">
-      <button onClick={onBack} className="sheet-back">← Back to Pipeline</button>
-
-      <div className="sheet-top">
-        <div className="sheet-top-row">
-          <div>
-            <InlineText value={deal.company} onSave={(v) => v.trim() && onUpdate({ company: v.trim() })} className="sheet-company" placeholder="Company name" />
-            <div className="sheet-meta-row">
-              <BadgeSelect options={STAGES} value={deal.stage || "prospecting"} color={stage?.color} onChange={(v) => onChangeStage(v)} dot title="Change stage" />
-              <BadgeSelect options={DEAL_TIERS} value={deal.tier || "Untiered"} color={tier?.color} onChange={(v) => onChangeTier(deal.id, v)} title="Change tier" />
-              <InlineSelectField
-                value={deal.city || ""}
-                options={cityOpts}
-                fieldName="city"
-                onAddCustomOption={onAddCustomOption}
-                onSave={(v) => onUpdate({ city: v || null })}
-                placeholder="📍 Add city"
-                render={(v) => <span className="city-pin">📍 {v || "Add city"}</span>}
-              />
-              {deal.value > 0 && <span className="badge val-badge">${Number(deal.value).toLocaleString()}</span>}
-            </div>
-            <div className="sheet-contact">
-              <InlineText value={deal.contact_name} onSave={(v) => onUpdate({ contact_name: v })} placeholder="Contact name" />
-              <span className="sheet-contact-sep"> · </span>
-              <InlineText value={deal.contact_role} onSave={(v) => onUpdate({ contact_role: v })} placeholder="Role" />
-            </div>
-          </div>
-          <div className="sheet-actions">
-            <button onClick={() => { if (confirm("Delete this deal?")) onDelete(deal.id); }} className="btn-sec btn-danger">Delete</button>
-          </div>
-        </div>
-        <div className="next-box sheet-next">
-          <span className="next-label">Next:</span>{" "}
-          <InlineText value={deal.next_action} onSave={(v) => onUpdate({ next_action: v })} placeholder="Add next action" />
-        </div>
-      </div>
-
-      <SummaryCard
-        entity={deal}
-        activities={activities}
-        onGenerateSummary={onGenerateSummary}
-        onSaveSummary={onSaveSummary}
-        summarizing={summarizing}
-      />
-
-      <div className="people-section">
-        <div className="section-label">Notes</div>
-        <NotesEditor value={deal.notes} onSave={(v) => onUpdate({ notes: v })} />
-      </div>
-
-      <PeopleSection
-        people={peopleNorm}
-        activities={activities}
-        contacts={contacts}
-        institutionName={deal.company}
-        customOptions={customOptions}
-        onAddCustomOption={onAddCustomOption}
-        selectedContactId={personFilter}
-        onSelectPerson={(id) => setPersonFilter(p => p === id ? null : id)}
-        onAdd={onAddPerson}
-        onAddNew={(form) => onAddPersonNew(form)}
-        onRemove={onRemovePerson}
-      />
-
-      <div className="people-section">
-        <div className="section-label">Paths In</div>
-        {pathsIn.length === 0 ? (
-          <div className="empty-small">No indirect paths found. Add organizations and connections in the Network tab to surface them here.</div>
-        ) : (
-          <div className="todo-list">
-            {pathsIn.map(p => (
-              <div key={p.id} className="path-row">
-                <div className="path-chain">
-                  You {p.chain.map((name, i) => (
-                    <span key={i}>{"> "}{name}{p.via[i] ? ` (${p.via[i]})` : ""}{i < p.chain.length - 1 ? " " : ""}</span>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="people-section">
-        <div className="section-label">Enabler Paths</div>
-        {dealEnablers.length === 0 ? (
-          <div className="empty-small">No enablers connected to this deal.</div>
-        ) : (
-          <div className="people-grid">
-            {dealEnablers.map(de => {
-              const en = enablers.find(x => x.id === de.enabler_id);
-              const rel = DEAL_ENABLER_RELATIONSHIPS.find(r => r.id === de.relationship);
-              const str = STRENGTHS.find(s => s.id === de.strength);
-              if (!en) return null;
-              return (
-                <div key={de.id} className="person-card" onClick={() => onNavigate({ type: "enabler", id: en.id })}>
-                  <div className="person-name">{en.name}</div>
-                  <div className="todo-meta-row mb-sm">
-                    {rel && <span className="badge">{rel.label}</span>}
-                    {str && <span className="badge" style={{background:str.color+"22",color:str.color,border:`1px solid ${str.color}44`}}>{str.label}</span>}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
-
-      <QuickAdd
-        dealId={deal.id}
-        contactId={deal.contact_id || null}
-        customOptions={customOptions}
-        onAddCustomOption={onAddCustomOption}
-        onAddActivity={onAddActivity}
-        showToast={showToast}
-      />
-
-      <div className="timeline">
-        <div className="section-label">Activity Timeline</div>
-        {filteredPersonName && (
-          <div className="person-filter-badge">Filtered to {filteredPersonName} <button onClick={() => setPersonFilter(null)} className="person-filter-clear">✕</button></div>
-        )}
-        <div className="timeline-tabs">
-          {TIMELINE_TABS.map(t => (
-            <button key={t.id} onClick={() => setFilter(t.id)} className={`tag-btn ${filter === t.id ? "active" : ""}`}>{t.label}</button>
-          ))}
-        </div>
-        <div className="timeline-list">
-          {filtered.length === 0 && <div className="empty-small">No activities yet</div>}
-          {filtered.map(a => (
-            <div key={a.id} className="timeline-item">
-              <ActivityGlyph type={a.type} />
-              <div>
-                <div className="act-desc">{a.description}</div>
-                <div className="act-date">{formatDate(a.created_at)}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // Resolves the full set of institutions a contact holds a role at, reading
 // contact_roles first and falling back to the legacy junction tables / edges /
@@ -2510,8 +2329,11 @@ function PriorityBadge({ priority }) {
   return <span className="badge priority-badge" style={{background:p.color+"22",color:p.color,border:`1px solid ${p.color}44`}}>{p.label}</span>;
 }
 
+// Collapsible AI summary. Default collapsed to a 2-line preview; click the header
+// or chevron to expand. Click the expanded body to edit inline.
 function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, summarizing }) {
   const [editing, setEditing] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const [draft, setDraft] = useState(entity.ai_summary || "");
 
   useEffect(() => {
@@ -2523,14 +2345,17 @@ function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, sum
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entity.id]);
 
-  const startEdit = () => { setDraft(entity.ai_summary || ""); setEditing(true); };
+  const startEdit = (e) => { e && e.stopPropagation(); setDraft(entity.ai_summary || ""); setCollapsed(false); setEditing(true); };
   const save = async () => { await onSaveSummary(entity.id, draft); setEditing(false); };
 
   return (
     <div className="ai-summary">
-      <div className="ai-summary-header">
+      <div className="ai-summary-header ai-summary-toggle" onClick={() => !editing && setCollapsed(c => !c)}>
         <div className="section-label">AI Summary</div>
-        {!editing && entity.ai_summary && !summarizing && <button onClick={startEdit} className="icon-btn" title="Edit summary">✎ Edit</button>}
+        <div className="ai-summary-header-right">
+          <button onClick={(e) => { e.stopPropagation(); onGenerateSummary(entity, activities); }} className="link-btn" disabled={summarizing}>Regenerate</button>
+          {!editing && <span className="ai-summary-chevron">{collapsed ? "▸" : "▾"}</span>}
+        </div>
       </div>
       {summarizing ? (
         <div className="empty-small">Updating summary...</div>
@@ -2544,14 +2369,11 @@ function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, sum
         </>
       ) : entity.ai_summary ? (
         <>
-          <div className="ai-summary-text" onClick={startEdit} title="Click to edit">{entity.ai_summary}</div>
-          <div className="ai-summary-updated">Last updated: {formatDate(entity.ai_summary_updated_at)}</div>
+          <div className={`ai-summary-text ${collapsed ? "ai-summary-collapsed" : ""}`} onClick={startEdit} title="Click to edit">{entity.ai_summary}</div>
+          {!collapsed && <div className="ai-summary-updated">Last updated: {formatDate(entity.ai_summary_updated_at)}</div>}
         </>
       ) : (
         <div className="empty-small">No summary yet.</div>
-      )}
-      {!editing && (
-        <button onClick={() => onGenerateSummary(entity, activities)} className="link-btn" disabled={summarizing}>Regenerate</button>
       )}
     </div>
   );
@@ -2910,13 +2732,15 @@ function InstitutionSheet({
   dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {},
   onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
-  onChangeStage, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack,
+  onChangeStage, onChangeTier, todos = [], onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
+  onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Network",
 }) {
   const [filter, setFilter] = useState("all");
   const [addPersonOpen, setAddPersonOpen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const meta = institutionTypeMeta(inst.type, customOptions);
   const stage = STAGES.find(s => s.id === (inst.stage || "prospecting"));
+  const tier = DEAL_TIERS.find(t => t.id === (inst.deal?.tier || "Untiered"));
   const typeOpts = optionsWithCustom(INSTITUTION_TYPES, customOptions, "institution_type");
   const cityOpts = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
   // Auto-research an institution the first time its sheet opens with no description.
@@ -3040,7 +2864,7 @@ function InstitutionSheet({
 
   return (
     <div className="deal-sheet">
-      <button onClick={onBack} className="sheet-back">← Back to Network</button>
+      <button onClick={onBack} className="sheet-back">← {backLabel}</button>
 
       <div className="sheet-top">
         <div className="sheet-top-row">
@@ -3057,15 +2881,10 @@ function InstitutionSheet({
               />
               {inst.isTarget && <span className="badge flag-badge-target">Target</span>}
               {inst.isEnabler && <span className="badge flag-badge-enabler">Enabler</span>}
-              <InlineSelectField
-                value={inst.city || ""}
-                options={cityOpts}
-                fieldName="city"
-                onAddCustomOption={onAddCustomOption}
-                onSave={(v) => onUpdateCity(v)}
-                placeholder="📍 Add city"
-                render={(v) => <span className="city-pin">📍 {v ? `${v}${inst.region ? `, ${inst.region}` : ""}` : "Add city"}</span>}
-              />
+              {inst.isTarget && onChangeTier && (
+                <BadgeSelect options={DEAL_TIERS} value={inst.deal?.tier || "Untiered"} color={tier?.fg} onChange={(v) => onChangeTier(v)} title="Change tier" />
+              )}
+              <CityEditor city={inst.city} options={cityOpts} onAddCustomOption={onAddCustomOption} onSave={(v) => onUpdateCity(v)} />
             </div>
             <div className="classification-row">
               <label className="checkbox-label"><input type="checkbox" checked={inst.isTarget} onChange={(e) => { if (!e.target.checked && inst.dealId && !confirm("Unchecking Target removes the linked pipeline deal (its people and stage). Activity history is kept. Continue?")) return; onSetFlag("target", e.target.checked); }} /> Target</label>
@@ -3224,6 +3043,10 @@ function InstitutionSheet({
             </div>
           )}
         </div>
+      )}
+
+      {(inst.dealId || inst.enablerId) && onAddTodo && (
+        <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
       )}
 
       <div className="people-section">
@@ -3529,7 +3352,7 @@ const NETWORK_SUBTABS = [{ id: "institutions", label: "Institutions" }, { id: "p
 // name-keyed union of deals/enablers/organizations; people are contacts.
 function NetworkTab({
   institutions, contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles,
-  customOptions, onAddCustomOption, onAddInstitution, onAddPersonWithRoles, onUpdateInstitution, onUpdateInstitutionCity, onOpenInstitution, onOpenPerson,
+  customOptions, onAddCustomOption, onAddInstitution, onAddPersonWithRoles, onUpdateInstitution, onUpdateInstitutionCity, onUpdateContact, onLinkPersonToInstitution, onOpenInstitution, onOpenPerson,
 }) {
   const [subtab, setSubtab] = useState("institutions");
   const [search, setSearch] = useState("");
@@ -3540,8 +3363,9 @@ function NetworkTab({
   const [warmthFilter, setWarmthFilter] = useState("");
   const [instFilter, setInstFilter] = useState("");
   const [activeForm, setActiveForm] = useState(null);
+  const [peopleView, setPeopleView] = useState("table");
 
-  const cities = Array.from(new Set(institutions.map(i => i.city).filter(Boolean))).sort();
+  const cities = Array.from(new Set(institutions.flatMap(i => parseCities(i.city)))).sort();
   const types = Array.from(new Set(institutions.map(i => i.type).filter(Boolean)));
   const orderedTypes = [
     ...INSTITUTION_TYPES.map(t => t.id).filter(id => types.includes(id)),
@@ -3551,7 +3375,7 @@ function NetworkTab({
   const q = search.trim().toLowerCase();
   const filteredInst = institutions.filter(i =>
     (!typeFilter || i.type === typeFilter) &&
-    (!cityFilter || i.city === cityFilter) &&
+    (!cityFilter || parseCities(i.city).includes(cityFilter)) &&
     (!targetsOnly || i.isTarget) &&
     (!enablersOnly || i.isEnabler) &&
     (!q || i.name.toLowerCase().includes(q)));
@@ -3561,7 +3385,7 @@ function NetworkTab({
     const roles = resolveContactRoles(c, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles });
     const roleStr = roles.map(r => `${r.role_title ? `${r.role_title} at ` : ""}${r.institutionName}`).join(", ");
     const connCount = roles.length + networkEdges.filter(ne => (ne.source_type === "contact" && ne.source_id === c.id) || (ne.target_type === "contact" && ne.target_id === c.id)).length;
-    const personCities = Array.from(new Set(roles.map(r => (r.entity_type === "deal" ? r.institution.city : r.institution.city)).filter(Boolean)));
+    const personCities = Array.from(new Set(roles.flatMap(r => parseCities(r.institution.city))));
     return { contact: c, roles, roleStr, connCount, cities: personCities };
   });
   const filteredPeople = peopleData.filter(p =>
@@ -3634,15 +3458,7 @@ function NetworkTab({
                           <div className="institution-flags-row">
                             {inst.isTarget && <span className="badge flag-badge-target">Target</span>}
                             {inst.isEnabler && <span className="badge flag-badge-enabler">Enabler</span>}
-                            <InlineSelectField
-                              value={inst.city || ""}
-                              options={cityOptsAll}
-                              fieldName="city"
-                              onAddCustomOption={onAddCustomOption}
-                              onSave={(v) => onUpdateInstitutionCity(inst, v)}
-                              placeholder="📍 Add city"
-                              render={(v) => <span className="city-pin">📍 {v || "Add city"}</span>}
-                            />
+                            <InlineCity city={inst.city} options={cityOptsAll} onAddCustomOption={onAddCustomOption} onSave={(v) => onUpdateInstitutionCity(inst, v)} compact />
                             {stage && <span className="badge" style={{background:stage.color+"22",color:stage.color,border:`1px solid ${stage.color}44`}}>{stage.label}</span>}
                           </div>
                           <div className="institution-people-count">{ppl.length} {ppl.length === 1 ? "person" : "people"}</div>
@@ -3672,6 +3488,10 @@ function NetworkTab({
       ) : (
         <>
           <div className="network-filter-row">
+            <div className="view-toggle">
+              <button className={`view-toggle-btn ${peopleView === "cards" ? "active" : ""}`} onClick={() => setPeopleView("cards")}>Cards</button>
+              <button className={`view-toggle-btn ${peopleView === "table" ? "active" : ""}`} onClick={() => setPeopleView("table")}>Table</button>
+            </div>
             <SelectWithCustom className="input select-filter" options={[{ id: "", label: "All Warmth" }, ...WARMTH_LEVELS]} value={warmthFilter} onChange={setWarmthFilter} />
             <SelectWithCustom className="input select-filter" options={[{ id: "", label: "All Cities" }, ...toOptions(Array.from(new Set([...SAUDI_CITIES, ...cities])).sort())]} value={cityFilter} onChange={setCityFilter} />
             <select className="input select-filter" value={instFilter} onChange={e => setInstFilter(e.target.value)}>
@@ -3681,6 +3501,17 @@ function NetworkTab({
           </div>
           {filteredPeople.length === 0 ? (
             <div className="empty-state">No people match.</div>
+          ) : peopleView === "table" ? (
+            <PeopleTable
+              people={filteredPeople}
+              institutionNames={instNames}
+              cities={cities}
+              customOptions={customOptions}
+              onAddCustomOption={onAddCustomOption}
+              onUpdateContact={onUpdateContact}
+              onLinkPersonToInstitution={onLinkPersonToInstitution}
+              onOpenPerson={onOpenPerson}
+            />
           ) : (
             <div className="institution-grid">
               {filteredPeople.map(({ contact, roleStr, connCount }) => {
@@ -3702,6 +3533,326 @@ function NetworkTab({
           )}
         </>
       )}
+    </div>
+  );
+}
+
+// A flat editable table cell. Enter or Tab commits and moves focus down the
+// same column (onNext), so a whole column can be filled in rapidly. Escape reverts.
+function TableTextCell({ value, onSave, placeholder, colKey, rowIndex, cellRefs, onNext }) {
+  const [v, setV] = useState(value || "");
+  useEffect(() => { setV(value || ""); }, [value]);
+  const commit = () => { if ((v || "") !== (value || "")) onSave(v); };
+  return (
+    <input
+      ref={(el) => { cellRefs.current[`${rowIndex}:${colKey}`] = el; }}
+      className="table-cell-input"
+      value={v}
+      placeholder={placeholder}
+      onChange={(e) => setV(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || (e.key === "Tab" && !e.shiftKey)) { e.preventDefault(); commit(); onNext(); }
+        else if (e.key === "Escape") { setV(value || ""); e.currentTarget.blur(); }
+      }}
+    />
+  );
+}
+
+// Editable, sortable table of people for rapid data entry (LinkedIn especially).
+function PeopleTable({ people, institutionNames, cities, onUpdateContact, onLinkPersonToInstitution, onOpenPerson }) {
+  const [sort, setSort] = useState({ col: "institution", dir: "asc" });
+  const cellRefs = useRef({});
+  const cityList = Array.from(new Set([...SAUDI_CITIES, ...cities])).sort();
+  const cols = [["name", "Name"], ["role", "Role"], ["institution", "Institution"], ["city", "City"], ["email", "Email"], ["phone", "Phone"], ["linkedin", "LinkedIn"], ["warmth", "Warmth"], ["last", "Last Contacted"]];
+
+  const rows = people.map((p) => {
+    const primary = p.roles.find((r) => r.is_primary) || p.roles[0];
+    return { contact: p.contact, institution: primary ? primary.institutionName : "", roleTitle: p.contact.role || (primary ? primary.role_title : "") || "", extraRoles: Math.max(0, p.roles.length - 1) };
+  });
+  const val = (r, col) => {
+    if (col === "name") return r.contact.name || "";
+    if (col === "role") return r.roleTitle || "";
+    if (col === "institution") return r.institution || "";
+    if (col === "city") return r.contact.city || "";
+    if (col === "email") return r.contact.email || "";
+    if (col === "phone") return r.contact.phone || "";
+    if (col === "warmth") return r.contact.warmth || "";
+    if (col === "last") return r.contact.last_contacted_at || "";
+    return "";
+  };
+  const sorted = [...rows].sort((a, b) => {
+    const dir = sort.dir === "asc" ? 1 : -1;
+    if (sort.col === "institution") {
+      const c = (a.institution || "").localeCompare(b.institution || "");
+      return (c || (a.contact.name || "").localeCompare(b.contact.name || "")) * dir;
+    }
+    return String(val(a, sort.col)).localeCompare(String(val(b, sort.col))) * dir;
+  });
+  const toggleSort = (col) => setSort((s) => (s.col === col ? { col, dir: s.dir === "asc" ? "desc" : "asc" } : { col, dir: "asc" }));
+  const focusCell = (col, idx) => { const el = cellRefs.current[`${idx}:${col}`]; if (el) el.focus(); };
+  const selKey = (e, col, idx) => { if ((e.key === "Tab" && !e.shiftKey) || e.key === "Enter") { e.preventDefault(); focusCell(col, idx + 1); } };
+  const text = (contact, col, idx, placeholder) => (
+    <TableTextCell colKey={col} rowIndex={idx} cellRefs={cellRefs} placeholder={placeholder}
+      value={contact[col] || ""} onSave={(v) => onUpdateContact(contact.id, { [col]: v })} onNext={() => focusCell(col, idx + 1)} />
+  );
+
+  return (
+    <div className="people-table-wrap">
+      <table className="people-table">
+        <thead>
+          <tr>
+            {cols.map(([c, l]) => <th key={c} onClick={() => toggleSort(c)} className={sort.col === c ? "sorted" : ""}>{l}{sort.col === c ? (sort.dir === "asc" ? " ▲" : " ▼") : ""}</th>)}
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r, idx) => {
+            const c = r.contact;
+            const warmth = WARMTH_LEVELS.find((w) => w.id === (c.warmth || "unknown"));
+            return (
+              <tr key={c.id}>
+                <td>{text(c, "name", idx, "Name")}</td>
+                <td className="table-role-cell">{text({ ...c, role: r.roleTitle }, "role", idx, "Role")}{r.extraRoles > 0 && <span className="table-more-roles" title="Has more roles">+{r.extraRoles}</span>}</td>
+                <td>
+                  <select className="table-cell-select" value={r.institution} ref={(el) => { cellRefs.current[`${idx}:institution`] = el; }}
+                    onChange={(e) => e.target.value && onLinkPersonToInstitution(c.id, e.target.value)} onKeyDown={(e) => selKey(e, "institution", idx)}>
+                    <option value="">Set institution...</option>
+                    {institutionNames.map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </td>
+                <td>
+                  <select className="table-cell-select" value={c.city || ""} ref={(el) => { cellRefs.current[`${idx}:city`] = el; }}
+                    onChange={(e) => onUpdateContact(c.id, { city: e.target.value || null })} onKeyDown={(e) => selKey(e, "city", idx)}>
+                    <option value="">City...</option>
+                    {cityList.map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </td>
+                <td>{text(c, "email", idx, "Add email")}</td>
+                <td>{text(c, "phone", idx, "Add phone")}</td>
+                <td className="table-linkedin">{text(c, "linkedin", idx, "Add LinkedIn")}</td>
+                <td>
+                  <select className="table-cell-select table-warmth" value={c.warmth || "unknown"} ref={(el) => { cellRefs.current[`${idx}:warmth`] = el; }}
+                    onChange={(e) => onUpdateContact(c.id, { warmth: e.target.value })} onKeyDown={(e) => selKey(e, "warmth", idx)} style={{ color: warmth?.color, fontWeight: 700 }}>
+                    {WARMTH_LEVELS.map((w) => <option key={w.id} value={w.id}>{w.label}</option>)}
+                  </select>
+                </td>
+                <td className="table-last">{c.last_contacted_at ? formatDate(c.last_contacted_at) : "Never"}</td>
+                <td><button className="table-open-btn" onClick={() => onOpenPerson(c.id)} title="Open profile">↗</button></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ============================================================
+// Boss View: a standalone, mostly read-only dashboard for the boss (Andy).
+// Overview | Pipeline | Key Summaries | Comments. Shareable via ?view=boss.
+// ============================================================
+const BOSS_TABS = [["overview", "Overview"], ["pipeline", "Pipeline"], ["summaries", "Key Summaries"], ["comments", "Comments"]];
+
+function BossView({ deals, activeDeals, enablers, institutions, instByName, todos, activities, customOptions = [], comments = [], onPostComment, standalone = false }) {
+  const [tab, setTab] = useState("overview");
+  const [readDeal, setReadDeal] = useState(null);
+  const totalValue = activeDeals.reduce((s, d) => s + (Number(d.value) || 0), 0);
+  const openTasks = todos.filter((t) => t.status === "open");
+  const overdueCount = openTasks.filter((t) => isOverdue(t.due_date)).length;
+  const valueText = totalValue >= 1000000 ? `$${(totalValue / 1000000).toFixed(1)}M` : totalValue > 0 ? `$${(totalValue / 1000).toFixed(0)}K` : "N/A";
+  const dealCity = (d) => { const i = instByName.get((d.company || "").trim().toLowerCase()); return parseCities(d.city || i?.city || ""); };
+
+  return (
+    <div className={`boss-view ${standalone ? "boss-standalone" : ""}`}>
+      <div className="boss-topbar">
+        <div className="boss-brand"><span className="sidebar-logo">🥭</span><span className="sidebar-wordmark">Mango OS</span><span className="boss-badge">Boss View</span></div>
+        <div className="boss-nav">
+          {BOSS_TABS.map(([id, l]) => <button key={id} className={`boss-nav-btn ${tab === id ? "active" : ""}`} onClick={() => setTab(id)}>{l}</button>)}
+        </div>
+      </div>
+
+      <div className="boss-body">
+        {tab === "overview" && (
+          <>
+            <div className="stats-bar boss-stats">
+              <div className="stat"><div className="stat-label">Active deals</div><div className="stat-value">{activeDeals.length}</div></div>
+              <div className="stat"><div className="stat-label">Pipeline value</div><div className="stat-value">{valueText}</div></div>
+              <div className="stat"><div className="stat-label">Tasks due</div><div className="stat-value">{openTasks.length}</div>{overdueCount > 0 && <div className="stat-delta">{overdueCount} overdue</div>}</div>
+              <div className="stat">
+                <div className="stat-label">Deals by tier</div>
+                <div className="boss-tier-mini">{DEAL_TIERS.filter((t) => t.id !== "Untiered").map((t) => <span key={t.id} className="tier-badge" style={{ background: t.bg, color: t.fg }}>{t.label}: {activeDeals.filter((d) => (d.tier || "Untiered") === t.id).length}</span>)}</div>
+              </div>
+            </div>
+            <div className="boss-section">
+              <div className="section-label">Pipeline health</div>
+              <div className="pipeline-bar">
+                {STAGES.filter((s) => !["won", "lost"].includes(s.id)).map((s) => { const c = activeDeals.filter((d) => d.stage === s.id).length; if (!c) return null; return <div key={s.id} className="bar-seg" style={{ background: s.color, flex: c }}><span className="bar-label">{s.label} ({c})</span></div>; })}
+                {activeDeals.length === 0 && <div className="bar-seg bar-empty">No active deals</div>}
+              </div>
+            </div>
+            <div className="boss-section">
+              <div className="section-label">This week</div>
+              <div className="boss-activity"><div className="boss-act-row">
+                {[[deals.filter((d) => isThisWeek(d.last_activity_at)).length, "deals touched"], [activities.filter((a) => isThisWeek(a.created_at)).length, "activities"], [deals.filter((d) => isThisWeek(d.created_at)).length, "new deals"]].map(([n, l], i) => (
+                  <div key={i}><span className="boss-num">{n}</span> <span className="boss-num-label">{l}</span></div>
+                ))}
+              </div></div>
+            </div>
+          </>
+        )}
+
+        {tab === "pipeline" && (
+          <div className="boss-kanban kanban">
+            {STAGES.map((stage) => {
+              const sd = activeDeals.filter((d) => d.stage === stage.id);
+              return (
+                <div key={stage.id} className="column">
+                  <div className="col-header"><div className="col-title-wrap"><div className="dot" style={{ background: stage.color }} /><span className="col-title">{stage.label}</span></div><span className="col-count">{sd.length}</span></div>
+                  <div className="col-body">
+                    {DEAL_TIERS.map((tier) => {
+                      const td = sd.filter((d) => (d.tier || "Untiered") === tier.id);
+                      if (td.length === 0) return null;
+                      return (
+                        <div key={tier.id} className="tier-group">
+                          <div className="tier-group-header">{tier.label}</div>
+                          {td.map((deal) => {
+                            const inst = instByName.get((deal.company || "").trim().toLowerCase());
+                            const typeMeta = inst?.type ? institutionTypeMeta(inst.type, customOptions) : null;
+                            const t = DEAL_TIERS.find((x) => x.id === (deal.tier || "Untiered"));
+                            return (
+                              <div key={deal.id} className="deal-card" onClick={() => setReadDeal(deal)}>
+                                <div className="deal-card-head"><div className="card-company">{deal.company}</div>{t && t.id !== "Untiered" && <span className="tier-badge" style={{ background: t.bg, color: t.fg }}>{t.label}</span>}</div>
+                                {typeMeta && <span className="badge card-type-badge" style={{ background: typeMeta.color + "22", color: typeMeta.color, border: `1px solid ${typeMeta.color}44` }}>{typeMeta.label}</span>}
+                                <div className="card-city-row"><CityPills city={deal.city || inst?.city} compact />{deal.value > 0 && <span className="card-value">${Number(deal.value).toLocaleString()}</span>}</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+                    {sd.length === 0 && <div className="empty-col">No deals</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {tab === "summaries" && (
+          <div className="section-pad">
+            <div className="section-label">Key Summaries</div>
+            {[...institutions.filter((i) => i.isTarget && i.deal?.ai_summary).map((i) => ({ id: i.key, name: i.name, kind: "Target", summary: i.deal.ai_summary })),
+              ...institutions.filter((i) => i.isEnabler && i.enabler?.ai_summary).map((i) => ({ id: i.key + "-en", name: i.name, kind: "Enabler", summary: i.enabler.ai_summary })),
+              ...institutions.filter((i) => !i.isTarget && !i.isEnabler && i.org?.ai_summary).map((i) => ({ id: i.key + "-org", name: i.name, kind: "Institution", summary: i.org.ai_summary }))]
+              .map((item) => <BossSummaryCard key={item.id} item={item} />)}
+            {institutions.every((i) => !i.deal?.ai_summary && !i.enabler?.ai_summary && !i.org?.ai_summary) && <div className="empty-small">No summaries yet.</div>}
+
+            <div className="section-label boss-section-label">Top Action Items</div>
+            <div className="action-items">
+              {sortTodos(openTasks).slice(0, 10).map((t) => {
+                const linkedDeal = t.deal_id ? deals.find((d) => d.id === t.deal_id) : null;
+                const linkedEnabler = t.enabler_id ? enablers.find((en) => en.id === t.enabler_id) : null;
+                return (
+                  <div key={t.id} className="action-item-row">
+                    <PriorityBadge priority={t.priority} />
+                    <span className="action-item-title">{t.title}</span>
+                    {(linkedDeal || linkedEnabler) && <span className="action-item-link">{linkedDeal ? linkedDeal.company : linkedEnabler.name}</span>}
+                    {t.due_date && <span className="todo-due">Due {formatDate(t.due_date)}</span>}
+                  </div>
+                );
+              })}
+              {openTasks.length === 0 && <div className="empty-small">No open action items.</div>}
+            </div>
+          </div>
+        )}
+
+        {tab === "comments" && <BossComments comments={comments} onPost={onPostComment} />}
+      </div>
+
+      {readDeal && (() => {
+        const inst = instByName.get((readDeal.company || "").trim().toLowerCase());
+        const st = STAGES.find((s) => s.id === readDeal.stage);
+        const t = DEAL_TIERS.find((x) => x.id === (readDeal.tier || "Untiered"));
+        const acts = activities.filter((a) => a.deal_id === readDeal.id).slice(0, 6);
+        return (
+          <div className="overlay" onClick={() => setReadDeal(null)}><div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header"><div className="modal-title">{readDeal.company}</div><button onClick={() => setReadDeal(null)} className="close-btn">✕</button></div>
+            <div className="sheet-meta-row">
+              {st && <span className="badge" style={{ background: st.color + "22", color: st.color, border: `1px solid ${st.color}44` }}>{st.label}</span>}
+              {t && t.id !== "Untiered" && <span className="tier-badge" style={{ background: t.bg, color: t.fg }}>{t.label}</span>}
+              <CityPills city={readDeal.city || inst?.city} />
+              {readDeal.value > 0 && <span className="badge val-badge">${Number(readDeal.value).toLocaleString()}</span>}
+            </div>
+            {readDeal.contact_name && <div className="sheet-contact" style={{ marginTop: 8 }}>{readDeal.contact_name}{readDeal.contact_role ? ` · ${readDeal.contact_role}` : ""}</div>}
+            {readDeal.ai_summary && <><div className="section-label" style={{ marginTop: 16 }}>AI Summary</div><div className="key-summary-text">{readDeal.ai_summary}</div></>}
+            <div className="section-label" style={{ marginTop: 16 }}>Recent activity</div>
+            {acts.length === 0 ? <div className="empty-small">No activity logged.</div> : (
+              <div className="timeline-list">{acts.map((a) => <div key={a.id} className="timeline-item"><ActivityGlyph type={a.type} /><div><div className="act-desc">{a.description}</div><div className="act-date">{formatDate(a.created_at)}</div></div></div>)}</div>
+            )}
+          </div></div>
+        );
+      })()}
+    </div>
+  );
+}
+
+function BossSummaryCard({ item }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="key-summary-card">
+      <div className="key-summary-header boss-summary-head" onClick={() => setOpen((o) => !o)}>
+        <span>{item.name} <span className="boss-summary-kind">{item.kind}</span></span>
+        <span className="ai-summary-chevron">{open ? "▾" : "▸"}</span>
+      </div>
+      <div className={`key-summary-text ${open ? "" : "ai-summary-collapsed"}`}>{item.summary}</div>
+    </div>
+  );
+}
+
+function BossComments({ comments, onPost }) {
+  const [author, setAuthor] = useState("Fahed Al Essa");
+  const [text, setText] = useState("");
+  const [file, setFile] = useState(null);
+  const [posting, setPosting] = useState(false);
+  const fileRef = useRef(null);
+  const pickFile = (e) => { const f = e.target.files?.[0]; if (!f) return; const reader = new FileReader(); reader.onload = () => setFile({ name: f.name, data: reader.result }); reader.readAsDataURL(f); };
+  const send = async () => {
+    if ((!text.trim() && !file) || posting) return;
+    setPosting(true);
+    try { await onPost({ author, content: text, file_name: file?.name, file_data: file?.data }); setText(""); setFile(null); if (fileRef.current) fileRef.current.value = ""; } finally { setPosting(false); }
+  };
+  const sorted = [...comments].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  return (
+    <div className="section-pad boss-comments">
+      <div className="boss-comment-box">
+        <div className="boss-comment-as">
+          <span className="boss-as-label">Post as</span>
+          {["Fahed Al Essa", "Andy Liu"].map((a) => <button key={a} className={`boss-as-btn ${author === a ? "active" : ""}`} onClick={() => setAuthor(a)}>{a}</button>)}
+        </div>
+        <textarea className="input textarea boss-comment-input" placeholder="Write a comment..." value={text} onChange={(e) => setText(e.target.value)} />
+        {file && <div className="boss-file-chip">📎 {file.name}<button onClick={() => { setFile(null); if (fileRef.current) fileRef.current.value = ""; }} className="city-pill-x">✕</button></div>}
+        <div className="boss-comment-actions">
+          <button className="boss-clip-btn" onClick={() => fileRef.current && fileRef.current.click()} title="Attach file">📎</button>
+          <input ref={fileRef} type="file" className="photo-input-hidden" onChange={pickFile} />
+          <button className="btn-primary" onClick={send} disabled={posting || (!text.trim() && !file)}>Send</button>
+        </div>
+      </div>
+      <div className="boss-comment-feed">
+        {sorted.length === 0 && <div className="empty-small">No comments yet. Start the conversation.</div>}
+        {sorted.map((c) => (
+          <div key={c.id} className="boss-comment">
+            <Avatar name={c.author} size={34} />
+            <div className="boss-comment-main">
+              <div className="boss-comment-meta"><span className="boss-comment-author">{c.author}</span><span className="boss-comment-time">{formatDateTime(c.created_at)}</span></div>
+              {c.content && <div className="boss-comment-text">{c.content}</div>}
+              {c.file_data && (String(c.file_data).startsWith("data:image")
+                ? <img className="boss-comment-img" src={c.file_data} alt={c.file_name || "attachment"} />
+                : <a className="boss-comment-file" href={c.file_data} download={c.file_name || "file"}>📎 {c.file_name || "Download attachment"}</a>)}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
