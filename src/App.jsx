@@ -1,10 +1,16 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
 import { api } from "./supabase";
 import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import MapTab from "./MapTab";
 import "./styles.css";
+
+// Boss View (?view=boss) renders the full app in read-only mode: same layout and
+// data as Fahed sees, but every edit affordance is disabled or hidden. Components
+// read this instead of threading a prop through every level.
+const ReadOnlyContext = createContext(false);
+const useReadOnly = () => useContext(ReadOnlyContext);
 
 // Initial-based avatars: deterministic color per name (cycles the design palette),
 // first+last initials. Replaces emoji/photo avatars everywhere people are shown.
@@ -55,7 +61,7 @@ function NavIcon({ shape }) {
 
 // Left sidebar: wordmark, primary nav (geometric icons), a More section for
 // Reports/Boss View, static Saved Views, and a user card pinned to the bottom.
-function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0 }) {
+function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0, bossMode = false }) {
   const nav = [
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Ecosystem", shape: "circle" },
@@ -64,7 +70,6 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
   ];
   const more = [
     { id: "reports", label: "Reports" },
-    { id: "boss", label: "Boss View" },
   ];
   const mapView = view === "institution-sheet" ? sheetOrigin : view === "person-sheet" ? "network" : view;
   return (
@@ -84,15 +89,19 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
         ))}
       </nav>
 
-      <div className="sidebar-section-label">More</div>
-      <div className="sidebar-more">
-        {more.map((n) => (
-          <button key={n.id} onClick={() => setView(n.id)} className={`nav-item nav-item-sm ${mapView === n.id ? "active" : ""}`}>
-            <span className="nav-bar" />
-            <span className="nav-label">{n.label}</span>
-          </button>
-        ))}
-      </div>
+      {!bossMode && (
+        <>
+          <div className="sidebar-section-label">More</div>
+          <div className="sidebar-more">
+            {more.map((n) => (
+              <button key={n.id} onClick={() => setView(n.id)} className={`nav-item nav-item-sm ${mapView === n.id ? "active" : ""}`}>
+                <span className="nav-bar" />
+                <span className="nav-label">{n.label}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
 
       <div className="sidebar-section-label">Saved Views</div>
       <div className="sidebar-saved">
@@ -101,14 +110,27 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
         ))}
       </div>
 
-      <div className="sidebar-user">
-        <Avatar name="Fahed Al Essa" size={34} initials="FA" />
-        <div className="sidebar-user-meta">
-          <div className="sidebar-user-name">Fahed Al Essa</div>
-          <div className="sidebar-user-role">VP of Commercial</div>
+      {bossMode ? (
+        <div className="sidebar-user">
+          <Avatar name="Andy Liu" size={34} initials="AL" />
+          <div className="sidebar-user-meta">
+            <div className="sidebar-user-name">Andy Liu</div>
+            <div className="sidebar-user-role">CCO</div>
+            <div className="sidebar-readonly-label">Read-only</div>
+          </div>
         </div>
-      </div>
-      <div className="sidebar-api-calls" title="Anthropic API calls made today (resets at midnight)">API calls today: {apiCallsToday}</div>
+      ) : (
+        <>
+          <div className="sidebar-user">
+            <Avatar name="Fahed Al Essa" size={34} initials="FA" />
+            <div className="sidebar-user-meta">
+              <div className="sidebar-user-name">Fahed Al Essa</div>
+              <div className="sidebar-user-role">VP of Commercial</div>
+            </div>
+          </div>
+          <div className="sidebar-api-calls" title="Anthropic API calls made today (resets at midnight)">API calls today: {apiCallsToday}</div>
+        </>
+      )}
     </aside>
   );
 }
@@ -147,9 +169,11 @@ function parseProfileNotes(notes) {
 // Single-user app: click a value to edit it in place. Enter or blur saves,
 // Escape cancels. onSave only fires when the value actually changed.
 function InlineText({ value, onSave, placeholder = "Add...", className = "", multiline = false, rows = 2 }) {
+  const readOnly = useReadOnly();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value || "");
   const ref = useRef(null);
+  if (readOnly) return <span className={className}>{value || ""}</span>;
   useEffect(() => {
     if (editing && ref.current) {
       ref.current.focus();
@@ -180,9 +204,11 @@ function InlineText({ value, onSave, placeholder = "Add...", className = "", mul
 
 // Always-visible scratchpad textarea. Saves on blur, never behind an edit button.
 function NotesEditor({ value, onSave, placeholder = "Add notes..." }) {
+  const readOnly = useReadOnly();
   const [draft, setDraft] = useState(value || "");
   useEffect(() => { setDraft(value || ""); }, [value]);
   const commit = () => { if ((draft || "") !== (value || "")) onSave(draft); };
+  if (readOnly) return <div className="notes-readonly">{value ? value : <span className="empty-small">No notes.</span>}</div>;
   return (
     <textarea
       className="input notes-editor"
@@ -197,6 +223,11 @@ function NotesEditor({ value, onSave, placeholder = "Add notes..." }) {
 // A colored pill that is a real <select>: click opens the native dropdown, the
 // chosen value saves immediately. Used for stage / tier / type / warmth / priority.
 function BadgeSelect({ options, value, color = "#9A8F7C", onChange, dot = false, title }) {
+  const readOnly = useReadOnly();
+  if (readOnly) {
+    const label = options.find((o) => o.id === value)?.label || value;
+    return <span className="badge" style={{ background: color + "22", color, border: `1px solid ${color}44` }} title={title}>{dot && <span className="warmth-dot" style={{ background: color }} />}{label}</span>;
+  }
   return (
     <span className={`badge-select-wrap ${dot ? "has-dot" : ""}`} title={title}>
       {dot && <span className="badge-select-dot" style={{ background: color }} />}
@@ -216,8 +247,10 @@ function BadgeSelect({ options, value, color = "#9A8F7C", onChange, dot = false,
 // dropdown that includes custom options and "+ Add custom"; picking a value saves
 // immediately. Used for institution type and city on cards and sheets.
 function InlineSelectField({ value, options, onSave, onAddCustomOption = () => {}, fieldName, render, placeholder = "Add..." }) {
+  const readOnly = useReadOnly();
   const [editing, setEditing] = useState(false);
   const wrapRef = useRef(null);
+  if (readOnly) return <span>{render ? render(value) : (value || "")}</span>;
   useEffect(() => {
     if (!editing || !wrapRef.current) return;
     const el = wrapRef.current.querySelector("select, input");
@@ -278,8 +311,10 @@ function CityPills({ city, compact = false }) {
 // "Add city" dropdown (with custom options and "+ Add custom"). Saves the
 // serialized value immediately.
 function CityEditor({ city, options, onSave, onAddCustomOption = () => {} }) {
+  const readOnly = useReadOnly();
   const [adding, setAdding] = useState(false);
   const cities = parseCities(city);
+  if (readOnly) return cities.length ? <CityPills city={city} /> : null;
   const remove = (c) => onSave(serializeCities(cities.filter((x) => x !== c)));
   const add = (c) => { if (c && !cities.includes(c)) onSave(serializeCities([...cities, c])); setAdding(false); };
   return (
@@ -301,8 +336,10 @@ function CityEditor({ city, options, onSave, onAddCustomOption = () => {} }) {
 // Compact-by-default city control. Shows pins (first + "N more" on cards); click
 // to expand into the multi-city editor. Used on cards; sheets use CityEditor.
 function InlineCity({ city, options, onSave, onAddCustomOption = () => {}, compact = false }) {
+  const readOnly = useReadOnly();
   const [editing, setEditing] = useState(false);
   const cities = parseCities(city);
+  if (readOnly) return cities.length ? <CityPills city={city} compact={compact} /> : null;
   if (editing) {
     return (
       <span className="inline-city-editing" onClick={(e) => e.stopPropagation()}>
@@ -615,9 +652,10 @@ export default function App() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // Boss View can be opened standalone via ?view=boss (shareable link, no sidebar).
-  const [bossStandalone] = useState(() => new URLSearchParams(window.location.search).get("view") === "boss");
-  useEffect(() => { if (bossStandalone) setView("boss"); }, [bossStandalone]);
+  // Boss View: ?view=boss loads the FULL app in read-only mode (Andy Liu). Same
+  // tabs, sidebar, and data as Fahed; every edit affordance is hidden or disabled.
+  const [bossMode] = useState(() => new URLSearchParams(window.location.search).get("view") === "boss");
+  const commentAuthor = bossMode ? "Andy Liu" : "Fahed Al Essa";
 
   // Keep the sidebar API-call counter in sync. bumpApiCalls dispatches this event;
   // also refresh on focus so a day rollover shows the reset count.
@@ -628,17 +666,34 @@ export default function App() {
     return () => { window.removeEventListener("mango-api-call", sync); window.removeEventListener("focus", sync); };
   }, []);
 
-  const postBossComment = async ({ author, content, file_name, file_data }) => {
+  const postBossComment = async ({ author, content, file_name, file_data, deal_id, enabler_id, organization_id }) => {
     const text = (content || "").trim();
     if (!text && !file_data) return;
     try {
       const clean = { author, content: text };
       if (file_name) clean.file_name = file_name;
       if (file_data) clean.file_data = file_data;
+      if (deal_id) clean.deal_id = deal_id;
+      if (enabler_id) clean.enabler_id = enabler_id;
+      if (organization_id) clean.organization_id = organization_id;
       await api("boss_comments", "POST", clean);
       await loadData();
     } catch { showToast("Error posting comment"); }
   };
+
+  // Resolves a tagged comment to the institution/deal it references, for the
+  // "re: <name>" chip in the floating panel.
+  const commentTargetName = (c) => {
+    if (c.deal_id) return deals.find((d) => d.id === c.deal_id)?.company || null;
+    if (c.enabler_id) return enablers.find((e) => e.id === c.enabler_id)?.name || null;
+    if (c.organization_id) return organizations.find((o) => o.id === c.organization_id)?.name || null;
+    return null;
+  };
+  // Fahed's unread badge: comments from Andy newer than the last time Fahed
+  // opened the comment panel (stored in localStorage).
+  const [commentsSeenAt, setCommentsSeenAt] = useState(() => localStorage.getItem("mango-comments-seen") || "");
+  const markCommentsSeen = () => { const now = new Date().toISOString(); localStorage.setItem("mango-comments-seen", now); setCommentsSeenAt(now); };
+  const unreadComments = bossMode ? 0 : bossComments.filter((c) => c.author !== "Fahed Al Essa" && (!commentsSeenAt || new Date(c.created_at) > new Date(commentsSeenAt))).length;
 
   // Kick back to the Ecosystem tab if the open person's contact was deleted elsewhere
   useEffect(() => {
@@ -1494,7 +1549,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     const t = DEAL_TIERS.find((x) => x.id === (deal.tier || "Untiered"));
     const saveCity = (v) => (inst ? updateInstitutionCity(inst, v) : updateDeal(deal.id, { city: v || null }));
     return (
-      <div key={deal.id} draggable onDragStart={(e) => e.dataTransfer.setData("dealId", deal.id)}
+      <div key={deal.id} draggable={!bossMode} onDragStart={bossMode ? undefined : (e) => e.dataTransfer.setData("dealId", deal.id)}
         onClick={() => openInstitution(deal.company, "pipeline")}
         className="deal-card">
         <div className="deal-card-head">
@@ -1534,22 +1589,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
   if (loading) return <div className="app loading-screen"><div className="loading-text">Loading Mango OS...</div></div>;
 
-  if (bossStandalone) {
-    return (
-      <div className="app">
-        {toast && <div className="toast">{toast}</div>}
-        <main className="main">
-          <BossView deals={deals} activeDeals={activeDeals} enablers={enablers} institutions={institutions} instByName={instByName} todos={todos} activities={activities} contacts={contacts} customOptions={customOptions} comments={bossComments} onPostComment={postBossComment} standalone />
-        </main>
-      </div>
-    );
-  }
-
   return (
+    <ReadOnlyContext.Provider value={bossMode}>
     <div className="app">
       {toast && <div className="toast">{toast}</div>}
 
-      <Sidebar view={view} setView={setView} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} apiCallsToday={apiCallsToday} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} />
+      <Sidebar view={view} setView={setView} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} apiCallsToday={apiCallsToday} bossMode={bossMode} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} />
 
       <main className="main">
 
@@ -1620,6 +1665,13 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onOpenPerson={openPerson}
             backLabel={sheetOrigin === "pipeline" ? "Back to Pipeline" : "Back to Ecosystem"}
             onBack={() => { setView(sheetOrigin); setInstitutionSheetKey(null); }}
+            bossNotesSlot={(() => {
+              const tagged = bossComments.filter((c) => (inst.dealId && c.deal_id === inst.dealId) || (inst.enablerId && c.enabler_id === inst.enablerId) || (inst.orgId && c.organization_id === inst.orgId));
+              if (!bossMode && tagged.length === 0) return null;
+              const primary = institutionPrimaryEntity(inst);
+              const tag = primary ? { [`${primary.type}_id`]: primary.id } : {};
+              return <BossNotes comments={tagged} entityName={inst.name} tag={tag} author={commentAuthor} onPost={postBossComment} />;
+            })()}
           />
         );
       })()}
@@ -1668,7 +1720,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
               <div className="page-title">Pipeline</div>
               <div className="page-sub">Your commercial deals across the Kingdom</div>
             </div>
-            <button onClick={() => setModal({type:"deal",data:{stage:"prospecting"}})} className="btn-primary">+ New deal</button>
+            {!bossMode && <button onClick={() => setModal({type:"deal",data:{stage:"prospecting"}})} className="btn-primary">+ New deal</button>}
           </div>
           <div className="stats-bar">
             {[[activeDeals.length,"Active deals"],[totalValue > 0 ? (totalValue >= 1000000 ? `$${(totalValue/1000000).toFixed(1)}M` : `$${(totalValue/1000).toFixed(0)}K`) : "N/A","Pipeline value"],[contacts.length,"People"],[institutions.length,"Institutions"],[openTodos.length,"Open tasks"]].map(([v,l],i) => (
@@ -1687,9 +1739,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
               const sd = deals.filter(d => d.stage === stage.id && (tierFilter === "all" || (d.tier || "Untiered") === tierFilter));
               return (
                 <div key={stage.id} className={`column ${dragOver === stage.id ? "drag-over" : ""}`}
-                  onDragOver={(e) => { e.preventDefault(); setDragOver(stage.id); }}
-                  onDragLeave={() => setDragOver(null)}
-                  onDrop={(e) => handleDrop(e, stage.id)}>
+                  onDragOver={bossMode ? undefined : (e) => { e.preventDefault(); setDragOver(stage.id); }}
+                  onDragLeave={bossMode ? undefined : () => setDragOver(null)}
+                  onDrop={bossMode ? undefined : (e) => handleDrop(e, stage.id)}>
                   <div className="col-header">
                     <div className="col-title-wrap"><div className="dot" style={{background: stage.color}} /><span className="col-title">{stage.label}</span></div>
                     <span className="col-count">{sd.length}</span>
@@ -1778,7 +1830,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
               <div className="page-sub">Everything that needs your attention</div>
             </div>
           </div>
-          <TaskQuickAdd deals={activeDeals} enablers={enablers} customOptions={customOptions} onAddCustomOption={addCustomOption} onAdd={saveTodo} />
+          {!bossMode && <TaskQuickAdd deals={activeDeals} enablers={enablers} customOptions={customOptions} onAddCustomOption={addCustomOption} onAdd={saveTodo} />}
           <div className="timeline-tabs mb">
             {TASK_FILTER_TABS.map(t => (
               <button key={t.id} onClick={() => setTaskFilter(t.id)} className={`tag-btn ${taskFilter === t.id ? "active" : ""}`}>{t.label}</button>
@@ -1845,18 +1897,18 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         </div>
       )}
 
-      {/* BOSS VIEW */}
-      {view === "boss" && (
-        <BossView deals={deals} activeDeals={activeDeals} enablers={enablers} institutions={institutions} instByName={instByName} todos={todos} activities={activities} contacts={contacts} customOptions={customOptions} comments={bossComments} onPostComment={postBossComment} />
-      )}
-
       </main>
 
-      {/* MODALS */}
-      {modal?.type === "deal" && <DealForm deal={modal.data} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveDeal} onClose={() => setModal(null)} />}
-      {modal?.type === "contact" && <ContactForm contact={modal.data} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveContact} onClose={() => setModal(null)} />}
-      {modal?.type === "institution" && <InstitutionEditModal institution={modal.data} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveInstitution} onClose={() => setModal(null)} />}
+      {/* Floating two-way comment thread, available on every tab for Fahed and Andy.
+          Only Fahed's opens clear the unread marker (the badge is Fahed's). */}
+      <CommentPanel comments={bossComments} author={commentAuthor} unread={unreadComments} onOpen={bossMode ? undefined : markCommentsSeen} onPost={postBossComment} targetName={commentTargetName} />
+
+      {/* MODALS (creating new records only; hidden in Boss View) */}
+      {!bossMode && modal?.type === "deal" && <DealForm deal={modal.data} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveDeal} onClose={() => setModal(null)} />}
+      {!bossMode && modal?.type === "contact" && <ContactForm contact={modal.data} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveContact} onClose={() => setModal(null)} />}
+      {!bossMode && modal?.type === "institution" && <InstitutionEditModal institution={modal.data} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveInstitution} onClose={() => setModal(null)} />}
     </div>
+    </ReadOnlyContext.Provider>
   );
 }
 
@@ -1964,7 +2016,8 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onAddActivity, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onAddActivity, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, bossNotesSlot }) {
+  const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
   const [roleInst, setRoleInst] = useState("");
@@ -2053,10 +2106,12 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
             </div>
           </div>
           <div className="sheet-actions">
-            <button onClick={() => { if (confirm("Delete this person?")) onDelete(contact.id); }} className="btn-sec btn-danger">Delete</button>
+            {!readOnly && <button onClick={() => { if (confirm("Delete this person?")) onDelete(contact.id); }} className="btn-sec btn-danger">Delete</button>}
           </div>
         </div>
       </div>
+
+      {bossNotesSlot}
 
       <SummaryCard entity={contact} activities={activities} onGenerateSummary={onGenerateSummary} onSaveSummary={onSaveSummary} summarizing={summarizing} />
 
@@ -2083,7 +2138,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
       <div className="people-section">
         <div className="ai-summary-header">
           <div className="section-label">Roles</div>
-          <button onClick={() => setAddingRole(v => !v)} className="btn-copy">{addingRole ? "Cancel" : "+ Add Role"}</button>
+          {!readOnly && <button onClick={() => setAddingRole(v => !v)} className="btn-copy">{addingRole ? "Cancel" : "+ Add Role"}</button>}
         </div>
         {addingRole && (
           <div className="quickadd-inline-row mb-sm">
@@ -2109,7 +2164,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
                       <div className="person-name">{r.institutionName}</div>
                       {r.role_title && <div className="person-role">{r.role_title}</div>}
                     </div>
-                    {r.removable && onRemoveRole && <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this role?")) onRemoveRole(r); }} className="person-remove" title="Remove">✕</button>}
+                    {!readOnly && r.removable && onRemoveRole && <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this role?")) onRemoveRole(r); }} className="person-remove" title="Remove">✕</button>}
                   </div>
                   <div className="todo-meta-row mb-sm">
                     {r.institution.type && badge && <span className="badge" style={{background:badge.color+"22",color:badge.color,border:`1px solid ${badge.color}44`}}>{badge.label}</span>}
@@ -2125,7 +2180,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
       <div className="people-section">
         <div className="ai-summary-header">
           <div className="section-label">Connections</div>
-          <button onClick={() => setAddingConn(v => !v)} className="btn-copy">{addingConn ? "Cancel" : "+ Connect to Person"}</button>
+          {!readOnly && <button onClick={() => setAddingConn(v => !v)} className="btn-copy">{addingConn ? "Cancel" : "+ Connect to Person"}</button>}
         </div>
         {addingConn && (
           <div className="quickadd-inline-row mb-sm">
@@ -2146,7 +2201,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
                 <div onClick={c.onClick} style={{ cursor: "pointer", flex: 1 }}>
                   <div className="path-chain">{c.rel} {c.label}{c.detail ? ` (${c.detail})` : ""}</div>
                 </div>
-                {onRemoveConnection && <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this connection?")) onRemoveConnection(c.id); }} className="person-remove" title="Remove">✕</button>}
+                {!readOnly && onRemoveConnection && <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this connection?")) onRemoveConnection(c.id); }} className="person-remove" title="Remove">✕</button>}
               </div>
             ))}
           </div>
@@ -2180,6 +2235,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
 }
 
 function PeopleSection({ people, activities, contacts, institutionName, customOptions = [], onAddCustomOption = () => {}, selectedContactId, onSelectPerson, onAdd, onAddNew, onRemove }) {
+  const readOnly = useReadOnly();
   const [adding, setAdding] = useState(false);
   const linkedIds = new Set(people.map(p => p.contact_id));
   const available = contacts.filter(c => !linkedIds.has(c.id));
@@ -2188,7 +2244,7 @@ function PeopleSection({ people, activities, contacts, institutionName, customOp
     <div className="people-section">
       <div className="ai-summary-header">
         <div className="section-label">People</div>
-        <button onClick={() => setAdding(v => !v)} className="btn-copy">{adding ? "Cancel" : "+ Add Person"}</button>
+        {!readOnly && <button onClick={() => setAdding(v => !v)} className="btn-copy">{adding ? "Cancel" : "+ Add Person"}</button>}
       </div>
       {adding && (
         <InstitutionAddPerson
@@ -2219,7 +2275,7 @@ function PeopleSection({ people, activities, contacts, institutionName, customOp
                     {c.company && <div className="person-company">{c.company}</div>}
                   </div>
                   <div className="person-warmth"><span className="warmth-dot" style={{background:warmth?.color}} />{warmth?.label}</div>
-                  <button onClick={(e) => { e.stopPropagation(); if (confirm(`Remove ${c.name || "this person"}?`)) onRemove(p); }} className="person-remove" title="Remove">✕</button>
+                  {!readOnly && <button onClick={(e) => { e.stopPropagation(); if (confirm(`Remove ${c.name || "this person"}?`)) onRemove(p); }} className="person-remove" title="Remove">✕</button>}
                 </div>
               </div>
             );
@@ -2231,6 +2287,7 @@ function PeopleSection({ people, activities, contacts, institutionName, customOp
 }
 
 function QuickAdd({ dealId = null, enablerId = null, organizationId = null, contactId, customOptions = [], onAddCustomOption = () => {}, onAddActivity, showToast }) {
+  const readOnly = useReadOnly();
   const [qType, setQType] = useState("call");
   const [qDesc, setQDesc] = useState("");
   const [posting, setPosting] = useState(false);
@@ -2239,6 +2296,7 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
   const [photoPreview, setPhotoPreview] = useState(null);
   const [photoLoading, setPhotoLoading] = useState(false);
   const fileInputRef = useRef(null);
+  if (readOnly) return null;
 
   const submit = async () => {
     const text = qDesc.trim();
@@ -2343,15 +2401,17 @@ function PriorityBadge({ priority }) {
 // Collapsible AI summary. Default collapsed to a 2-line preview; click the header
 // or chevron to expand. Click the expanded body to edit inline.
 function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, summarizing }) {
+  const readOnly = useReadOnly();
   const [editing, setEditing] = useState(false);
   const [collapsed, setCollapsed] = useState(true);
   const [draft, setDraft] = useState(entity.ai_summary || "");
 
   // Only auto-generate when there is NO cached summary at all. An existing (even
   // stale) summary is shown instantly with no API call; the "New activity" hint
-  // below prompts the user to Regenerate manually.
+  // below prompts the user to Regenerate manually. Never auto-generate in
+  // read-only (Boss View) mode, since that would be an API-billing edit.
   useEffect(() => {
-    if (!entity.ai_summary) onGenerateSummary(entity, activities);
+    if (!readOnly && !entity.ai_summary) onGenerateSummary(entity, activities);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entity.id]);
 
@@ -2367,8 +2427,8 @@ function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, sum
       <div className="ai-summary-header ai-summary-toggle" onClick={() => !editing && setCollapsed(c => !c)}>
         <div className="section-label">AI Summary</div>
         <div className="ai-summary-header-right">
-          {isStale && !summarizing && <span className="ai-summary-stale" title="Activity has been logged since this summary was written">New activity since last summary</span>}
-          <button onClick={(e) => { e.stopPropagation(); onGenerateSummary(entity, activities); }} className="link-btn" disabled={summarizing}>Regenerate</button>
+          {!readOnly && isStale && !summarizing && <span className="ai-summary-stale" title="Activity has been logged since this summary was written">New activity since last summary</span>}
+          {!readOnly && <button onClick={(e) => { e.stopPropagation(); onGenerateSummary(entity, activities); }} className="link-btn" disabled={summarizing}>Regenerate</button>}
           {!editing && <span className="ai-summary-chevron">{collapsed ? "▸" : "▾"}</span>}
         </div>
       </div>
@@ -2384,7 +2444,7 @@ function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, sum
         </>
       ) : entity.ai_summary ? (
         <>
-          <div className={`ai-summary-text ${collapsed ? "ai-summary-collapsed" : ""}`} onClick={startEdit} title="Click to edit">{entity.ai_summary}</div>
+          <div className={`ai-summary-text ${collapsed ? "ai-summary-collapsed" : ""}`} onClick={readOnly ? undefined : startEdit} title={readOnly ? undefined : "Click to edit"}>{entity.ai_summary}</div>
           {!collapsed && <div className="ai-summary-updated">Last updated: {formatDate(entity.ai_summary_updated_at)}</div>}
         </>
       ) : (
@@ -2427,6 +2487,7 @@ function TodoForm({ contacts, customOptions = [], onAddCustomOption = () => {}, 
 }
 
 function TodoRow({ todo, contacts, deals = [], enablers = [], customOptions = [], onAddCustomOption = () => {}, onToggle, onUpdate, onNavigate }) {
+  const readOnly = useReadOnly();
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(todo.title);
   const [priority, setPriority] = useState(todo.priority);
@@ -2480,16 +2541,16 @@ function TodoRow({ todo, contacts, deals = [], enablers = [], customOptions = []
   const done = todo.status === "completed";
   return (
     <div className={`todo-row ${done ? "todo-done" : ""}`}>
-      <input type="checkbox" checked={done} onChange={() => onToggle(todo)} className="todo-checkbox" />
+      <input type="checkbox" checked={done} onChange={() => onToggle(todo)} disabled={readOnly} className="todo-checkbox" />
       <div className="todo-main">
         <div className="todo-title-row">
           <span className="todo-title">{todo.title}</span>
-          {!done && onUpdate && <button onClick={startEdit} className="icon-btn" title="Edit task">✎</button>}
-          {onUpdate
+          {!readOnly && !done && onUpdate && <button onClick={startEdit} className="icon-btn" title="Edit task">✎</button>}
+          {!readOnly && onUpdate
             ? <BadgeSelect options={PRIORITIES} value={todo.priority} color={PRIORITIES.find(p => p.id === todo.priority)?.color} onChange={(v) => onUpdate(todo.id, { priority: v })} title="Change priority" />
             : <PriorityBadge priority={todo.priority} />}
           {overdue && <span className="badge overdue-badge">Overdue</span>}
-          {done && <button onClick={() => onToggle(todo)} className="btn-copy todo-reopen">Reopen</button>}
+          {!readOnly && done && <button onClick={() => onToggle(todo)} className="btn-copy todo-reopen">Reopen</button>}
         </div>
         <div className="todo-meta-row">
           {done && todo.completed_at && <span className="todo-due">Completed {formatDate(todo.completed_at)}</span>}
@@ -2505,6 +2566,7 @@ function TodoRow({ todo, contacts, deals = [], enablers = [], customOptions = []
 }
 
 function TodoSection({ todos, contacts, deals = [], enablers = [], customOptions = [], onAddCustomOption = () => {}, onAdd, onToggle, onUpdate, onNavigate }) {
+  const readOnly = useReadOnly();
   const [showForm, setShowForm] = useState(false);
   const [showCompleted, setShowCompleted] = useState(false);
   const open = sortTodos(todos.filter(t => t.status !== "completed"));
@@ -2514,7 +2576,7 @@ function TodoSection({ todos, contacts, deals = [], enablers = [], customOptions
     <div className="todo-section">
       <div className="ai-summary-header">
         <div className="section-label">To-Dos</div>
-        <button onClick={() => setShowForm(s => !s)} className="btn-copy">{showForm ? "Cancel" : "+ Add To-Do"}</button>
+        {!readOnly && <button onClick={() => setShowForm(s => !s)} className="btn-copy">{showForm ? "Cancel" : "+ Add To-Do"}</button>}
       </div>
       {showForm && (
         <TodoForm
@@ -2748,8 +2810,9 @@ function InstitutionSheet({
   onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
   onChangeStage, onChangeTier, todos = [], onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
-  onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem",
+  onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot,
 }) {
+  const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addPersonOpen, setAddPersonOpen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
@@ -2907,17 +2970,21 @@ function InstitutionSheet({
               )}
               <CityEditor city={inst.city} options={cityOpts} onAddCustomOption={onAddCustomOption} onSave={(v) => onUpdateCity(v)} />
             </div>
-            <div className="classification-row">
-              <label className="checkbox-label"><input type="checkbox" checked={inst.isTarget} onChange={(e) => { if (!e.target.checked && inst.dealId && !confirm("Unchecking Target removes the linked pipeline deal (its people and stage). Activity history is kept. Continue?")) return; onSetFlag("target", e.target.checked); }} /> Target</label>
-              <label className="checkbox-label"><input type="checkbox" checked={inst.isEnabler} onChange={(e) => { if (!e.target.checked && inst.enablerId && !confirm("Unchecking Enabler removes the linked enabler record. Activity history is kept. Continue?")) return; onSetFlag("enabler", e.target.checked); }} /> Enabler</label>
-            </div>
+            {!readOnly && (
+              <div className="classification-row">
+                <label className="checkbox-label"><input type="checkbox" checked={inst.isTarget} onChange={(e) => { if (!e.target.checked && inst.dealId && !confirm("Unchecking Target removes the linked pipeline deal (its people and stage). Activity history is kept. Continue?")) return; onSetFlag("target", e.target.checked); }} /> Target</label>
+                <label className="checkbox-label"><input type="checkbox" checked={inst.isEnabler} onChange={(e) => { if (!e.target.checked && inst.enablerId && !confirm("Unchecking Enabler removes the linked enabler record. Activity history is kept. Continue?")) return; onSetFlag("enabler", e.target.checked); }} /> Enabler</label>
+              </div>
+            )}
             <div className="sheet-contact">Sector: <InlineText value={inst.sector} onSave={(v) => onUpdate({ sector: v })} placeholder="Add sector" /></div>
             <div className="sheet-contact">Website: <InlineText value={inst.website} onSave={(v) => onUpdate({ website: v })} placeholder="Add website" /></div>
           </div>
-          <div className="sheet-actions">
-            <button onClick={onAutoFill} className="btn-sec" disabled={researching}>{researching ? "AI researching..." : "Auto-fill with AI"}</button>
-            <button onClick={() => { if (confirm("Delete this institution and all its linked records?")) onDelete(); }} className="btn-sec btn-danger">Delete</button>
-          </div>
+          {!readOnly && (
+            <div className="sheet-actions">
+              <button onClick={onAutoFill} className="btn-sec" disabled={researching}>{researching ? "AI researching..." : "Auto-fill with AI"}</button>
+              <button onClick={() => { if (confirm("Delete this institution and all its linked records?")) onDelete(); }} className="btn-sec btn-danger">Delete</button>
+            </div>
+          )}
         </div>
         {inst.isTarget && (
           <div className="sheet-next inst-stage-row">
@@ -2926,6 +2993,8 @@ function InstitutionSheet({
           </div>
         )}
       </div>
+
+      {bossNotesSlot}
 
       <SummaryCard entity={summaryEntity} activities={activities} onGenerateSummary={onGenerateSummary} onSaveSummary={onSaveSummary} summarizing={summarizing} />
 
@@ -2945,13 +3014,15 @@ function InstitutionSheet({
       <div className="people-section">
         <div className="ai-summary-header">
           <div className="section-label">People at {inst.name}</div>
-          <div className="header-btn-group">
-            <div className="research-btn-wrap">
-              <button onClick={runResearch} className="btn-primary btn-research" disabled={researchLoading}>{researchLoading ? "Researching..." : "🔍 Research Key People"}</button>
-              <div className="research-credits-note">Uses AI credits</div>
+          {!readOnly && (
+            <div className="header-btn-group">
+              <div className="research-btn-wrap">
+                <button onClick={runResearch} className="btn-primary btn-research" disabled={researchLoading}>{researchLoading ? "Researching..." : "🔍 Research Key People"}</button>
+                <div className="research-credits-note">Uses AI credits</div>
+              </div>
+              <button onClick={() => setAddPersonOpen(v => !v)} className="btn-copy">{addPersonOpen ? "Cancel" : "+ Add Person"}</button>
             </div>
-            <button onClick={() => setAddPersonOpen(v => !v)} className="btn-copy">{addPersonOpen ? "Cancel" : "+ Add Person"}</button>
-          </div>
+          )}
         </div>
         {addPersonOpen && primary && (
           <InstitutionAddPerson
@@ -2978,7 +3049,7 @@ function InstitutionSheet({
                       {p.role && <div className="person-role">{p.role}</div>}
                       {p.contact.email && <div className="person-company">{p.contact.email}</div>}
                     </div>
-                    {(p.source === "role" || p.source === "edge") && (
+                    {!readOnly && (p.source === "role" || p.source === "edge") && (
                       <button onClick={(e) => { e.stopPropagation(); if (!confirm(`Remove ${p.contact.name}?`)) return; if (p.source === "role") onRemoveRole(p.roleRow); else onRemoveNetworkEdge(p.removeId); }} className="person-remove" title="Remove">✕</button>
                     )}
                   </div>
@@ -3081,7 +3152,7 @@ function InstitutionSheet({
       <div className="people-section">
         <div className="ai-summary-header">
           <div className="section-label">Connected Institutions</div>
-          {inst.orgId && <button onClick={() => setConnectOpen(true)} className="btn-copy">+ Add Connection</button>}
+          {!readOnly && inst.orgId && <button onClick={() => setConnectOpen(true)} className="btn-copy">+ Add Connection</button>}
         </div>
         {explicitConns.length === 0 && sharedConns.length === 0 ? (
           <div className="empty-small">No connected institutions yet.</div>
@@ -3092,7 +3163,7 @@ function InstitutionSheet({
                 <div className="path-chain" onClick={() => onOpenInstitution(c.name)} style={{ cursor: "pointer" }}>{c.name}</div>
                 <div className="todo-meta-row">
                   <span className="badge">{NETWORK_EDGE_RELATIONSHIPS.find(r => r.id === c.rel)?.label || c.rel}</span>
-                  <button onClick={() => { if (confirm("Remove this connection?")) onRemoveNetworkEdge(c.id); }} className="person-remove" title="Remove">✕</button>
+                  {!readOnly && <button onClick={() => { if (confirm("Remove this connection?")) onRemoveNetworkEdge(c.id); }} className="person-remove" title="Remove">✕</button>}
                 </div>
               </div>
             ))}
@@ -3393,6 +3464,7 @@ function NetworkTab({
   const [instFilter, setInstFilter] = useState("");
   const [activeForm, setActiveForm] = useState(null);
   const [peopleView, setPeopleView] = useState("table");
+  const readOnly = useReadOnly();
 
   const cities = Array.from(new Set(institutions.flatMap(i => parseCities(i.city)))).sort();
   const types = Array.from(new Set(institutions.map(i => i.type).filter(Boolean)));
@@ -3431,8 +3503,8 @@ function NetworkTab({
       <div className="network-top-bar">
         <input className="input network-search" placeholder={`Search ${subtab}...`} value={search} onChange={e => setSearch(e.target.value)} />
         <div className="network-top-buttons">
-          <button onClick={() => setActiveForm(a => (a === "institution" ? null : "institution"))} className={`btn-primary ${activeForm === "institution" ? "active-toggle" : ""}`}>+ Institution</button>
-          <button onClick={() => setActiveForm(a => (a === "person" ? null : "person"))} className={`btn-primary ${activeForm === "person" ? "active-toggle" : ""}`}>+ Person</button>
+          {!readOnly && <button onClick={() => setActiveForm(a => (a === "institution" ? null : "institution"))} className={`btn-primary ${activeForm === "institution" ? "active-toggle" : ""}`}>+ Institution</button>}
+          {!readOnly && <button onClick={() => setActiveForm(a => (a === "person" ? null : "person"))} className={`btn-primary ${activeForm === "person" ? "active-toggle" : ""}`}>+ Person</button>}
         </div>
       </div>
 
@@ -3569,9 +3641,11 @@ function NetworkTab({
 // A flat editable table cell. Enter or Tab commits and moves focus down the
 // same column (onNext), so a whole column can be filled in rapidly. Escape reverts.
 function TableTextCell({ value, onSave, placeholder, colKey, rowIndex, cellRefs, onNext }) {
+  const readOnly = useReadOnly();
   const [v, setV] = useState(value || "");
   useEffect(() => { setV(value || ""); }, [value]);
   const commit = () => { if ((v || "") !== (value || "")) onSave(v); };
+  if (readOnly) return <span className="table-cell-ro">{value || ""}</span>;
   return (
     <input
       ref={(el) => { cellRefs.current[`${rowIndex}:${colKey}`] = el; }}
@@ -3590,6 +3664,7 @@ function TableTextCell({ value, onSave, placeholder, colKey, rowIndex, cellRefs,
 
 // Editable, sortable table of people for rapid data entry (LinkedIn especially).
 function PeopleTable({ people, institutionNames, cities, onUpdateContact, onLinkPersonToInstitution, onOpenPerson }) {
+  const readOnly = useReadOnly();
   const [sort, setSort] = useState({ col: "institution", dir: "asc" });
   const cellRefs = useRef({});
   const cityList = Array.from(new Set([...SAUDI_CITIES, ...cities])).sort();
@@ -3644,27 +3719,33 @@ function PeopleTable({ people, institutionNames, cities, onUpdateContact, onLink
                 <td>{text(c, "name", idx, "Name")}</td>
                 <td className="table-role-cell">{text({ ...c, role: r.roleTitle }, "role", idx, "Role")}{r.extraRoles > 0 && <span className="table-more-roles" title="Has more roles">+{r.extraRoles}</span>}</td>
                 <td>
-                  <select className="table-cell-select" value={r.institution} ref={(el) => { cellRefs.current[`${idx}:institution`] = el; }}
-                    onChange={(e) => e.target.value && onLinkPersonToInstitution(c.id, e.target.value)} onKeyDown={(e) => selKey(e, "institution", idx)}>
-                    <option value="">Set institution...</option>
-                    {institutionNames.map((n) => <option key={n} value={n}>{n}</option>)}
-                  </select>
+                  {readOnly ? <span className="table-cell-ro">{r.institution}</span> : (
+                    <select className="table-cell-select" value={r.institution} ref={(el) => { cellRefs.current[`${idx}:institution`] = el; }}
+                      onChange={(e) => e.target.value && onLinkPersonToInstitution(c.id, e.target.value)} onKeyDown={(e) => selKey(e, "institution", idx)}>
+                      <option value="">Set institution...</option>
+                      {institutionNames.map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  )}
                 </td>
                 <td>
-                  <select className="table-cell-select" value={c.city || ""} ref={(el) => { cellRefs.current[`${idx}:city`] = el; }}
-                    onChange={(e) => onUpdateContact(c.id, { city: e.target.value || null })} onKeyDown={(e) => selKey(e, "city", idx)}>
-                    <option value="">City...</option>
-                    {cityList.map((n) => <option key={n} value={n}>{n}</option>)}
-                  </select>
+                  {readOnly ? <span className="table-cell-ro">{c.city || ""}</span> : (
+                    <select className="table-cell-select" value={c.city || ""} ref={(el) => { cellRefs.current[`${idx}:city`] = el; }}
+                      onChange={(e) => onUpdateContact(c.id, { city: e.target.value || null })} onKeyDown={(e) => selKey(e, "city", idx)}>
+                      <option value="">City...</option>
+                      {cityList.map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  )}
                 </td>
                 <td>{text(c, "email", idx, "Add email")}</td>
                 <td>{text(c, "phone", idx, "Add phone")}</td>
                 <td className="table-linkedin">{text(c, "linkedin", idx, "Add LinkedIn")}</td>
                 <td>
-                  <select className="table-cell-select table-warmth" value={c.warmth || "unknown"} ref={(el) => { cellRefs.current[`${idx}:warmth`] = el; }}
-                    onChange={(e) => onUpdateContact(c.id, { warmth: e.target.value })} onKeyDown={(e) => selKey(e, "warmth", idx)} style={{ color: warmth?.color, fontWeight: 700 }}>
-                    {WARMTH_LEVELS.map((w) => <option key={w.id} value={w.id}>{w.label}</option>)}
-                  </select>
+                  {readOnly ? <span className="badge" style={{ background: warmth?.color + "22", color: warmth?.color }}>{warmth?.label}</span> : (
+                    <select className="table-cell-select table-warmth" value={c.warmth || "unknown"} ref={(el) => { cellRefs.current[`${idx}:warmth`] = el; }}
+                      onChange={(e) => onUpdateContact(c.id, { warmth: e.target.value })} onKeyDown={(e) => selKey(e, "warmth", idx)} style={{ color: warmth?.color, fontWeight: 700 }}>
+                      {WARMTH_LEVELS.map((w) => <option key={w.id} value={w.id}>{w.label}</option>)}
+                    </select>
+                  )}
                 </td>
                 <td className="table-last">{c.last_contacted_at ? formatDate(c.last_contacted_at) : "Never"}</td>
                 <td><button className="table-open-btn" onClick={() => onOpenPerson(c.id)} title="Open profile">↗</button></td>
@@ -3677,213 +3758,112 @@ function PeopleTable({ people, institutionNames, cities, onUpdateContact, onLink
   );
 }
 
-// ============================================================
-// Boss View: a standalone, mostly read-only dashboard for the boss (Andy).
-// Overview | Pipeline | Key Summaries | Comments. Shareable via ?view=boss.
-// ============================================================
-const BOSS_TABS = [["overview", "Overview"], ["pipeline", "Pipeline"], ["summaries", "Key Summaries"], ["comments", "Comments"]];
 
-function BossView({ deals, activeDeals, enablers, institutions, instByName, todos, activities, customOptions = [], comments = [], onPostComment, standalone = false }) {
-  const [tab, setTab] = useState("overview");
-  const [readDeal, setReadDeal] = useState(null);
-  const totalValue = activeDeals.reduce((s, d) => s + (Number(d.value) || 0), 0);
-  const openTasks = todos.filter((t) => t.status === "open");
-  const overdueCount = openTasks.filter((t) => isOverdue(t.due_date)).length;
-  const valueText = totalValue >= 1000000 ? `$${(totalValue / 1000000).toFixed(1)}M` : totalValue > 0 ? `$${(totalValue / 1000).toFixed(0)}K` : "N/A";
-  const dealCity = (d) => { const i = instByName.get((d.company || "").trim().toLowerCase()); return parseCities(d.city || i?.city || ""); };
-
+// ============================================================
+// Two-way comment thread between Fahed and Andy. A floating button (bottom right)
+// opens a slide-up panel from any tab, in both the normal app and Boss View.
+// ============================================================
+function CommentPanel({ comments, author, unread = 0, onOpen, onPost, targetName }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [posting, setPosting] = useState(false);
+  const sorted = [...comments].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const toggle = () => { const next = !open; setOpen(next); if (next && onOpen) onOpen(); };
+  const send = async () => {
+    const t = text.trim();
+    if (!t || posting) return;
+    setPosting(true);
+    try { await onPost({ author, content: t }); setText(""); } finally { setPosting(false); }
+  };
   return (
-    <div className={`boss-view ${standalone ? "boss-standalone" : ""}`}>
-      <div className="boss-topbar">
-        <div className="boss-brand"><span className="sidebar-logo">🥭</span><span className="sidebar-wordmark">Mango OS</span><span className="boss-badge">Boss View</span></div>
-        <div className="boss-nav">
-          {BOSS_TABS.map(([id, l]) => <button key={id} className={`boss-nav-btn ${tab === id ? "active" : ""}`} onClick={() => setTab(id)}>{l}</button>)}
-        </div>
-      </div>
-
-      <div className="boss-body">
-        {tab === "overview" && (
-          <>
-            <div className="stats-bar boss-stats">
-              <div className="stat"><div className="stat-label">Active deals</div><div className="stat-value">{activeDeals.length}</div></div>
-              <div className="stat"><div className="stat-label">Pipeline value</div><div className="stat-value">{valueText}</div></div>
-              <div className="stat"><div className="stat-label">Tasks due</div><div className="stat-value">{openTasks.length}</div>{overdueCount > 0 && <div className="stat-delta">{overdueCount} overdue</div>}</div>
-              <div className="stat">
-                <div className="stat-label">Deals by tier</div>
-                <div className="boss-tier-mini">{DEAL_TIERS.filter((t) => t.id !== "Untiered").map((t) => <span key={t.id} className="tier-badge" style={{ background: t.bg, color: t.fg }}>{t.label}: {activeDeals.filter((d) => (d.tier || "Untiered") === t.id).length}</span>)}</div>
-              </div>
+    <>
+      {open && (
+        <div className="comment-panel">
+          <div className="comment-panel-head">
+            <div>
+              <div className="comment-panel-title">Comments</div>
+              <div className="comment-panel-sub">Between Fahed and Andy</div>
             </div>
-            <div className="boss-section">
-              <div className="section-label">Pipeline health</div>
-              <div className="pipeline-bar">
-                {STAGES.filter((s) => !["won", "lost"].includes(s.id)).map((s) => { const c = activeDeals.filter((d) => d.stage === s.id).length; if (!c) return null; return <div key={s.id} className="bar-seg" style={{ background: s.color, flex: c }}><span className="bar-label">{s.label} ({c})</span></div>; })}
-                {activeDeals.length === 0 && <div className="bar-seg bar-empty">No active deals</div>}
-              </div>
-            </div>
-            <div className="boss-section">
-              <div className="section-label">This week</div>
-              <div className="boss-activity"><div className="boss-act-row">
-                {[[deals.filter((d) => isThisWeek(d.last_activity_at)).length, "deals touched"], [activities.filter((a) => isThisWeek(a.created_at)).length, "activities"], [deals.filter((d) => isThisWeek(d.created_at)).length, "new deals"]].map(([n, l], i) => (
-                  <div key={i}><span className="boss-num">{n}</span> <span className="boss-num-label">{l}</span></div>
-                ))}
-              </div></div>
-            </div>
-          </>
-        )}
-
-        {tab === "pipeline" && (
-          <div className="boss-kanban kanban">
-            {STAGES.map((stage) => {
-              const sd = activeDeals.filter((d) => d.stage === stage.id);
+            <button className="close-btn" onClick={() => setOpen(false)} title="Close">✕</button>
+          </div>
+          <div className="comment-compose">
+            <textarea className="input comment-compose-input" placeholder={author === "Andy Liu" ? "Leave a note for Fahed..." : "Reply to Andy..."} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); }} />
+            <button className="btn-primary" onClick={send} disabled={posting || !text.trim()}>Send</button>
+          </div>
+          <div className="comment-panel-author">Posting as {author}</div>
+          <div className="comment-feed">
+            {sorted.length === 0 && <div className="empty-small">No comments yet. Start the conversation.</div>}
+            {sorted.map((c) => {
+              const tName = targetName ? targetName(c) : null;
               return (
-                <div key={stage.id} className="column">
-                  <div className="col-header"><div className="col-title-wrap"><div className="dot" style={{ background: stage.color }} /><span className="col-title">{stage.label}</span></div><span className="col-count">{sd.length}</span></div>
-                  <div className="col-body">
-                    {DEAL_TIERS.map((tier) => {
-                      const td = sd.filter((d) => (d.tier || "Untiered") === tier.id);
-                      if (td.length === 0) return null;
-                      return (
-                        <div key={tier.id} className="tier-group">
-                          <div className="tier-group-header">{tier.label}</div>
-                          {td.map((deal) => {
-                            const inst = instByName.get((deal.company || "").trim().toLowerCase());
-                            const typeMeta = inst?.type ? institutionTypeMeta(inst.type, customOptions) : null;
-                            const t = DEAL_TIERS.find((x) => x.id === (deal.tier || "Untiered"));
-                            return (
-                              <div key={deal.id} className="deal-card" onClick={() => setReadDeal(deal)}>
-                                <div className="deal-card-head"><div className="card-company">{deal.company}</div>{t && t.id !== "Untiered" && <span className="tier-badge" style={{ background: t.bg, color: t.fg }}>{t.label}</span>}</div>
-                                {typeMeta && <span className="badge card-type-badge" style={{ background: typeMeta.color + "22", color: typeMeta.color, border: `1px solid ${typeMeta.color}44` }}>{typeMeta.label}</span>}
-                                <div className="card-city-row"><CityPills city={deal.city || inst?.city} compact />{deal.value > 0 && <span className="card-value">${Number(deal.value).toLocaleString()}</span>}</div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      );
-                    })}
-                    {sd.length === 0 && <div className="empty-col">No deals</div>}
+                <div key={c.id} className="boss-comment">
+                  <Avatar name={c.author} size={32} />
+                  <div className="boss-comment-main">
+                    <div className="boss-comment-meta"><span className="boss-comment-author">{c.author}</span><span className="boss-comment-time">{formatDateTime(c.created_at)}</span></div>
+                    {tName && <div className="comment-target-chip">re: {tName}</div>}
+                    {c.content && <div className="boss-comment-text">{c.content}</div>}
+                    {c.file_data && (String(c.file_data).startsWith("data:image")
+                      ? <img className="boss-comment-img" src={c.file_data} alt={c.file_name || "attachment"} />
+                      : <a className="boss-comment-file" href={c.file_data} download={c.file_name || "file"}>📎 {c.file_name || "Download attachment"}</a>)}
                   </div>
                 </div>
               );
             })}
           </div>
-        )}
-
-        {tab === "summaries" && (
-          <div className="section-pad">
-            <div className="section-label">Key Summaries</div>
-            {[...institutions.filter((i) => i.isTarget && i.deal?.ai_summary).map((i) => ({ id: i.key, name: i.name, kind: "Target", summary: i.deal.ai_summary })),
-              ...institutions.filter((i) => i.isEnabler && i.enabler?.ai_summary).map((i) => ({ id: i.key + "-en", name: i.name, kind: "Enabler", summary: i.enabler.ai_summary })),
-              ...institutions.filter((i) => !i.isTarget && !i.isEnabler && i.org?.ai_summary).map((i) => ({ id: i.key + "-org", name: i.name, kind: "Institution", summary: i.org.ai_summary }))]
-              .map((item) => <BossSummaryCard key={item.id} item={item} />)}
-            {institutions.every((i) => !i.deal?.ai_summary && !i.enabler?.ai_summary && !i.org?.ai_summary) && <div className="empty-small">No summaries yet.</div>}
-
-            <div className="section-label boss-section-label">Top Action Items</div>
-            <div className="action-items">
-              {sortTodos(openTasks).slice(0, 10).map((t) => {
-                const linkedDeal = t.deal_id ? deals.find((d) => d.id === t.deal_id) : null;
-                const linkedEnabler = t.enabler_id ? enablers.find((en) => en.id === t.enabler_id) : null;
-                return (
-                  <div key={t.id} className="action-item-row">
-                    <PriorityBadge priority={t.priority} />
-                    <span className="action-item-title">{t.title}</span>
-                    {(linkedDeal || linkedEnabler) && <span className="action-item-link">{linkedDeal ? linkedDeal.company : linkedEnabler.name}</span>}
-                    {t.due_date && <span className="todo-due">Due {formatDate(t.due_date)}</span>}
-                  </div>
-                );
-              })}
-              {openTasks.length === 0 && <div className="empty-small">No open action items.</div>}
-            </div>
-          </div>
-        )}
-
-        {tab === "comments" && <BossComments comments={comments} onPost={onPostComment} />}
-      </div>
-
-      {readDeal && (() => {
-        const inst = instByName.get((readDeal.company || "").trim().toLowerCase());
-        const st = STAGES.find((s) => s.id === readDeal.stage);
-        const t = DEAL_TIERS.find((x) => x.id === (readDeal.tier || "Untiered"));
-        const acts = activities.filter((a) => a.deal_id === readDeal.id).slice(0, 6);
-        return (
-          <div className="overlay" onClick={() => setReadDeal(null)}><div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header"><div className="modal-title">{readDeal.company}</div><button onClick={() => setReadDeal(null)} className="close-btn">✕</button></div>
-            <div className="sheet-meta-row">
-              {st && <span className="badge" style={{ background: st.color + "22", color: st.color, border: `1px solid ${st.color}44` }}>{st.label}</span>}
-              {t && t.id !== "Untiered" && <span className="tier-badge" style={{ background: t.bg, color: t.fg }}>{t.label}</span>}
-              <CityPills city={readDeal.city || inst?.city} />
-              {readDeal.value > 0 && <span className="badge val-badge">${Number(readDeal.value).toLocaleString()}</span>}
-            </div>
-            {readDeal.contact_name && <div className="sheet-contact" style={{ marginTop: 8 }}>{readDeal.contact_name}{readDeal.contact_role ? ` · ${readDeal.contact_role}` : ""}</div>}
-            {readDeal.ai_summary && <><div className="section-label" style={{ marginTop: 16 }}>AI Summary</div><div className="key-summary-text">{readDeal.ai_summary}</div></>}
-            <div className="section-label" style={{ marginTop: 16 }}>Recent activity</div>
-            {acts.length === 0 ? <div className="empty-small">No activity logged.</div> : (
-              <div className="timeline-list">{acts.map((a) => <div key={a.id} className="timeline-item"><ActivityGlyph type={a.type} /><div><div className="act-desc">{a.description}</div><div className="act-date">{formatDate(a.created_at)}</div></div></div>)}</div>
-            )}
-          </div></div>
-        );
-      })()}
-    </div>
+        </div>
+      )}
+      <button className={`comment-fab ${open ? "open" : ""}`} onClick={toggle} title="Comments">
+        <span className="comment-fab-icon">💬</span>
+        {unread > 0 && !open && <span className="comment-fab-badge">{unread}</span>}
+      </button>
+    </>
   );
 }
 
-function BossSummaryCard({ item }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="key-summary-card">
-      <div className="key-summary-header boss-summary-head" onClick={() => setOpen((o) => !o)}>
-        <span>{item.name} <span className="boss-summary-kind">{item.kind}</span></span>
-        <span className="ai-summary-chevron">{open ? "▾" : "▸"}</span>
-      </div>
-      <div className={`key-summary-text ${open ? "" : "ai-summary-collapsed"}`}>{item.summary}</div>
-    </div>
-  );
-}
-
-function BossComments({ comments, onPost }) {
-  const [author, setAuthor] = useState("Fahed Al Essa");
+// Per-entity "Boss Notes": comments tagged to a specific deal or institution.
+// Andy adds notes here in Boss View; Fahed sees them (and can reply) on the sheet.
+function BossNotes({ comments, entityName, tag, author, onPost }) {
+  const [adding, setAdding] = useState(false);
   const [text, setText] = useState("");
-  const [file, setFile] = useState(null);
   const [posting, setPosting] = useState(false);
-  const fileRef = useRef(null);
-  const pickFile = (e) => { const f = e.target.files?.[0]; if (!f) return; const reader = new FileReader(); reader.onload = () => setFile({ name: f.name, data: reader.result }); reader.readAsDataURL(f); };
-  const send = async () => {
-    if ((!text.trim() && !file) || posting) return;
-    setPosting(true);
-    try { await onPost({ author, content: text, file_name: file?.name, file_data: file?.data }); setText(""); setFile(null); if (fileRef.current) fileRef.current.value = ""; } finally { setPosting(false); }
-  };
   const sorted = [...comments].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const send = async () => {
+    const t = text.trim();
+    if (!t || posting) return;
+    setPosting(true);
+    try { await onPost({ author, content: t, ...tag }); setText(""); setAdding(false); } finally { setPosting(false); }
+  };
   return (
-    <div className="section-pad boss-comments">
-      <div className="boss-comment-box">
-        <div className="boss-comment-as">
-          <span className="boss-as-label">Post as</span>
-          {["Fahed Al Essa", "Andy Liu"].map((a) => <button key={a} className={`boss-as-btn ${author === a ? "active" : ""}`} onClick={() => setAuthor(a)}>{a}</button>)}
-        </div>
-        <textarea className="input textarea boss-comment-input" placeholder="Write a comment..." value={text} onChange={(e) => setText(e.target.value)} />
-        {file && <div className="boss-file-chip">📎 {file.name}<button onClick={() => { setFile(null); if (fileRef.current) fileRef.current.value = ""; }} className="city-pill-x">✕</button></div>}
-        <div className="boss-comment-actions">
-          <button className="boss-clip-btn" onClick={() => fileRef.current && fileRef.current.click()} title="Attach file">📎</button>
-          <input ref={fileRef} type="file" className="photo-input-hidden" onChange={pickFile} />
-          <button className="btn-primary" onClick={send} disabled={posting || (!text.trim() && !file)}>Send</button>
-        </div>
+    <div className="people-section boss-notes">
+      <div className="ai-summary-header">
+        <div className="section-label">Boss Notes</div>
+        {!adding && <button className="btn-copy boss-addnote-btn" onClick={() => setAdding(true)} title={`Comment on ${entityName}`}>💬 Add note</button>}
       </div>
-      <div className="boss-comment-feed">
-        {sorted.length === 0 && <div className="empty-small">No comments yet. Start the conversation.</div>}
-        {sorted.map((c) => (
-          <div key={c.id} className="boss-comment">
-            <Avatar name={c.author} size={34} />
-            <div className="boss-comment-main">
-              <div className="boss-comment-meta"><span className="boss-comment-author">{c.author}</span><span className="boss-comment-time">{formatDateTime(c.created_at)}</span></div>
-              {c.content && <div className="boss-comment-text">{c.content}</div>}
-              {c.file_data && (String(c.file_data).startsWith("data:image")
-                ? <img className="boss-comment-img" src={c.file_data} alt={c.file_name || "attachment"} />
-                : <a className="boss-comment-file" href={c.file_data} download={c.file_name || "file"}>📎 {c.file_name || "Download attachment"}</a>)}
-            </div>
+      {adding && (
+        <div className="boss-note-form">
+          <div className="boss-note-on">Comment on {entityName}</div>
+          <textarea className="input textarea boss-note-input" placeholder={`Leave a note about ${entityName}...`} value={text} onChange={(e) => setText(e.target.value)} autoFocus />
+          <div className="boss-note-actions">
+            <button className="btn-sec" onClick={() => { setAdding(false); setText(""); }}>Cancel</button>
+            <button className="btn-primary" onClick={send} disabled={posting || !text.trim()}>Send</button>
           </div>
-        ))}
-      </div>
+        </div>
+      )}
+      {sorted.length === 0 ? (
+        <div className="empty-small">No notes on {entityName} yet.</div>
+      ) : (
+        <div className="boss-notes-list">
+          {sorted.map((c) => (
+            <div key={c.id} className="boss-comment">
+              <Avatar name={c.author} size={30} />
+              <div className="boss-comment-main">
+                <div className="boss-comment-meta"><span className="boss-comment-author">{c.author}</span><span className="boss-comment-time">{formatDateTime(c.created_at)}</span></div>
+                {c.content && <div className="boss-comment-text">{c.content}</div>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
-
-
