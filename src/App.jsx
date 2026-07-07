@@ -58,6 +58,11 @@ function NavIcon({ shape }) {
   if (shape === "lines") return <span className="nav-icon nav-icon-lines"><i /><i /><i /></span>;
   if (shape === "chart") return <span className="nav-icon nav-icon-square" style={{ borderRadius: 4 }} />;
   if (shape === "doc") return <span className="nav-icon nav-icon-doc" />;
+  if (shape === "house") return (
+    <span className="nav-icon nav-icon-house">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M2 7.3L8 2.4l6 4.9M3.2 6.6V13h9.6V6.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+    </span>
+  );
   return null;
 }
 
@@ -98,14 +103,14 @@ function parseDueHint(hint) {
 }
 
 // Fixed bottom tab bar shown only on mobile (CSS hides it on desktop and hides
-// the sidebar on mobile). Reports is hidden in Boss View, matching the sidebar.
-function MobileTabBar({ view, setView, tasksCount, sheetOrigin = "network", bossMode = false }) {
+// the sidebar on mobile). Home is the landing tab; the Network Map is
+// desktop-only, and Reports is reachable from the Home screen on mobile.
+function MobileTabBar({ view, setView, tasksCount, sheetOrigin = "network" }) {
   const tabs = [
+    { id: "home", label: "Home", shape: "house" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Ecosystem", shape: "circle" },
-    { id: "map", label: "Map", shape: "diamond" },
     { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
-    ...(bossMode ? [] : [{ id: "reports", label: "Reports", shape: "doc" }]),
   ];
   const mapView = view === "institution-sheet" ? sheetOrigin : view === "person-sheet" ? "network" : view;
   return (
@@ -156,6 +161,7 @@ function MobilePipelineNav({ kanbanRef }) {
 // Reports/Boss View, static Saved Views, and a user card pinned to the bottom.
 function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0, bossMode = false }) {
   const nav = [
+    { id: "home", label: "Home", shape: "house" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Ecosystem", shape: "circle" },
     { id: "map", label: "Network Map", shape: "diamond" },
@@ -677,7 +683,7 @@ function TagPickerWithCustom({ options, value, onToggle }) {
 }
 
 export default function App() {
-  const [view, setView] = useState("pipeline");
+  const [view, setView] = useState("home");
   const [deals, setDeals] = useState([]);
   const [contacts, setContacts] = useState([]);
   const [activities, setActivities] = useState([]);
@@ -787,6 +793,14 @@ export default function App() {
   const [commentsSeenAt, setCommentsSeenAt] = useState(() => localStorage.getItem("mango-comments-seen") || "");
   const markCommentsSeen = () => { const now = new Date().toISOString(); localStorage.setItem("mango-comments-seen", now); setCommentsSeenAt(now); };
   const unreadComments = bossMode ? 0 : bossComments.filter((c) => c.author !== "Fahed Al Essa" && (!commentsSeenAt || new Date(c.created_at) > new Date(commentsSeenAt))).length;
+  // Command Center "Unread Comments": persisted per-comment is_read flag on
+  // boss_comments (distinct from the floating badge's localStorage timestamp).
+  // Shows notes from the other person that have not been dismissed yet.
+  const unreadBossComments = bossComments.filter((c) => !c.is_read && c.author !== commentAuthor);
+  const markCommentRead = async (id) => {
+    try { await api("boss_comments", "PATCH", { is_read: true }, `?id=eq.${id}`); await loadData(); }
+    catch { showToast("Error updating comment"); }
+  };
 
   // Kick back to the Ecosystem tab if the open person's contact was deleted elsewhere
   useEffect(() => {
@@ -1682,6 +1696,42 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
   // Ref to the Pipeline kanban so the mobile stage nav can scroll-snap columns.
   const kanbanRef = useRef(null);
+  const isMobile = useIsMobile();
+
+  // Resolve any row carrying deal_id / enabler_id / organization_id / contact_id
+  // (activities, todos, comments, or {deal_id} shims) to a display name and to a
+  // navigation target. Used by the Command Center lists.
+  const entityName = (o) => {
+    if (!o) return null;
+    if (o.deal_id) return deals.find((d) => d.id === o.deal_id)?.company || null;
+    if (o.enabler_id) return enablers.find((e) => e.id === o.enabler_id)?.name || null;
+    if (o.organization_id) return organizations.find((x) => x.id === o.organization_id)?.name || null;
+    if (o.contact_id) return contacts.find((c) => c.id === o.contact_id)?.name || null;
+    return null;
+  };
+  const openEntity = (o) => {
+    if (!o) return;
+    if (o.deal_id) { const d = deals.find((x) => x.id === o.deal_id); if (d) return openInstitution(d.company); }
+    if (o.enabler_id) { const e = enablers.find((x) => x.id === o.enabler_id); if (e) return openInstitution(e.name); }
+    if (o.organization_id) { const g = organizations.find((x) => x.id === o.organization_id); if (g) return openInstitution(g.name); }
+    if (o.contact_id) return openPerson(o.contact_id);
+  };
+
+  // Command Center derived lists.
+  const homeMeetings = activities.filter((a) => a.type === "meeting" && isToday(a.created_at));
+  const urgencyRank = (t) => (isOverdue(t.due_date) ? 0 : (t.due_date && isToday(t.due_date)) ? 1 : t.priority === "high" ? 2 : 3);
+  const urgentTasks = openTodos.slice().sort((a, b) => {
+    const u = urgencyRank(a) - urgencyRank(b);
+    if (u !== 0) return u;
+    const ad = a.due_date ? new Date(a.due_date).getTime() : Infinity;
+    const bd = b.due_date ? new Date(b.due_date).getTime() : Infinity;
+    return ad - bd;
+  }).slice(0, 5);
+  const recentActivities = activities.slice(0, 10);
+  const staleDeals = activeDeals
+    .filter((d) => d.last_activity_at && daysAgo(d.last_activity_at) >= 14)
+    .sort((a, b) => daysAgo(b.last_activity_at) - daysAgo(a.last_activity_at))
+    .slice(0, 8);
 
   if (loading) return <div className="app loading-screen"><div className="loading-text">Loading Mango OS...</div></div>;
 
@@ -1809,6 +1859,25 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         ) : null;
       })()}
 
+      {/* HOME / COMMAND CENTER */}
+      {view === "home" && (
+        <HomeTab
+          greetingName={bossMode ? "Andy" : "Fahed"}
+          unreadComments={unreadBossComments}
+          onMarkRead={markCommentRead}
+          commentTargetName={commentTargetName}
+          meetings={homeMeetings}
+          urgentTasks={urgentTasks}
+          recentActivities={recentActivities}
+          staleDeals={staleDeals}
+          entityName={entityName}
+          onOpenEntity={openEntity}
+          isMobile={isMobile}
+          bossMode={bossMode}
+          onOpenReports={() => setView("reports")}
+        />
+      )}
+
       {/* PIPELINE */}
       {view === "pipeline" && (
         <div>
@@ -1903,8 +1972,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         </div>
       )}
 
-      {/* MAP */}
-      {view === "map" && (
+      {/* MAP (desktop only; the force graph is not usable on a phone) */}
+      {view === "map" && (isMobile ? (
+        <div className="section-pad">
+          <div className="map-mobile-notice">Network Map is best viewed on desktop.</div>
+        </div>
+      ) : (
         <MapTab
           institutions={institutions}
           contacts={contacts}
@@ -1917,7 +1990,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onOpenInstitution={openInstitution}
           onOpenPerson={openPerson}
         />
-      )}
+      ))}
 
       {/* TASKS */}
       {view === "tasks" && (
@@ -1998,7 +2071,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       </main>
 
       {/* Mobile-only bottom tab bar (the sidebar is hidden on phones). */}
-      <MobileTabBar view={view} setView={setView} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} bossMode={bossMode} />
+      <MobileTabBar view={view} setView={setView} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} />
 
       {/* Floating two-way comment thread, available on every tab for Fahed and Andy.
           Only Fahed's opens clear the unread marker (the badge is Fahed's). */}
@@ -2010,6 +2083,145 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       {!bossMode && modal?.type === "institution" && <InstitutionEditModal institution={modal.data} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveInstitution} onClose={() => setModal(null)} />}
     </div>
     </ReadOnlyContext.Provider>
+  );
+}
+
+// Command Center: the mobile landing screen (also the first desktop tab). A
+// morning briefing of unread boss notes, today's meetings, urgent tasks, recent
+// activity, and stale deals. Purely presentational; all data is derived in App.
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports }) {
+  const hour = new Date().getHours();
+  const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
+  return (
+    <div className="section-pad home">
+      <div className="home-header">
+        <div className="home-greeting">Good {partOfDay}, {greetingName}</div>
+        <div className="home-date">{formatFull(new Date())}</div>
+      </div>
+
+      {/* 1. Unread comments from Andy */}
+      <div className="home-section">
+        <div className="home-section-title">Unread Comments</div>
+        {unreadComments.length === 0 ? (
+          <div className="home-empty">No new comments from Andy.</div>
+        ) : (
+          <div className="home-list">
+            {unreadComments.map((c) => {
+              const tName = commentTargetName(c);
+              return (
+                <div key={c.id} className="home-card home-comment">
+                  <Avatar name={c.author} size={34} />
+                  <div className="home-comment-main">
+                    <div className="home-comment-meta">
+                      <span className="home-comment-author">{c.author}</span>
+                      <span className="home-comment-time">{formatDateTime(c.created_at)}</span>
+                    </div>
+                    {c.content && <div className="home-comment-text">{c.content}</div>}
+                    {tName && <button className="home-tag" onClick={() => onOpenEntity(c)}>re: {tName}</button>}
+                  </div>
+                  <button className="home-markread" onClick={() => onMarkRead(c.id)}>Mark read</button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 2. Today's agenda (meetings) */}
+      <div className="home-section">
+        <div className="home-section-title">Today's Agenda</div>
+        {meetings.length === 0 ? (
+          <div className="home-empty">No meetings synced today. Check Google Calendar sync.</div>
+        ) : (
+          <div className="home-list">
+            {meetings.map((a) => (
+              <div key={a.id} className="home-card home-meeting" onClick={() => onOpenEntity(a)}>
+                <div className="home-meeting-time">{formatDateTime(a.created_at)}</div>
+                <div className="home-meeting-main">
+                  <div className="home-meeting-title">{a.description || "Meeting"}</div>
+                  {entityName(a) && <div className="home-meeting-sub">{entityName(a)}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 3. Urgent tasks */}
+      <div className="home-section">
+        <div className="home-section-title">Urgent Tasks</div>
+        {urgentTasks.length === 0 ? (
+          <div className="home-empty">No urgent tasks. You are all caught up.</div>
+        ) : (
+          <div className="home-list">
+            {urgentTasks.map((t) => {
+              const overdue = isOverdue(t.due_date);
+              const dueToday = t.due_date && isToday(t.due_date);
+              const name = entityName(t);
+              return (
+                <div key={t.id} className={`home-card home-task ${overdue ? "is-overdue" : dueToday ? "is-today" : ""}`} onClick={() => name && onOpenEntity(t)}>
+                  <div className="home-task-main">
+                    <div className="home-task-title">{t.title}</div>
+                    <div className="home-task-meta">
+                      <PriorityBadge priority={t.priority} />
+                      {t.due_date && <span className={`home-due ${overdue ? "due-overdue" : dueToday ? "due-today" : ""}`}>{overdue ? `Overdue ${formatDate(t.due_date)}` : dueToday ? "Due today" : `Due ${formatDate(t.due_date)}`}</span>}
+                      {name && <span className="home-task-entity">{name}</span>}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 4. Recent activity */}
+      <div className="home-section">
+        <div className="home-section-title">Recent Activity</div>
+        {recentActivities.length === 0 ? (
+          <div className="home-empty">No activity logged yet.</div>
+        ) : (
+          <div className="home-list">
+            {recentActivities.map((a) => (
+              <div key={a.id} className="home-card home-act" onClick={() => onOpenEntity(a)}>
+                <ActivityGlyph type={a.type} />
+                <div className="home-act-main">
+                  <div className="home-act-desc">{a.description}</div>
+                  <div className="home-act-meta">{entityName(a) || "General"} . {formatDateTime(a.created_at)}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 5. Stale deals (no activity in 14+ days) */}
+      <div className="home-section">
+        <div className="home-section-title">Stale Deals</div>
+        {staleDeals.length === 0 ? (
+          <div className="home-empty">No stale deals. Everything has been touched recently.</div>
+        ) : (
+          <div className="home-list">
+            {staleDeals.map((d) => {
+              const stage = STAGES.find((s) => s.id === d.stage);
+              return (
+                <div key={d.id} className="home-card home-stale" onClick={() => onOpenEntity({ deal_id: d.id })}>
+                  <div className="home-stale-main">
+                    <div className="home-stale-name">{d.company}</div>
+                    {stage && <span className="badge" style={{ background: stage.color + "22", color: stage.color, border: `1px solid ${stage.color}44` }}>{stage.label}</span>}
+                  </div>
+                  <div className="home-stale-days">{daysAgo(d.last_activity_at)} days quiet</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {!bossMode && isMobile && (
+        <button className="home-reports-link" onClick={onOpenReports}>View Reports</button>
+      )}
+    </div>
   );
 }
 
