@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
 import { api } from "./supabase";
-import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, getApiCallsToday } from "./anthropic";
+import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import MapTab from "./MapTab";
@@ -43,6 +43,7 @@ const ACTIVITY_GLYPHS = {
   note: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
   proposal_sent: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
   transcript: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
+  voice_note: { glyph: "🎤", bg: "#FDF0DA", fg: "#B5791A" },
 };
 function ActivityGlyph({ type }) {
   const g = ACTIVITY_GLYPHS[type] || { glyph: "•", bg: "#F1EADD", fg: "#8A8072" };
@@ -56,7 +57,99 @@ function NavIcon({ shape }) {
   if (shape === "diamond") return <span className="nav-icon nav-icon-diamond" />;
   if (shape === "lines") return <span className="nav-icon nav-icon-lines"><i /><i /><i /></span>;
   if (shape === "chart") return <span className="nav-icon nav-icon-square" style={{ borderRadius: 4 }} />;
+  if (shape === "doc") return <span className="nav-icon nav-icon-doc" />;
   return null;
+}
+
+// Reactive viewport check (mobile = <=768px). Used to switch a few behaviors
+// that CSS alone cannot handle (People forced to card view, pipeline stage nav).
+function useIsMobile(bp = 768) {
+  const [m, setM] = useState(() => typeof window !== "undefined" && window.matchMedia(`(max-width:${bp}px)`).matches);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia(`(max-width:${bp}px)`);
+    const on = () => setM(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, [bp]);
+  return m;
+}
+
+// mm:ss for the voice-note recording timer.
+const formatSeconds = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+
+// Best-effort conversion of a natural-language due-date hint ("tomorrow", "next
+// Thursday", "end of week") into an ISO date. Returns null when nothing matches,
+// in which case the caller keeps the hint text in the task title instead.
+function parseDueHint(hint) {
+  const h = (hint || "").toLowerCase().trim();
+  if (!h) return null;
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  const iso = (dt) => dt.toISOString().slice(0, 10);
+  if (/\btoday\b/.test(h)) return iso(d);
+  if (/\btomorrow\b/.test(h)) { d.setDate(d.getDate() + 1); return iso(d); }
+  if (/\bnext week\b/.test(h)) { d.setDate(d.getDate() + 7); return iso(d); }
+  if (/end of (the )?week/.test(h)) { const add = ((5 - d.getDay() + 7) % 7) || 5; d.setDate(d.getDate() + add); return iso(d); }
+  const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  for (let i = 0; i < 7; i++) {
+    if (h.includes(days[i])) { let add = (i - d.getDay() + 7) % 7; if (add === 0) add = 7; d.setDate(d.getDate() + add); return iso(d); }
+  }
+  return null;
+}
+
+// Fixed bottom tab bar shown only on mobile (CSS hides it on desktop and hides
+// the sidebar on mobile). Reports is hidden in Boss View, matching the sidebar.
+function MobileTabBar({ view, setView, tasksCount, sheetOrigin = "network", bossMode = false }) {
+  const tabs = [
+    { id: "pipeline", label: "Pipeline", shape: "square" },
+    { id: "network", label: "Ecosystem", shape: "circle" },
+    { id: "map", label: "Map", shape: "diamond" },
+    { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
+    ...(bossMode ? [] : [{ id: "reports", label: "Reports", shape: "doc" }]),
+  ];
+  const mapView = view === "institution-sheet" ? sheetOrigin : view === "person-sheet" ? "network" : view;
+  return (
+    <nav className="mobile-tabbar">
+      {tabs.map((t) => (
+        <button key={t.id} onClick={() => setView(t.id)} className={`mobile-tab ${mapView === t.id ? "active" : ""}`}>
+          <span className="mobile-tab-icon"><NavIcon shape={t.shape} /></span>
+          <span className="mobile-tab-label">{t.label}</span>
+          {t.count > 0 && <span className="mobile-tab-badge">{t.count}</span>}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+// Mobile-only header above the Pipeline kanban: current stage name plus prev/next
+// arrows that scroll-snap the columns. Tracks the centered column from scrollLeft.
+function MobilePipelineNav({ kanbanRef }) {
+  const [idx, setIdx] = useState(0);
+  useEffect(() => {
+    const el = kanbanRef.current;
+    if (!el) return;
+    const onScroll = () => { const w = el.clientWidth; if (w) setIdx(Math.max(0, Math.min(STAGES.length - 1, Math.round(el.scrollLeft / w)))); };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [kanbanRef]);
+  const go = (delta) => {
+    const el = kanbanRef.current;
+    if (!el) return;
+    const w = el.clientWidth;
+    el.scrollTo({ left: Math.max(0, (idx + delta)) * w, behavior: "smooth" });
+  };
+  const stage = STAGES[Math.min(idx, STAGES.length - 1)] || STAGES[0];
+  return (
+    <div className="mobile-stage-nav">
+      <button className="mobile-stage-arrow" onClick={() => go(-1)} disabled={idx <= 0} aria-label="Previous stage">‹</button>
+      <div className="mobile-stage-label">
+        <span className="dot" style={{ background: stage.color }} />
+        <span>{stage.label}</span>
+        <span className="mobile-stage-count">{idx + 1}/{STAGES.length}</span>
+      </div>
+      <button className="mobile-stage-arrow" onClick={() => go(1)} disabled={idx >= STAGES.length - 1} aria-label="Next stage">›</button>
+    </div>
+  );
 }
 
 // Left sidebar: wordmark, primary nav (geometric icons), a More section for
@@ -1587,6 +1680,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const openInstitution = (name, origin = "network") => { if (name) { setInstitutionSheetKey(name.trim().toLowerCase()); setSheetOrigin(origin); setView("institution-sheet"); } };
   const openPerson = (id) => { setPersonSheetId(id); setView("person-sheet"); };
 
+  // Ref to the Pipeline kanban so the mobile stage nav can scroll-snap columns.
+  const kanbanRef = useRef(null);
+
   if (loading) return <div className="app loading-screen"><div className="loading-text">Loading Mango OS...</div></div>;
 
   return (
@@ -1697,6 +1793,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onUpdate={(patch) => updateContact(sheetContact.id, patch)}
             onDelete={deleteContact}
             onAddActivity={addActivity}
+            onAddTodo={(form) => saveTodo({ ...form, contact_id: sheetContact.id })}
             onAddRole={addPersonRole}
             onRemoveRole={removePersonRole}
             onConnectPerson={(sourceId, targetId, relationship) => addNetworkEdge({ source_type: "contact", source_id: sourceId, target_type: "contact", target_id: targetId, relationship, strength: "medium", direction: "bidirectional" })}
@@ -1734,7 +1831,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
               ))}
             </div>
           </div>
-          <div className="kanban">
+          <MobilePipelineNav kanbanRef={kanbanRef} />
+          <div className="kanban" ref={kanbanRef}>
             {STAGES.map((stage) => {
               const sd = deals.filter(d => d.stage === stage.id && (tierFilter === "all" || (d.tier || "Untiered") === tierFilter));
               return (
@@ -1899,6 +1997,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
       </main>
 
+      {/* Mobile-only bottom tab bar (the sidebar is hidden on phones). */}
+      <MobileTabBar view={view} setView={setView} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} bossMode={bossMode} />
+
       {/* Floating two-way comment thread, available on every tab for Fahed and Andy.
           Only Fahed's opens clear the unread marker (the badge is Fahed's). */}
       <CommentPanel comments={bossComments} author={commentAuthor} unread={unreadComments} onOpen={bossMode ? undefined : markCommentsSeen} onPost={postBossComment} targetName={commentTargetName} />
@@ -2016,7 +2117,7 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onAddActivity, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, bossNotesSlot }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onAddActivity, onAddTodo, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, bossNotesSlot }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -2208,7 +2309,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
         )}
       </div>
 
-      <QuickAdd contactId={contact.id} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} showToast={showToast} />
+      <QuickAdd contactId={contact.id} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
 
       <div className="timeline">
         <div className="section-label">Activity Timeline</div>
@@ -2286,7 +2387,7 @@ function PeopleSection({ people, activities, contacts, institutionName, customOp
   );
 }
 
-function QuickAdd({ dealId = null, enablerId = null, organizationId = null, contactId, customOptions = [], onAddCustomOption = () => {}, onAddActivity, showToast }) {
+function QuickAdd({ dealId = null, enablerId = null, organizationId = null, contactId, customOptions = [], onAddCustomOption = () => {}, onAddActivity, onCreateTasks, showToast }) {
   const readOnly = useReadOnly();
   const [qType, setQType] = useState("call");
   const [qDesc, setQDesc] = useState("");
@@ -2296,6 +2397,97 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
   const [photoPreview, setPhotoPreview] = useState(null);
   const [photoLoading, setPhotoLoading] = useState(false);
   const fileInputRef = useRef(null);
+
+  // Voice notes (Section 9): record via the Web Speech API, then send the raw
+  // transcription (never shown) to Claude for a clean summary + action items.
+  const [recording, setRecording] = useState(false);
+  const [recSeconds, setRecSeconds] = useState(0);
+  const [voiceProcessing, setVoiceProcessing] = useState(false);
+  const [voiceResult, setVoiceResult] = useState(null); // { summary, action_items: [{title, priority, due_date_hint, checked}] }
+  const [voiceUnsupported, setVoiceUnsupported] = useState(false);
+  const [savingVoice, setSavingVoice] = useState(false);
+  const recognitionRef = useRef(null);
+  const transcriptRef = useRef("");
+  const recTimerRef = useRef(null);
+
+  useEffect(() => () => {
+    if (recTimerRef.current) clearInterval(recTimerRef.current);
+    if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch { /* already stopped */ } }
+  }, []);
+
+  const startRecording = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { setVoiceUnsupported(true); return; }
+    setVoiceUnsupported(false);
+    setVoiceResult(null);
+    transcriptRef.current = "";
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.continuous = true;
+    rec.interimResults = false;
+    rec.onresult = (e) => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) transcriptRef.current += e.results[i][0].transcript + " ";
+      }
+    };
+    rec.onerror = () => { /* ignore; the user can retry */ };
+    recognitionRef.current = rec;
+    try { rec.start(); } catch { setVoiceUnsupported(true); return; }
+    setRecording(true);
+    setRecSeconds(0);
+    recTimerRef.current = setInterval(() => setRecSeconds((s) => s + 1), 1000);
+  };
+
+  const stopRecording = async () => {
+    if (recTimerRef.current) { clearInterval(recTimerRef.current); recTimerRef.current = null; }
+    setRecording(false);
+    if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch { /* already stopped */ } }
+    // Give recognition a moment to flush its final results.
+    await new Promise((r) => setTimeout(r, 400));
+    const raw = transcriptRef.current.trim();
+    if (!raw) { showToast("No speech detected. Try again."); return; }
+    setVoiceProcessing(true);
+    try {
+      const result = await digestVoiceNote(raw);
+      setVoiceResult({ summary: result.summary || raw, action_items: (result.action_items || []).map((a) => ({ ...a, checked: true })) });
+    } catch {
+      showToast("Error processing voice note");
+      setVoiceResult({ summary: raw, action_items: [] });
+    }
+    setVoiceProcessing(false);
+  };
+
+  const micTap = () => { if (recording) stopRecording(); else startRecording(); };
+
+  const setActionItem = (i, patch) => setVoiceResult((r) => {
+    const items = r.action_items.map((a, j) => (j === i ? { ...a, ...patch } : a));
+    return { ...r, action_items: items };
+  });
+
+  const saveVoiceNote = async (withTasks) => {
+    if (!voiceResult || savingVoice) return;
+    const summary = voiceResult.summary.trim();
+    if (!summary) { showToast("Summary is empty"); return; }
+    setSavingVoice(true);
+    try {
+      await onAddActivity(dealId, contactId, { type: "voice_note", description: summary }, enablerId, organizationId);
+      if (withTasks && onCreateTasks) {
+        const tasks = voiceResult.action_items
+          .filter((a) => a.checked && (a.title || "").trim())
+          .map((a) => {
+            const hint = (a.due_date_hint || "").trim();
+            const due = parseDueHint(hint);
+            const title = (!due && hint) ? `${a.title.trim()} (${hint})` : a.title.trim();
+            return { title, priority: ["high", "medium", "low"].includes(a.priority) ? a.priority : "medium", due_date: due || undefined };
+          });
+        if (tasks.length) await onCreateTasks(tasks);
+      }
+      setVoiceResult(null);
+      showToast(withTasks ? "Note saved and tasks created" : "Note saved");
+    } catch { showToast("Error saving note"); }
+    setSavingVoice(false);
+  };
+
   if (readOnly) return null;
 
   const submit = async () => {
@@ -2373,8 +2565,50 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
         />
         <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" className="photo-input-hidden" onChange={pickPhoto} />
         <button type="button" onClick={() => fileInputRef.current?.click()} className="btn-sec photo-btn" title="Upload photo of notes">📷</button>
+        <button type="button" onClick={micTap} className={`btn-sec voice-mic-btn ${recording ? "recording" : ""}`} title="Record a voice note" disabled={voiceProcessing}>{recording ? "⏹" : "🎤"}</button>
         <button onClick={submit} className="btn-primary" disabled={!qDesc.trim() || posting}>Add</button>
       </div>
+
+      {recording && (
+        <div className="voice-recording-bar">
+          <span className="voice-rec-dot" />
+          <span className="voice-rec-label">Recording... {formatSeconds(recSeconds)}</span>
+          <button type="button" onClick={stopRecording} className="btn-primary voice-stop-btn">Stop</button>
+        </div>
+      )}
+      {voiceProcessing && <div className="voice-processing">Processing...</div>}
+      {voiceUnsupported && <div className="voice-unsupported">Voice notes not supported in this browser. Try Chrome or Safari.</div>}
+
+      {voiceResult && (
+        <div className="voice-result-card">
+          <div className="voice-result-head"><span className="voice-result-mic">🎤</span> Meeting Note</div>
+          <textarea
+            className="input voice-result-summary"
+            value={voiceResult.summary}
+            onChange={(e) => setVoiceResult((r) => ({ ...r, summary: e.target.value }))}
+          />
+          {voiceResult.action_items.length > 0 && (
+            <div className="voice-actions-list">
+              <div className="voice-actions-label">Action Items</div>
+              {voiceResult.action_items.map((a, i) => (
+                <label key={i} className="voice-action-item">
+                  <input type="checkbox" checked={a.checked} onChange={(e) => setActionItem(i, { checked: e.target.checked })} />
+                  <span className="voice-action-title">{a.title}</span>
+                  <PriorityBadge priority={a.priority} />
+                  {a.due_date_hint ? <span className="voice-action-hint">{a.due_date_hint}</span> : null}
+                </label>
+              ))}
+            </div>
+          )}
+          <div className="voice-result-actions">
+            <button type="button" onClick={() => saveVoiceNote(false)} className="btn-sec" disabled={savingVoice}>Save Note</button>
+            {onCreateTasks && voiceResult.action_items.some((a) => a.checked) && (
+              <button type="button" onClick={() => saveVoiceNote(true)} className="btn-primary" disabled={savingVoice}>Save Note + Create Tasks</button>
+            )}
+            <button type="button" onClick={() => setVoiceResult(null)} className="link-btn voice-discard" disabled={savingVoice}>Discard</button>
+          </div>
+        </div>
+      )}
 
       {qType === "transcript" && (
         <div className="quickadd-transcript-actions">
@@ -3204,7 +3438,7 @@ function InstitutionSheet({
         </div>
       )}
 
-      <QuickAdd dealId={inst.dealId} enablerId={inst.enablerId} organizationId={inst.orgId} contactId={null} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} showToast={showToast} />
+      <QuickAdd dealId={inst.dealId} enablerId={inst.enablerId} organizationId={inst.orgId} contactId={null} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
 
       <div className="timeline">
         <div className="section-label">Activity Timeline</div>
@@ -3464,7 +3698,11 @@ function NetworkTab({
   const [instFilter, setInstFilter] = useState("");
   const [activeForm, setActiveForm] = useState(null);
   const [peopleView, setPeopleView] = useState("table");
+  const [fabOpen, setFabOpen] = useState(false);
   const readOnly = useReadOnly();
+  const isMobile = useIsMobile();
+  // On mobile the editable table is unusable, so People always renders as cards.
+  const effectivePeopleView = isMobile ? "cards" : peopleView;
 
   const cities = Array.from(new Set(institutions.flatMap(i => parseCities(i.city)))).sort();
   const types = Array.from(new Set(institutions.map(i => i.type).filter(Boolean)));
@@ -3507,6 +3745,18 @@ function NetworkTab({
           {!readOnly && <button onClick={() => setActiveForm(a => (a === "person" ? null : "person"))} className={`btn-primary ${activeForm === "person" ? "active-toggle" : ""}`}>+ Person</button>}
         </div>
       </div>
+
+      {!readOnly && (
+        <div className={`mobile-add-fab ${fabOpen ? "open" : ""}`}>
+          {fabOpen && (
+            <div className="mobile-add-fab-options">
+              <button onClick={() => { setActiveForm("institution"); setFabOpen(false); }} className="mobile-add-fab-opt">+ Institution</button>
+              <button onClick={() => { setActiveForm("person"); setFabOpen(false); }} className="mobile-add-fab-opt">+ Person</button>
+            </div>
+          )}
+          <button onClick={() => setFabOpen((o) => !o)} className="mobile-add-fab-btn" aria-label={fabOpen ? "Close" : "Add"}>{fabOpen ? "✕" : "+"}</button>
+        </div>
+      )}
 
       {activeForm === "institution" && (
         <InstitutionForm customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCancel={() => setActiveForm(null)} onSave={async (f) => { await onAddInstitution(f); setActiveForm(null); }} />
@@ -3588,8 +3838,9 @@ function NetworkTab({
         </>
       ) : (
         <>
+          {isMobile && <div className="mobile-people-note">Switch to desktop for table editing.</div>}
           <div className="network-filter-row">
-            <div className="view-toggle">
+            <div className="view-toggle desktop-only-flex">
               <button className={`view-toggle-btn ${peopleView === "cards" ? "active" : ""}`} onClick={() => setPeopleView("cards")}>Cards</button>
               <button className={`view-toggle-btn ${peopleView === "table" ? "active" : ""}`} onClick={() => setPeopleView("table")}>Table</button>
             </div>
@@ -3602,7 +3853,7 @@ function NetworkTab({
           </div>
           {filteredPeople.length === 0 ? (
             <div className="empty-state">No people match.</div>
-          ) : peopleView === "table" ? (
+          ) : effectivePeopleView === "table" ? (
             <PeopleTable
               people={filteredPeople}
               institutionNames={instNames}

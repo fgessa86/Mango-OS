@@ -250,6 +250,14 @@ export default function MapTab({ institutions, contacts, contactRoles, dealEnabl
     const nodes = graph.nodes.map((n) => ({ ...n }));
     const links = graph.links.map((l) => ({ ...l, source: l.source, target: l.target }));
 
+    // On touch/mobile viewports, enforce a minimum radius so small person nodes
+    // stay comfortably tappable (spec: min 16px radius for people).
+    const isTouch = size.w < 700;
+    const radiusOf = (d) => {
+      const rr = styleOf(d.type).r * scale;
+      return isTouch && isPersonType(d.type) ? Math.max(rr, 16) : rr;
+    };
+
     const linkSel = linkG.selectAll("line").data(links).join("line")
       .attr("class", "map-link")
       .attr("stroke-linecap", "round")
@@ -262,7 +270,7 @@ export default function MapTab({ institutions, contacts, contactRoles, dealEnabl
     nodeSel.each(function (d) {
       const g = d3.select(this);
       const st = styleOf(d.type);
-      const r = st.r * scale;
+      const r = radiusOf(d);
       const dark = d3.color(st.fill).darker(0.9).formatHex();
       if (d.fresh) g.append("circle").attr("class", "map-pulse-ring").attr("r", r).attr("fill", "none").attr("stroke", st.fill).attr("stroke-width", 2);
       const circle = g.append("circle").attr("class", "map-node-circle").attr("r", r).attr("stroke", dark).attr("stroke-width", 1);
@@ -309,7 +317,7 @@ export default function MapTab({ institutions, contacts, contactRoles, dealEnabl
     const sim = d3.forceSimulation(nodes)
       .force("charge", d3.forceManyBody().strength((d) => (d.isInstitution ? -300 : -100)))
       .force("link", d3.forceLink(links).id((d) => d.id).distance((l) => (l.strength === "strong" ? 80 : l.strength === "weak" ? 250 : 150)))
-      .force("collide", d3.forceCollide().radius((d) => styleOf(d.type).r * scale + 6));
+      .force("collide", d3.forceCollide().radius((d) => radiusOf(d) + 6));
 
     if (mode === "pathfinder") {
       const targetId = stateRef.current && pathTarget;

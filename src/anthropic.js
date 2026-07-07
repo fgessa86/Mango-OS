@@ -237,3 +237,45 @@ export const summarizeImage = async (base64, prompt) => {
   const data = await res.json();
   return data.content?.[0]?.text?.trim() || "";
 };
+
+// Section 9: turn a raw voice-note transcription into a clean, structured record.
+// Returns { summary, action_items: [{title, priority, due_date_hint}] }. The raw
+// transcription is never shown to the user; only this digested result is.
+export const digestVoiceNote = async (transcript) => {
+  if (!ANTHROPIC_API_KEY) throw new Error("Missing VITE_ANTHROPIC_API_KEY");
+  const prompt = `You are turning a raw voice note (recorded right after a meeting or call) into a structured record. Produce two things:
+
+1. SUMMARY: a clean 2 to 4 sentence summary written in the past tense and third person. Fix grammar, remove filler words, and keep only what matters.
+2. ACTION ITEMS: every follow up or task mentioned, as a JSON array where each element is {"title": string, "priority": "high" | "medium" | "low", "due_date_hint": string}. Use an empty string for due_date_hint when no timing was mentioned. Return an empty array when there are no action items.
+
+Respond with JSON only, no markdown and no backticks, in exactly this shape: {"summary": string, "action_items": array}. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.
+
+Here is the raw transcription:
+${transcript}`;
+  bumpApiCalls();
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 500,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  if (!res.ok) throw new Error(`Anthropic API error: ${res.status}`);
+  const data = await res.json();
+  let text = data.content?.[0]?.text?.trim() || "";
+  // Strip any markdown code fences the model may have added before parsing.
+  text = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  const match = text.match(/\{[\s\S]*\}/);
+  const parsed = JSON.parse(match ? match[0] : text);
+  return {
+    summary: (parsed.summary || "").trim(),
+    action_items: Array.isArray(parsed.action_items) ? parsed.action_items : [],
+  };
+};
