@@ -58,6 +58,11 @@ function NavIcon({ shape }) {
   if (shape === "lines") return <span className="nav-icon nav-icon-lines"><i /><i /><i /></span>;
   if (shape === "chart") return <span className="nav-icon nav-icon-square" style={{ borderRadius: 4 }} />;
   if (shape === "doc") return <span className="nav-icon nav-icon-doc" />;
+  if (shape === "note") return (
+    <span className="nav-icon nav-icon-note">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="3" y="2" width="10" height="12" rx="1.5" /><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3" strokeLinecap="round" /></svg>
+    </span>
+  );
   if (shape === "house") return (
     <span className="nav-icon nav-icon-house">
       <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M2 7.3L8 2.4l6 4.9M3.2 6.6V13h9.6V6.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
@@ -166,6 +171,8 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
     { id: "network", label: "Ecosystem", shape: "circle" },
     { id: "map", label: "Network Map", shape: "diamond" },
     { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
+    // Notes are Fahed's personal workspace, hidden in Boss View (like Reports).
+    ...(bossMode ? [] : [{ id: "notes", label: "Notes", shape: "note" }]),
   ];
   const more = [
     { id: "reports", label: "Reports" },
@@ -688,6 +695,8 @@ export default function App() {
   const [contacts, setContacts] = useState([]);
   const [activities, setActivities] = useState([]);
   const [bossComments, setBossComments] = useState([]);
+  const [notes, setNotes] = useState([]);
+  const [selectedNoteId, setSelectedNoteId] = useState(null);
   const [apiCallsToday, setApiCallsToday] = useState(() => getApiCallsToday());
   const [enablers, setEnablers] = useState([]);
   const [dealContacts, setDealContacts] = useState([]);
@@ -726,7 +735,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr, bc] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr, bc, nt] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -740,11 +749,12 @@ export default function App() {
         api("custom_options", "GET", null, "?select=*&order=created_at.asc"),
         api("contact_roles", "GET", null, "?select=*,contacts(*)&order=created_at.asc"),
         api("boss_comments", "GET", null, "?select=*&order=created_at.desc").catch(() => []),
+        api("notes", "GET", null, "?select=*&order=updated_at.desc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []);
       setOrganizations(orgs || []); setDealEnablers(de || []); setNetworkEdges(ne || []);
-      setCustomOptions(co || []); setContactRoles(cr || []); setBossComments(bc || []);
+      setCustomOptions(co || []); setContactRoles(cr || []); setBossComments(bc || []); setNotes(nt || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -1560,6 +1570,41 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Error updating to-do"); }
   };
 
+  // NOTES. The `notes` table has no updated_at trigger, so every write stamps
+  // updated_at manually. Writes patch local state (rather than a full reload) so
+  // the editor stays snappy and the cursor never jumps while typing.
+  const createNote = async () => {
+    try {
+      const rows = await api("notes", "POST", { title: "Untitled", content: "" });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) { setNotes((prev) => [row, ...prev]); setSelectedNoteId(row.id); }
+      return row;
+    } catch { showToast("Error creating note"); }
+  };
+  const updateNote = async (id, patch) => {
+    const now = new Date().toISOString();
+    try {
+      await api("notes", "PATCH", { ...patch, updated_at: now }, `?id=eq.${id}`);
+      setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch, updated_at: now } : n)));
+    } catch { showToast("Error saving note"); }
+  };
+  const deleteNote = async (id) => {
+    try {
+      await api("notes", "DELETE", null, `?id=eq.${id}`);
+      setNotes((prev) => prev.filter((n) => n.id !== id));
+      setSelectedNoteId((cur) => (cur === id ? null : cur));
+      showToast("Note deleted");
+    } catch { showToast("Error deleting note"); }
+  };
+  // Single-link model: setting a link clears the other three entity FKs. entity
+  // is { type: "deal"|"enabler"|"organization"|"contact", entityId } or null.
+  const linkNote = (id, entity) => {
+    const patch = { deal_id: null, enabler_id: null, organization_id: null, contact_id: null };
+    if (entity) patch[`${entity.type}_id`] = entity.entityId;
+    return updateNote(id, patch);
+  };
+  const openNote = (id) => { setSelectedNoteId(id); setView("notes"); };
+
   // Task/link navigation. Deals open the Pipeline deal sheet; enablers are
   // institutions, so open by name in the Ecosystem institution sheet.
   const openTaskLink = (link) => {
@@ -1791,6 +1836,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onSetFlag={(flag, checked) => setInstitutionFlag(inst, flag, checked)}
             onDelete={() => deleteInstitution(inst)}
             onAddActivity={addActivity}
+            linkedNotes={notes.filter((n) => (inst.dealId && n.deal_id === inst.dealId) || (inst.enablerId && n.enabler_id === inst.enablerId) || (inst.orgId && n.organization_id === inst.orgId))}
+            onOpenNote={openNote}
             onAddPersonRole={addPersonRole}
             onAddPersonWithRoles={addPersonWithRoles}
             onRemoveRole={removePersonRole}
@@ -1844,6 +1891,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onDelete={deleteContact}
             onAddActivity={addActivity}
             onAddTodo={(form) => saveTodo({ ...form, contact_id: sheetContact.id })}
+            linkedNotes={notes.filter((n) => n.contact_id === sheetContact.id)}
+            onOpenNote={openNote}
             onAddRole={addPersonRole}
             onRemoveRole={removePersonRole}
             onConnectPerson={(sourceId, targetId, relationship) => addNetworkEdge({ source_type: "contact", source_id: sourceId, target_type: "contact", target_id: targetId, relationship, strength: "medium", direction: "bidirectional" })}
@@ -1875,6 +1924,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           isMobile={isMobile}
           bossMode={bossMode}
           onOpenReports={() => setView("reports")}
+          notes={notes}
+          onOpenNote={openNote}
+          onOpenNotesView={() => setView("notes")}
+          onNewNote={async () => { await createNote(); setView("notes"); }}
         />
       )}
 
@@ -2053,6 +2106,26 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         </div>
       )}
 
+      {/* NOTES */}
+      {view === "notes" && (
+        <NotesTab
+          notes={notes}
+          selectedId={selectedNoteId}
+          onSelect={setSelectedNoteId}
+          onCreate={createNote}
+          onUpdate={updateNote}
+          onDelete={deleteNote}
+          onTogglePin={(n) => updateNote(n.id, { is_pinned: !n.is_pinned })}
+          onLink={linkNote}
+          deals={deals}
+          enablers={enablers}
+          organizations={organizations}
+          contacts={contacts}
+          isMobile={isMobile}
+          bossMode={bossMode}
+        />
+      )}
+
       {/* REPORTS */}
       {view === "reports" && (
         <div className="section-pad reports">
@@ -2089,7 +2162,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
@@ -2218,9 +2291,285 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
         )}
       </div>
 
+      {/* My Notes (mobile: Notes has no bottom tab, so it lives here) */}
+      {!bossMode && isMobile && (
+        <div className="home-section">
+          <div className="home-section-head">
+            <div className="home-section-title">My Notes</div>
+            <button className="home-section-action" onClick={onNewNote}>+ New</button>
+          </div>
+          {notes.length === 0 ? (
+            <div className="home-empty">No notes yet. Tap + New to write one.</div>
+          ) : (
+            <div className="home-list">
+              {[...notes]
+                .sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at))
+                .slice(0, 4)
+                .map((n) => {
+                  const preview = (n.content || "").split("\n").map((l) => l.trim()).find(Boolean) || "";
+                  return (
+                    <div key={n.id} className="home-card home-note" onClick={() => onOpenNote(n.id)}>
+                      <div className="home-note-top">
+                        <span className="home-note-title">{n.title || "Untitled"}</span>
+                        {n.is_pinned && <span className="home-note-pin">📌</span>}
+                      </div>
+                      {preview && <div className="home-note-preview">{preview}</div>}
+                      <div className="home-note-date">{formatDate(n.updated_at || n.created_at)}</div>
+                    </div>
+                  );
+                })}
+              <button className="home-reports-link" onClick={onOpenNotesView}>View All Notes</button>
+            </div>
+          )}
+        </div>
+      )}
+
       {!bossMode && isMobile && (
         <button className="home-reports-link" onClick={onOpenReports}>View Reports</button>
       )}
+    </div>
+  );
+}
+
+// Resolve a note's single linked entity to { type, entityId, name } or null.
+function noteLinkedEntity(note, { deals, enablers, organizations, contacts }) {
+  if (note.deal_id) { const d = deals.find((x) => x.id === note.deal_id); if (d) return { type: "deal", entityId: d.id, name: d.company, kind: "Deal" }; }
+  if (note.enabler_id) { const e = enablers.find((x) => x.id === note.enabler_id); if (e) return { type: "enabler", entityId: e.id, name: e.name, kind: "Enabler" }; }
+  if (note.organization_id) { const o = organizations.find((x) => x.id === note.organization_id); if (o) return { type: "organization", entityId: o.id, name: o.name, kind: "Organization" }; }
+  if (note.contact_id) { const c = contacts.find((x) => x.id === note.contact_id); if (c) return { type: "contact", entityId: c.id, name: c.name, kind: "Person" }; }
+  return null;
+}
+
+// Flat searchable list of linkable entities (deals, enablers, organizations, people).
+function buildNoteEntityOptions({ deals, enablers, organizations, contacts }, query) {
+  const q = (query || "").trim().toLowerCase();
+  const opts = [
+    ...deals.map((d) => ({ type: "deal", entityId: d.id, name: d.company, kind: "Deal" })),
+    ...enablers.map((e) => ({ type: "enabler", entityId: e.id, name: e.name, kind: "Enabler" })),
+    ...organizations.map((o) => ({ type: "organization", entityId: o.id, name: o.name, kind: "Organization" })),
+    ...contacts.map((c) => ({ type: "contact", entityId: c.id, name: c.name, kind: "Person" })),
+  ].filter((o) => o.name);
+  return q ? opts.filter((o) => o.name.toLowerCase().includes(q)) : opts;
+}
+
+// Notes tab: a list panel (search, pinned then recent) beside a distraction-free
+// editor. On mobile the two are separate full-screen views (list, then editor).
+function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, onTogglePin, onLink, deals, enablers, organizations, contacts, isMobile, bossMode }) {
+  const readOnly = useReadOnly();
+  const [search, setSearch] = useState("");
+  const [focusNew, setFocusNew] = useState(null);
+  const entityCtx = { deals, enablers, organizations, contacts };
+
+  const q = search.trim().toLowerCase();
+  const filtered = notes.filter((n) => !q || (n.title || "").toLowerCase().includes(q) || (n.content || "").toLowerCase().includes(q));
+  const byUpdated = (a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at);
+  const pinned = filtered.filter((n) => n.is_pinned).sort(byUpdated);
+  const recent = filtered.filter((n) => !n.is_pinned).sort(byUpdated);
+  const selected = notes.find((n) => n.id === selectedId) || null;
+
+  const handleNew = async () => {
+    const row = await onCreate();
+    if (row) { setFocusNew(row.id); setSearch(""); }
+  };
+
+  const mobileEditing = isMobile && !!selected;
+  return (
+    <div className={`notes-view ${mobileEditing ? "notes-editing" : ""}`}>
+      <div className="notes-list-panel">
+        <div className="notes-list-head">
+          {!readOnly && <button className="btn-primary notes-new-btn" onClick={handleNew}>+ New Note</button>}
+          <input className="input notes-search" placeholder="Search notes..." value={search} onChange={(e) => setSearch(e.target.value)} />
+        </div>
+        <div className="notes-list-scroll">
+          {filtered.length === 0 ? (
+            <div className="empty-small notes-empty">{q ? "No notes match." : "No notes yet. Create your first one."}</div>
+          ) : (
+            <>
+              {pinned.length > 0 && (
+                <div className="notes-group">
+                  <div className="notes-group-head">📌 Pinned</div>
+                  {pinned.map((n) => <NoteListItem key={n.id} note={n} active={n.id === selectedId} onSelect={onSelect} entityCtx={entityCtx} />)}
+                </div>
+              )}
+              {recent.length > 0 && (
+                <div className="notes-group">
+                  <div className="notes-group-head">Recent</div>
+                  {recent.map((n) => <NoteListItem key={n.id} note={n} active={n.id === selectedId} onSelect={onSelect} entityCtx={entityCtx} />)}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="notes-editor-panel">
+        {selected ? (
+          <NoteEditor
+            key={selected.id}
+            note={selected}
+            readOnly={readOnly}
+            autoFocusTitle={focusNew === selected.id}
+            onClearAutoFocus={() => setFocusNew(null)}
+            onUpdate={onUpdate}
+            onDelete={onDelete}
+            onTogglePin={onTogglePin}
+            onLink={onLink}
+            onBack={() => onSelect(null)}
+            entityCtx={entityCtx}
+            isMobile={isMobile}
+          />
+        ) : (
+          <div className="notes-editor-empty">Select a note, or create a new one to start writing.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function NoteListItem({ note, active, onSelect, entityCtx }) {
+  const ent = noteLinkedEntity(note, entityCtx);
+  const preview = (note.content || "").split("\n").map((l) => l.trim()).find(Boolean) || "";
+  return (
+    <button className={`note-list-item ${active ? "active" : ""}`} onClick={() => onSelect(note.id)}>
+      <div className="note-item-top">
+        <span className="note-item-title">{note.title || "Untitled"}</span>
+        {note.is_pinned && <span className="note-item-pin" title="Pinned">📌</span>}
+      </div>
+      {preview && <div className="note-item-preview">{preview}</div>}
+      <div className="note-item-meta">
+        <span className="note-item-date">{formatDate(note.updated_at || note.created_at)}</span>
+        {ent && <span className="note-item-tag">{ent.name}</span>}
+      </div>
+    </button>
+  );
+}
+
+function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate, onDelete, onTogglePin, onLink, onBack, entityCtx, isMobile }) {
+  const [title, setTitle] = useState(note.title || "");
+  const [content, setContent] = useState(note.content || "");
+  const [saved, setSaved] = useState(false);
+  const [linking, setLinking] = useState(false);
+  const [linkQuery, setLinkQuery] = useState("");
+  const titleRef = useRef(null);
+  const debounceRef = useRef(null);
+  const savedTimerRef = useRef(null);
+
+  useEffect(() => { setTitle(note.title || ""); setContent(note.content || ""); }, [note.id]);
+  useEffect(() => {
+    if (autoFocusTitle && titleRef.current) { titleRef.current.focus(); titleRef.current.select(); onClearAutoFocus && onClearAutoFocus(); }
+  }, [autoFocusTitle, onClearAutoFocus]);
+  useEffect(() => () => { if (debounceRef.current) clearTimeout(debounceRef.current); if (savedTimerRef.current) clearTimeout(savedTimerRef.current); }, []);
+
+  const flashSaved = () => {
+    setSaved(true);
+    if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+    savedTimerRef.current = setTimeout(() => setSaved(false), 1600);
+  };
+  const saveTitle = () => {
+    if (readOnly) return;
+    const clean = title.trim() || "Untitled";
+    if (clean !== (note.title || "")) { onUpdate(note.id, { title: clean }); flashSaved(); }
+    if (title !== clean) setTitle(clean);
+  };
+  const onContentChange = (v) => {
+    setContent(v);
+    if (readOnly) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => { onUpdate(note.id, { content: v }); flashSaved(); }, 1000);
+  };
+  const flushContent = () => {
+    if (readOnly) return;
+    if (debounceRef.current) { clearTimeout(debounceRef.current); debounceRef.current = null; }
+    if (content !== (note.content || "")) { onUpdate(note.id, { content }); flashSaved(); }
+  };
+
+  const linked = noteLinkedEntity(note, entityCtx);
+  const options = buildNoteEntityOptions(entityCtx, linkQuery).slice(0, 8);
+
+  return (
+    <div className="note-editor">
+      <div className="note-editor-topbar">
+        {isMobile && <button className="note-back-btn" onClick={onBack}>← Notes</button>}
+        <span className={`note-saved ${saved ? "show" : ""}`}>Saved</span>
+      </div>
+      {readOnly ? (
+        <div className="note-title-static">{note.title || "Untitled"}</div>
+      ) : (
+        <input
+          ref={titleRef}
+          className="note-title-input"
+          placeholder="Untitled"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          onBlur={saveTitle}
+          onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+        />
+      )}
+      {readOnly ? (
+        <div className="note-content-static">{note.content || ""}</div>
+      ) : (
+        <textarea
+          className="note-content-input"
+          placeholder="Start writing..."
+          value={content}
+          onChange={(e) => onContentChange(e.target.value)}
+          onBlur={flushContent}
+        />
+      )}
+
+      {!readOnly && (
+        <div className="note-toolbar">
+          <button className={`note-tool-btn ${note.is_pinned ? "active" : ""}`} onClick={() => onTogglePin(note)} title={note.is_pinned ? "Unpin" : "Pin"}>
+            📌 {note.is_pinned ? "Pinned" : "Pin"}
+          </button>
+
+          <div className="note-link-wrap">
+            {linked ? (
+              <span className="note-link-pill">
+                {linked.name}
+                <button className="note-link-remove" onClick={() => onLink(note.id, null)} title="Unlink">✕</button>
+              </span>
+            ) : linking ? (
+              <div className="note-link-picker">
+                <input autoFocus className="input note-link-search" placeholder="Search deals, people..." value={linkQuery} onChange={(e) => setLinkQuery(e.target.value)} onBlur={() => setTimeout(() => setLinking(false), 150)} />
+                {linkQuery.trim() && (
+                  <div className="note-link-options">
+                    {options.length === 0 ? <div className="empty-small">No matches.</div> : options.map((o) => (
+                      <button key={`${o.type}-${o.entityId}`} className="note-link-option" onMouseDown={() => { onLink(note.id, o); setLinking(false); setLinkQuery(""); }}>
+                        <span className="note-link-option-name">{o.name}</span>
+                        <span className="note-link-option-kind">{o.kind}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button className="note-tool-btn" onClick={() => { setLinking(true); setLinkQuery(""); }}>Link to...</button>
+            )}
+          </div>
+
+          <button className="note-tool-btn note-delete-btn" onClick={() => { if (confirm("Delete this note?")) onDelete(note.id); }} title="Delete note">🗑 Delete</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Read-only "Linked Notes" section shown on Institution and Person sheets.
+function LinkedNotesSection({ notes, onOpenNote }) {
+  if (!notes || notes.length === 0) return null;
+  const sorted = [...notes].sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
+  return (
+    <div className="people-section">
+      <div className="section-label">Linked Notes</div>
+      <div className="linked-notes-list">
+        {sorted.map((n) => (
+          <button key={n.id} className="linked-note-row" onClick={() => onOpenNote(n.id)}>
+            <span className="linked-note-title">{n.title || "Untitled"}</span>
+            <span className="linked-note-date">{formatDate(n.updated_at || n.created_at)}</span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2329,7 +2678,7 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onAddActivity, onAddTodo, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, bossNotesSlot }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onAddActivity, onAddTodo, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, bossNotesSlot }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -2520,6 +2869,8 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
           </div>
         )}
       </div>
+
+      <LinkedNotesSection notes={linkedNotes} onOpenNote={onOpenNote} />
 
       <QuickAdd contactId={contact.id} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
 
@@ -3253,7 +3604,7 @@ function institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, 
 function InstitutionSheet({
   institution: inst, summaryEntity, activities, contacts, deals, enablers, organizations,
   dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {},
-  onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
+  onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, linkedNotes = [], onOpenNote, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
   onChangeStage, onChangeTier, todos = [], onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
   onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot,
@@ -3649,6 +4000,8 @@ function InstitutionSheet({
           )}
         </div>
       )}
+
+      <LinkedNotesSection notes={linkedNotes} onOpenNote={onOpenNote} />
 
       <QuickAdd dealId={inst.dealId} enablerId={inst.enablerId} organizationId={inst.orgId} contactId={null} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
 
