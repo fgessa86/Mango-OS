@@ -696,6 +696,7 @@ export default function App() {
   const [activities, setActivities] = useState([]);
   const [bossComments, setBossComments] = useState([]);
   const [notes, setNotes] = useState([]);
+  const [noteFolders, setNoteFolders] = useState([]);
   const [selectedNoteId, setSelectedNoteId] = useState(null);
   const [apiCallsToday, setApiCallsToday] = useState(() => getApiCallsToday());
   const [enablers, setEnablers] = useState([]);
@@ -735,7 +736,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr, bc, nt] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr, bc, nt, nf] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -750,11 +751,12 @@ export default function App() {
         api("contact_roles", "GET", null, "?select=*,contacts(*)&order=created_at.asc"),
         api("boss_comments", "GET", null, "?select=*&order=created_at.desc").catch(() => []),
         api("notes", "GET", null, "?select=*&order=updated_at.desc").catch(() => []),
+        api("note_folders", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []);
       setOrganizations(orgs || []); setDealEnablers(de || []); setNetworkEdges(ne || []);
-      setCustomOptions(co || []); setContactRoles(cr || []); setBossComments(bc || []); setNotes(nt || []);
+      setCustomOptions(co || []); setContactRoles(cr || []); setBossComments(bc || []); setNotes(nt || []); setNoteFolders(nf || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -1605,6 +1607,40 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   };
   const openNote = (id) => { setSelectedNoteId(id); setView("notes"); };
 
+  // NOTE FOLDERS. Simple tree via parent_id; local state is patched on write.
+  const createFolder = async (name = "New Folder", parent_id = null) => {
+    try {
+      const clean = { name };
+      if (parent_id) clean.parent_id = parent_id;
+      const rows = await api("note_folders", "POST", clean);
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setNoteFolders((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Error creating folder"); }
+  };
+  const updateFolder = async (id, patch) => {
+    try {
+      await api("note_folders", "PATCH", patch, `?id=eq.${id}`);
+      setNoteFolders((prev) => prev.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+    } catch { showToast("Error updating folder"); }
+  };
+  // Delete a folder: move its notes to Unfiled and reparent direct child folders
+  // up to this folder's parent, then remove the folder.
+  const deleteFolder = async (id) => {
+    const folder = noteFolders.find((f) => f.id === id);
+    try {
+      const childNotes = notes.filter((n) => n.folder_id === id);
+      await Promise.all(childNotes.map((n) => api("notes", "PATCH", { folder_id: null }, `?id=eq.${n.id}`)));
+      const childFolders = noteFolders.filter((f) => f.parent_id === id);
+      await Promise.all(childFolders.map((f) => api("note_folders", "PATCH", { parent_id: folder?.parent_id || null }, `?id=eq.${f.id}`)));
+      await api("note_folders", "DELETE", null, `?id=eq.${id}`);
+      setNotes((prev) => prev.map((n) => (n.folder_id === id ? { ...n, folder_id: null } : n)));
+      setNoteFolders((prev) => prev.filter((f) => f.id !== id).map((f) => (f.parent_id === id ? { ...f, parent_id: folder?.parent_id || null } : f)));
+      showToast("Folder deleted, notes moved to Unfiled");
+    } catch { showToast("Error deleting folder"); }
+  };
+  const moveNoteToFolder = (noteId, folderId) => updateNote(noteId, { folder_id: folderId || null });
+
   // Task/link navigation. Deals open the Pipeline deal sheet; enablers are
   // institutions, so open by name in the Ecosystem institution sheet.
   const openTaskLink = (link) => {
@@ -2117,6 +2153,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onDelete={deleteNote}
           onTogglePin={(n) => updateNote(n.id, { is_pinned: !n.is_pinned })}
           onLink={linkNote}
+          folders={noteFolders}
+          onCreateFolder={createFolder}
+          onRenameFolder={(id, name) => updateFolder(id, { name })}
+          onDeleteFolder={deleteFolder}
+          onMoveNote={moveNoteToFolder}
           deals={deals}
           enablers={enablers}
           organizations={organizations}
@@ -2352,51 +2393,158 @@ function buildNoteEntityOptions({ deals, enablers, organizations, contacts }, qu
   return q ? opts.filter((o) => o.name.toLowerCase().includes(q)) : opts;
 }
 
-// Notes tab: a list panel (search, pinned then recent) beside a distraction-free
-// editor. On mobile the two are separate full-screen views (list, then editor).
-function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, onTogglePin, onLink, deals, enablers, organizations, contacts, isMobile, bossMode }) {
+// Flattens the folder tree into [{folder, depth}] in display order (sort_order
+// then name), for the editor's "move to folder" picker.
+function flattenFolders(folders, parentId = null, depth = 0) {
+  return folders
+    .filter((f) => (f.parent_id || null) === (parentId || null))
+    .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || a.name.localeCompare(b.name))
+    .flatMap((f) => [{ folder: f, depth }, ...flattenFolders(folders, f.id, depth + 1)]);
+}
+
+// Notes tab: a folder-tree list panel (pinned at top, then folders, then an
+// Unfiled section) beside a distraction-free editor. On mobile the two are
+// separate full-screen views (list, then editor).
+function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, onTogglePin, onLink, folders = [], onCreateFolder, onRenameFolder, onDeleteFolder, onMoveNote, deals, enablers, organizations, contacts, isMobile, bossMode }) {
   const readOnly = useReadOnly();
   const [search, setSearch] = useState("");
   const [focusNew, setFocusNew] = useState(null);
+  const [expanded, setExpanded] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("mango-note-folders-expanded") || "[]")); } catch { return new Set(); }
+  });
+  const [renamingId, setRenamingId] = useState(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [menu, setMenu] = useState(null); // { folderId, x, y }
+  const [dragNoteId, setDragNoteId] = useState(null);
+  const [dragOverTarget, setDragOverTarget] = useState(null); // folder id or "unfiled"
   const entityCtx = { deals, enablers, organizations, contacts };
 
-  const q = search.trim().toLowerCase();
-  const filtered = notes.filter((n) => !q || (n.title || "").toLowerCase().includes(q) || (n.content || "").toLowerCase().includes(q));
-  const byUpdated = (a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at);
-  const pinned = filtered.filter((n) => n.is_pinned).sort(byUpdated);
-  const recent = filtered.filter((n) => !n.is_pinned).sort(byUpdated);
-  const selected = notes.find((n) => n.id === selectedId) || null;
+  const persistExpanded = (set) => { try { localStorage.setItem("mango-note-folders-expanded", JSON.stringify([...set])); } catch { /* ignore */ } };
+  const toggleExpand = (id) => setExpanded((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); persistExpanded(next); return next; });
+  const expand = (id) => setExpanded((prev) => { const next = new Set(prev); next.add(id); persistExpanded(next); return next; });
 
-  const handleNew = async () => {
-    const row = await onCreate();
-    if (row) { setFocusNew(row.id); setSearch(""); }
+  const q = search.trim().toLowerCase();
+  const byUpdated = (a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at);
+
+  const childFolders = (parentId) => folders
+    .filter((f) => (f.parent_id || null) === (parentId || null))
+    .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || (a.name || "").localeCompare(b.name || ""));
+  const notesInFolder = (folderId) => notes.filter((n) => (n.folder_id || null) === folderId && !n.is_pinned).sort(byUpdated);
+  const folderNoteCount = (folderId) => notesInFolder(folderId).length + childFolders(folderId).reduce((s, c) => s + folderNoteCount(c.id), 0);
+
+  const pinned = notes.filter((n) => n.is_pinned).sort(byUpdated);
+  const unfiled = notes.filter((n) => !n.folder_id && !n.is_pinned).sort(byUpdated);
+  const selected = notes.find((n) => n.id === selectedId) || null;
+  const searchResults = q ? notes.filter((n) => (n.title || "").toLowerCase().includes(q) || (n.content || "").toLowerCase().includes(q)).sort(byUpdated) : null;
+
+  const handleNewNote = async () => { const row = await onCreate(); if (row) { setFocusNew(row.id); setSearch(""); } };
+  const handleNewFolder = async () => { const row = await onCreateFolder("New Folder", null); if (row) { setRenamingId(row.id); setRenameValue("New Folder"); } };
+  const startRename = (f) => { setMenu(null); setRenamingId(f.id); setRenameValue(f.name); };
+  const commitRename = () => { if (renamingId) onRenameFolder(renamingId, renameValue.trim() || "Untitled Folder"); setRenamingId(null); };
+  const newSubfolder = async (parent) => { setMenu(null); const row = await onCreateFolder("New Folder", parent.id); if (row) { expand(parent.id); setRenamingId(row.id); setRenameValue("New Folder"); } };
+  const removeFolder = (f) => { setMenu(null); if (confirm(`Delete folder "${f.name}"? Its notes move to Unfiled.`)) onDeleteFolder(f.id); };
+
+  const onNoteDragStart = (e, id) => { setDragNoteId(id); e.dataTransfer.effectAllowed = "move"; try { e.dataTransfer.setData("text/plain", id); } catch { /* ignore */ } };
+  const onFolderDrop = (folderId) => { if (dragNoteId) onMoveNote(dragNoteId, folderId); setDragNoteId(null); setDragOverTarget(null); };
+
+  // Recursive render (a plain function, not a component, so inline rename inputs
+  // keep focus across re-renders).
+  const renderFolder = (folder, depth) => {
+    const isOpen = expanded.has(folder.id);
+    const kids = childFolders(folder.id);
+    const own = notesInFolder(folder.id);
+    return (
+      <div key={folder.id} className="folder-node">
+        <div
+          className={`folder-row ${dragOverTarget === folder.id ? "drop-over" : ""}`}
+          style={{ paddingLeft: 8 + depth * 15 }}
+          onClick={() => renamingId !== folder.id && toggleExpand(folder.id)}
+          onContextMenu={(e) => { e.preventDefault(); setMenu({ folderId: folder.id, x: e.clientX, y: e.clientY }); }}
+          onDragOver={(e) => { if (dragNoteId) { e.preventDefault(); setDragOverTarget(folder.id); } }}
+          onDragLeave={() => setDragOverTarget((t) => (t === folder.id ? null : t))}
+          onDrop={(e) => { e.preventDefault(); onFolderDrop(folder.id); }}
+        >
+          <span className="folder-chevron">{isOpen ? "▾" : "▸"}</span>
+          <span className="folder-icon">📁</span>
+          {renamingId === folder.id ? (
+            <input
+              autoFocus
+              className="folder-rename-input"
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              onBlur={commitRename}
+              onKeyDown={(e) => { if (e.key === "Enter") commitRename(); else if (e.key === "Escape") setRenamingId(null); }}
+            />
+          ) : (
+            <span className="folder-name">{folder.name}</span>
+          )}
+          <span className="folder-count">{folderNoteCount(folder.id)}</span>
+          {!readOnly && renamingId !== folder.id && (
+            <button className="folder-menu-btn" title="Folder options" onClick={(e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); setMenu({ folderId: folder.id, x: r.right, y: r.bottom }); }}>⋯</button>
+          )}
+        </div>
+        {isOpen && (
+          <div className="folder-children">
+            {kids.map((k) => renderFolder(k, depth + 1))}
+            {own.map((n) => (
+              <NoteListItem key={n.id} note={n} active={n.id === selectedId} onSelect={onSelect} entityCtx={entityCtx} indent={8 + (depth + 1) * 15 + 6} draggable={!isMobile && !readOnly} onDragStart={(e) => onNoteDragStart(e, n.id)} />
+            ))}
+            {kids.length === 0 && own.length === 0 && <div className="folder-empty" style={{ paddingLeft: 8 + (depth + 1) * 15 + 6 }}>Empty</div>}
+          </div>
+        )}
+      </div>
+    );
   };
 
+  const menuFolder = menu ? folders.find((f) => f.id === menu.folderId) : null;
   const mobileEditing = isMobile && !!selected;
+
   return (
     <div className={`notes-view ${mobileEditing ? "notes-editing" : ""}`}>
       <div className="notes-list-panel">
         <div className="notes-list-head">
-          {!readOnly && <button className="btn-primary notes-new-btn" onClick={handleNew}>+ New Note</button>}
+          {!readOnly && (
+            <div className="notes-head-btns">
+              <button className="btn-primary notes-new-btn" onClick={handleNewNote}>+ New Note</button>
+              <button className="btn-sec notes-new-folder-btn" onClick={handleNewFolder}>+ New Folder</button>
+            </div>
+          )}
           <input className="input notes-search" placeholder="Search notes..." value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
         <div className="notes-list-scroll">
-          {filtered.length === 0 ? (
-            <div className="empty-small notes-empty">{q ? "No notes match." : "No notes yet. Create your first one."}</div>
+          {q ? (
+            searchResults.length === 0 ? (
+              <div className="empty-small notes-empty">No notes match.</div>
+            ) : (
+              <div className="notes-group">
+                <div className="notes-group-head">Search Results</div>
+                {searchResults.map((n) => <NoteListItem key={n.id} note={n} active={n.id === selectedId} onSelect={onSelect} entityCtx={entityCtx} />)}
+              </div>
+            )
+          ) : (notes.length === 0 && folders.length === 0) ? (
+            <div className="empty-small notes-empty">No notes yet. Create your first one.</div>
           ) : (
             <>
               {pinned.length > 0 && (
                 <div className="notes-group">
                   <div className="notes-group-head">📌 Pinned</div>
-                  {pinned.map((n) => <NoteListItem key={n.id} note={n} active={n.id === selectedId} onSelect={onSelect} entityCtx={entityCtx} />)}
+                  {pinned.map((n) => <NoteListItem key={n.id} note={n} active={n.id === selectedId} onSelect={onSelect} entityCtx={entityCtx} draggable={!isMobile && !readOnly} onDragStart={(e) => onNoteDragStart(e, n.id)} />)}
                 </div>
               )}
-              {recent.length > 0 && (
-                <div className="notes-group">
-                  <div className="notes-group-head">Recent</div>
-                  {recent.map((n) => <NoteListItem key={n.id} note={n} active={n.id === selectedId} onSelect={onSelect} entityCtx={entityCtx} />)}
-                </div>
-              )}
+              <div className="notes-tree">
+                {childFolders(null).map((f) => renderFolder(f, 0))}
+              </div>
+              <div
+                className={`notes-unfiled ${dragOverTarget === "unfiled" ? "drop-over" : ""}`}
+                onDragOver={(e) => { if (dragNoteId) { e.preventDefault(); setDragOverTarget("unfiled"); } }}
+                onDragLeave={() => setDragOverTarget((t) => (t === "unfiled" ? null : t))}
+                onDrop={(e) => { e.preventDefault(); onFolderDrop(null); }}
+              >
+                <div className="notes-group-head">Unfiled{unfiled.length ? ` (${unfiled.length})` : ""}</div>
+                {unfiled.map((n) => <NoteListItem key={n.id} note={n} active={n.id === selectedId} onSelect={onSelect} entityCtx={entityCtx} draggable={!isMobile && !readOnly} onDragStart={(e) => onNoteDragStart(e, n.id)} />)}
+                {unfiled.length === 0 && <div className="notes-unfiled-empty">No unfiled notes.</div>}
+              </div>
             </>
           )}
         </div>
@@ -2416,21 +2564,34 @@ function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, o
             onLink={onLink}
             onBack={() => onSelect(null)}
             entityCtx={entityCtx}
+            folders={folders}
+            onMoveNote={onMoveNote}
             isMobile={isMobile}
           />
         ) : (
           <div className="notes-editor-empty">Select a note, or create a new one to start writing.</div>
         )}
       </div>
+
+      {menu && menuFolder && (
+        <>
+          <div className="folder-menu-backdrop" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />
+          <div className="folder-menu" style={{ left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 150) }}>
+            <button className="folder-menu-item" onClick={() => startRename(menuFolder)}>Rename</button>
+            <button className="folder-menu-item" onClick={() => newSubfolder(menuFolder)}>Create subfolder</button>
+            <button className="folder-menu-item danger" onClick={() => removeFolder(menuFolder)}>Delete</button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
-function NoteListItem({ note, active, onSelect, entityCtx }) {
+function NoteListItem({ note, active, onSelect, entityCtx, indent = 0, draggable = false, onDragStart }) {
   const ent = noteLinkedEntity(note, entityCtx);
   const preview = (note.content || "").split("\n").map((l) => l.trim()).find(Boolean) || "";
   return (
-    <button className={`note-list-item ${active ? "active" : ""}`} onClick={() => onSelect(note.id)}>
+    <button className={`note-list-item ${active ? "active" : ""}`} style={indent ? { paddingLeft: indent } : undefined} draggable={draggable} onDragStart={onDragStart} onClick={() => onSelect(note.id)}>
       <div className="note-item-top">
         <span className="note-item-title">{note.title || "Untitled"}</span>
         {note.is_pinned && <span className="note-item-pin" title="Pinned">📌</span>}
@@ -2444,12 +2605,13 @@ function NoteListItem({ note, active, onSelect, entityCtx }) {
   );
 }
 
-function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate, onDelete, onTogglePin, onLink, onBack, entityCtx, isMobile }) {
+function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate, onDelete, onTogglePin, onLink, onBack, entityCtx, folders = [], onMoveNote, isMobile }) {
   const [title, setTitle] = useState(note.title || "");
   const [content, setContent] = useState(note.content || "");
   const [saved, setSaved] = useState(false);
   const [linking, setLinking] = useState(false);
   const [linkQuery, setLinkQuery] = useState("");
+  const [folderPicking, setFolderPicking] = useState(false);
   const titleRef = useRef(null);
   const debounceRef = useRef(null);
   const savedTimerRef = useRef(null);
@@ -2485,6 +2647,8 @@ function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate
 
   const linked = noteLinkedEntity(note, entityCtx);
   const options = buildNoteEntityOptions(entityCtx, linkQuery).slice(0, 8);
+  const flatFolders = flattenFolders(folders);
+  const currentFolder = folders.find((f) => f.id === note.folder_id);
 
   return (
     <div className="note-editor">
@@ -2545,6 +2709,22 @@ function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate
               </div>
             ) : (
               <button className="note-tool-btn" onClick={() => { setLinking(true); setLinkQuery(""); }}>Link to...</button>
+            )}
+          </div>
+
+          <div className="note-folder-wrap">
+            <button className={`note-tool-btn ${currentFolder ? "active" : ""}`} onClick={() => setFolderPicking((v) => !v)} title="Move to folder">📁 {currentFolder ? currentFolder.name : "Folder"}</button>
+            {folderPicking && (
+              <>
+                <div className="note-folder-backdrop" onClick={() => setFolderPicking(false)} />
+                <div className="note-folder-options">
+                  <button className={`note-folder-option ${!note.folder_id ? "active" : ""}`} onClick={() => { onMoveNote(note.id, null); setFolderPicking(false); }}>No folder (Unfiled)</button>
+                  {flatFolders.map(({ folder, depth }) => (
+                    <button key={folder.id} className={`note-folder-option ${note.folder_id === folder.id ? "active" : ""}`} style={{ paddingLeft: 10 + depth * 14 }} onClick={() => { onMoveNote(note.id, folder.id); setFolderPicking(false); }}>📁 {folder.name}</button>
+                  ))}
+                  {folders.length === 0 && <div className="empty-small note-folder-empty">No folders yet. Create one in the list.</div>}
+                </div>
+              </>
             )}
           </div>
 
