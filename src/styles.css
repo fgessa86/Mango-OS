@@ -321,7 +321,39 @@ select.tier-select { width: auto; max-width: 160px; padding: 6px 10px; font-size
 .task-link { background: none; border: none; color: var(--accent-strong); font-size: 12px; font-weight: 700; cursor: pointer; padding: 0; }
 .task-link:hover { text-decoration: underline; }
 .task-link-static { font-size: 12px; color: var(--muted); }
-.task-link-select { max-width: 220px; }
+
+/* Shared task form (quick-add, sheet sections, inline edit) */
+.task-form { background: var(--card-tint); border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+.tasks-quickadd .task-form { margin-bottom: 16px; }
+.task-form-title { width: 100%; margin-bottom: 8px; }
+.task-form-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.task-form-priority { flex: 0 1 150px; }
+.task-form-date { flex: 0 1 170px; }
+.task-form-links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.task-form-link { flex: 1 1 180px; min-width: 150px; display: flex; flex-direction: column; gap: 3px; }
+.task-form-link-label { font-size: 10.5px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.task-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+
+/* Searchable entity picker */
+.entity-picker { position: relative; }
+.entity-picker-input { width: 100%; }
+.entity-picker-chip { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; font-size: 13px; font-weight: 700; color: var(--accent-strong); background: var(--next-tint); border: 1px solid rgba(245,166,35,0.4); border-radius: 20px; padding: 6px 8px 6px 12px; }
+.entity-picker-clear { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 12px; line-height: 1; padding: 0 2px; }
+.entity-picker-clear:hover { color: #C42B30; }
+.entity-picker-options { position: absolute; top: calc(100% + 4px); left: 0; z-index: 40; width: 100%; min-width: 200px; max-height: 220px; overflow-y: auto; background: var(--surface); border: 1px solid var(--divider); border-radius: 12px; box-shadow: 0 12px 40px rgba(60,45,20,0.18); padding: 6px; }
+.entity-picker-option { display: block; width: 100%; text-align: left; border: none; background: transparent; border-radius: 8px; padding: 9px 10px; font-size: 13.5px; font-weight: 600; color: var(--text-2); cursor: pointer; font-family: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entity-picker-option:hover { background: var(--card-tint); color: var(--text); }
+.entity-picker-empty { padding: 8px 10px; }
+
+/* Linked-entity pills below a task title */
+.task-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.task-pill { border: 1px solid transparent; border-radius: 20px; padding: 2px 10px; font-size: 11.5px; font-weight: 700; cursor: pointer; font-family: inherit; line-height: 1.5; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-pill:hover { filter: brightness(0.97); text-decoration: underline; }
+.task-pill-deal { background: #E4EDFB; color: #2A6FDB; border-color: #2A6FDB44; }
+.task-pill-enabler { background: #FDECCB; color: #B77400; border-color: #B7740044; }
+.task-pill-contact { background: #E6F4EC; color: #1F8A5B; border-color: #1F8A5B44; }
+.task-pill-organization { background: #ECECEF; color: #6B6B7B; border-color: #6B6B7B44; }
+button.task-pill { -webkit-appearance: none; appearance: none; }
 
 /* Tasks tab: segmented filter + big rows */
 .timeline-tabs.mb { background: #f1eadd; padding: 4px; border-radius: 12px; width: fit-content; gap: 7px; }

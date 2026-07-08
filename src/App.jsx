@@ -1368,6 +1368,7 @@ export default function App() {
       if (inst.enablerId) await purgeEnabler(inst.enablerId);
       if (inst.orgId) {
         await api("activities", "DELETE", null, `?organization_id=eq.${inst.orgId}`);
+        await api("todos", "PATCH", { organization_id: null }, `?organization_id=eq.${inst.orgId}`).catch(() => {});
         await api("network_edges", "DELETE", null, `?source_type=eq.organization&source_id=eq.${inst.orgId}`);
         await api("network_edges", "DELETE", null, `?target_type=eq.organization&target_id=eq.${inst.orgId}`);
         await api("contact_roles", "DELETE", null, `?entity_type=eq.organization&entity_id=eq.${inst.orgId}`);
@@ -1612,6 +1613,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       if (form.contact_id) clean.contact_id = form.contact_id;
       if (form.deal_id) clean.deal_id = form.deal_id;
       if (form.enabler_id) clean.enabler_id = form.enabler_id;
+      if (form.organization_id) clean.organization_id = form.organization_id;
       await api("todos", "POST", clean);
       await loadData(); showToast("To-do added");
     } catch { showToast("Error adding to-do"); }
@@ -1706,6 +1708,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const openTaskLink = (link) => {
     if (link.type === "deal") { const d = deals.find((x) => x.id === link.id); if (d) openInstitution(d.company); }
     else if (link.type === "enabler") { const en = enablers.find((e) => e.id === link.id); if (en) openInstitution(en.name); }
+    else if (link.type === "organization") { const o = organizations.find((x) => x.id === link.id); if (o) openInstitution(o.name); }
+    else if (link.type === "contact") { openPerson(link.id); }
   };
 
   // ACTIVITY
@@ -1941,8 +1945,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onAddConnection={addConnection}
             onChangeStage={(stage) => inst.dealId && moveDeal(inst.dealId, stage)}
             onChangeTier={inst.dealId ? ((t) => setDealTier(inst.dealId, t)) : null}
-            todos={todos.filter((t) => (inst.dealId && t.deal_id === inst.dealId) || (inst.enablerId && t.enabler_id === inst.enablerId))}
-            onAddTodo={(form) => saveTodo({ ...form, deal_id: inst.dealId || null, enabler_id: inst.dealId ? null : (inst.enablerId || null) })}
+            todos={todos.filter((t) => (inst.dealId && t.deal_id === inst.dealId) || (inst.enablerId && t.enabler_id === inst.enablerId) || (inst.orgId && t.organization_id === inst.orgId))}
+            taskInitial={(() => { const p = institutionPrimaryEntity(inst); return p ? { [`${p.type}_id`]: p.id } : {}; })()}
+            onAddTodo={(form) => { const p = institutionPrimaryEntity(inst); return saveTodo({ ...(p ? { [`${p.type}_id`]: p.id } : {}), ...form }); }}
             onToggleTodo={toggleTodo}
             onUpdateTodo={updateTodo}
             onNavigate={openTaskLink}
@@ -1986,7 +1991,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onUpdate={(patch) => updateContact(sheetContact.id, patch)}
             onDelete={deleteContact}
             onAddActivity={addActivity}
-            onAddTodo={(form) => saveTodo({ ...form, contact_id: sheetContact.id })}
+            onAddTodo={(form) => saveTodo({ contact_id: sheetContact.id, ...form })}
+            todos={todos.filter((t) => t.contact_id === sheetContact.id)}
+            taskInitial={{ contact_id: sheetContact.id }}
+            onToggleTodo={toggleTodo}
+            onUpdateTodo={updateTodo}
+            onNavigateTask={openTaskLink}
             linkedNotes={notes.filter((n) => n.contact_id === sheetContact.id)}
             onOpenNote={openNote}
             onAddRole={addPersonRole}
@@ -2150,7 +2160,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
               <div className="page-sub">Everything that needs your attention</div>
             </div>
           </div>
-          {!bossMode && <TaskQuickAdd deals={activeDeals} enablers={enablers} customOptions={customOptions} onAddCustomOption={addCustomOption} onAdd={saveTodo} />}
+          {!bossMode && (
+            <div className="tasks-quickadd">
+              <TaskForm deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveTodo} submitLabel="Add Task" />
+            </div>
+          )}
           <div className="timeline-tabs mb">
             {TASK_FILTER_TABS.map(t => (
               <button key={t.id} onClick={() => setTaskFilter(t.id)} className={`tag-btn ${taskFilter === t.id ? "active" : ""}`}>{t.label}</button>
@@ -2167,6 +2181,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
                   contacts={contacts}
                   deals={deals}
                   enablers={enablers}
+                  organizations={organizations}
                   customOptions={customOptions}
                   onAddCustomOption={addCustomOption}
                   onToggle={toggleTodo}
@@ -2188,6 +2203,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
                       contacts={contacts}
                       deals={deals}
                       enablers={enablers}
+                      organizations={organizations}
                       customOptions={customOptions}
                       onAddCustomOption={addCustomOption}
                       onToggle={toggleTodo}
@@ -2921,7 +2937,7 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onAddActivity, onAddTodo, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, bossNotesSlot }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onAddActivity, onAddTodo, todos = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, bossNotesSlot }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -3112,6 +3128,24 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
           </div>
         )}
       </div>
+
+      {onAddTodo && (
+        <TodoSection
+          label="Tasks"
+          todos={todos}
+          contacts={contacts}
+          deals={deals}
+          enablers={enablers}
+          organizations={organizations}
+          customOptions={customOptions}
+          onAddCustomOption={onAddCustomOption}
+          initial={taskInitial}
+          onAdd={onAddTodo}
+          onToggle={onToggleTodo}
+          onUpdate={onUpdateTodo}
+          onNavigate={onNavigateTask}
+        />
+      )}
 
       <LinkedNotesSection notes={linkedNotes} onOpenNote={onOpenNote} />
 
@@ -3494,98 +3528,147 @@ function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, sum
   );
 }
 
-function TodoForm({ contacts, customOptions = [], onAddCustomOption = () => {}, onSave, onCancel }) {
-  const [title, setTitle] = useState("");
-  const [priority, setPriority] = useState("medium");
-  const [dueDate, setDueDate] = useState("");
-  const [contactId, setContactId] = useState("");
+// Searchable single-select for linking a task to one entity. Shows the picked
+// item as a removable chip; otherwise a filter input over the options.
+function EntityPicker({ placeholder, options, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const selected = options.find((o) => o.value === value);
+  const query = q.trim().toLowerCase();
+  const filtered = (query ? options.filter((o) => o.label.toLowerCase().includes(query)) : options).slice(0, 8);
+  if (selected) {
+    return (
+      <div className="entity-picker">
+        <span className="entity-picker-chip">
+          {selected.label}
+          <button type="button" className="entity-picker-clear" onClick={() => onChange("")} title="Unlink">✕</button>
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="entity-picker">
+      <input
+        className="input entity-picker-input"
+        placeholder={placeholder}
+        value={q}
+        onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+      />
+      {open && (
+        <div className="entity-picker-options">
+          {filtered.length === 0 ? <div className="empty-small entity-picker-empty">No matches.</div> : filtered.map((o) => (
+            <button type="button" key={o.value} className="entity-picker-option" onMouseDown={() => { onChange(o.value); setQ(""); setOpen(false); }}>{o.label}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The one task form used everywhere (Tasks tab quick-add, sheet To-Do/Task
+// sections, and inline task editing). Links to any combination of deal,
+// institution (enabler or organization), and contact. `initial` pre-fills from
+// context; when there is no onCancel it behaves as a persistent quick-add and
+// resets after each save.
+function TaskForm({ deals = [], enablers = [], organizations = [], contacts = [], customOptions = [], onAddCustomOption = () => {}, initial = {}, onSave, onCancel, submitLabel = "Add Task" }) {
+  const [title, setTitle] = useState(initial.title || "");
+  const [priority, setPriority] = useState(initial.priority || "medium");
+  const [dueDate, setDueDate] = useState(initial.due_date || "");
+  const [dealId, setDealId] = useState(initial.deal_id || "");
+  const [inst, setInst] = useState(initial.enabler_id ? `enabler:${initial.enabler_id}` : initial.organization_id ? `organization:${initial.organization_id}` : "");
+  const [contactId, setContactId] = useState(initial.contact_id || "");
+  const [saving, setSaving] = useState(false);
   const priorityOpts = optionsWithCustom(PRIORITIES, customOptions, "priority");
 
-  const submit = () => {
-    const t = title.trim();
-    if (!t) return;
-    onSave({ title: t, priority, due_date: dueDate || null, contact_id: contactId || null });
+  const dealOpts = deals.map((d) => ({ value: d.id, label: d.company })).filter((o) => o.label);
+  const instOpts = [
+    ...enablers.map((e) => ({ value: `enabler:${e.id}`, label: e.name })),
+    ...organizations.map((o) => ({ value: `organization:${o.id}`, label: o.name })),
+  ].filter((o) => o.label);
+  const contactOpts = contacts.map((c) => ({ value: c.id, label: c.name })).filter((o) => o.label);
+
+  const submit = async () => {
+    if (!title.trim() || saving) return;
+    const form = { title: title.trim(), priority, due_date: dueDate || null, deal_id: dealId || null, enabler_id: null, organization_id: null, contact_id: contactId || null };
+    if (inst.startsWith("enabler:")) form.enabler_id = inst.slice(8);
+    else if (inst.startsWith("organization:")) form.organization_id = inst.slice(13);
+    setSaving(true);
+    try {
+      await onSave(form);
+      if (!onCancel) { setTitle(""); setPriority("medium"); setDueDate(""); setDealId(""); setInst(""); setContactId(""); }
+    } finally { setSaving(false); }
   };
 
   return (
-    <div className="todo-form">
-      <input className="input" placeholder="To-do title..." value={title} onChange={e => setTitle(e.target.value)} />
-      <div className="todo-form-row">
-        <SelectWithCustom options={priorityOpts} value={priority} onChange={(v) => { setPriority(v); trackCustom("priority", priorityOpts, onAddCustomOption)(v); }} />
-        <input className="input" type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} />
-        {contacts.length > 0 && (
-          <select className="input" value={contactId} onChange={e => setContactId(e.target.value)}>
-            <option value="">No contact</option>
-            {contacts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        )}
-        <button onClick={onCancel} className="btn-sec">Cancel</button>
-        <button onClick={submit} className="btn-primary" disabled={!title.trim()}>Add</button>
+    <div className="task-form">
+      <input className="input task-form-title" placeholder="Task title..." value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(); }} />
+      <div className="task-form-row">
+        <SelectWithCustom className="input task-form-priority" options={priorityOpts} value={priority} onChange={(v) => { setPriority(v); trackCustom("priority", priorityOpts, onAddCustomOption)(v); }} />
+        <input className="input task-form-date" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+      </div>
+      <div className="task-form-links">
+        <div className="task-form-link"><span className="task-form-link-label">Deal</span><EntityPicker placeholder="Search deals..." options={dealOpts} value={dealId} onChange={setDealId} /></div>
+        <div className="task-form-link"><span className="task-form-link-label">Institution</span><EntityPicker placeholder="Search enablers and orgs..." options={instOpts} value={inst} onChange={setInst} /></div>
+        <div className="task-form-link"><span className="task-form-link-label">Contact</span><EntityPicker placeholder="Search contacts..." options={contactOpts} value={contactId} onChange={setContactId} /></div>
+      </div>
+      <div className="task-form-actions">
+        {onCancel && <button className="btn-sec" onClick={onCancel}>Cancel</button>}
+        <button className="btn-primary" onClick={submit} disabled={!title.trim() || saving}>{submitLabel}</button>
       </div>
     </div>
   );
 }
 
-function TodoRow({ todo, contacts, deals = [], enablers = [], customOptions = [], onAddCustomOption = () => {}, onToggle, onUpdate, onNavigate }) {
+// Clickable pills for every entity a task is linked to: blue deal, gold enabler,
+// green contact, gray organization. Clicking navigates to that entity's sheet.
+function TaskPills({ todo, deals = [], enablers = [], organizations = [], contacts = [], onNavigate }) {
+  const pills = [];
+  if (todo.deal_id) { const d = deals.find((x) => x.id === todo.deal_id); if (d) pills.push({ kind: "deal", id: d.id, label: d.company }); }
+  if (todo.enabler_id) { const e = enablers.find((x) => x.id === todo.enabler_id); if (e) pills.push({ kind: "enabler", id: e.id, label: e.name }); }
+  if (todo.organization_id) { const o = organizations.find((x) => x.id === todo.organization_id); if (o) pills.push({ kind: "organization", id: o.id, label: o.name }); }
+  if (todo.contact_id) { const c = contacts.find((x) => x.id === todo.contact_id); if (c) pills.push({ kind: "contact", id: c.id, label: c.name }); }
+  if (pills.length === 0) return null;
+  return (
+    <div className="task-pills">
+      {pills.map((p) => (onNavigate
+        ? <button key={`${p.kind}-${p.id}`} className={`task-pill task-pill-${p.kind}`} onClick={() => onNavigate({ type: p.kind, id: p.id })}>{p.label}</button>
+        : <span key={`${p.kind}-${p.id}`} className={`task-pill task-pill-${p.kind}`}>{p.label}</span>))}
+    </div>
+  );
+}
+
+function TodoRow({ todo, contacts = [], deals = [], enablers = [], organizations = [], customOptions = [], onAddCustomOption = () => {}, onToggle, onUpdate, onNavigate }) {
   const readOnly = useReadOnly();
   const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(todo.title);
-  const [priority, setPriority] = useState(todo.priority);
-  const [dueDate, setDueDate] = useState(todo.due_date || "");
-  const [link, setLink] = useState(todo.deal_id ? `deal:${todo.deal_id}` : todo.enabler_id ? `enabler:${todo.enabler_id}` : "");
-  const priorityOpts = optionsWithCustom(PRIORITIES, customOptions, "priority");
-
-  const contact = todo.contact_id ? contacts.find(c => c.id === todo.contact_id) : null;
-  const linkedDeal = todo.deal_id ? deals.find(d => d.id === todo.deal_id) : null;
-  const linkedEnabler = todo.enabler_id ? enablers.find(en => en.id === todo.enabler_id) : null;
   const overdue = todo.status !== "completed" && isOverdue(todo.due_date);
+  const done = todo.status === "completed";
 
-  const startEdit = () => {
-    setTitle(todo.title); setPriority(todo.priority); setDueDate(todo.due_date || "");
-    setLink(todo.deal_id ? `deal:${todo.deal_id}` : todo.enabler_id ? `enabler:${todo.enabler_id}` : "");
-    setEditing(true);
-  };
-
-  const save = () => {
-    const t = title.trim();
-    if (!t || !onUpdate) return;
-    const patch = { title: t, priority, due_date: dueDate || null, deal_id: null, enabler_id: null };
-    if (link.startsWith("deal:")) patch.deal_id = link.slice(5);
-    else if (link.startsWith("enabler:")) patch.enabler_id = link.slice(8);
-    onUpdate(todo.id, patch);
-    setEditing(false);
-  };
-
-  if (editing) {
+  if (editing && !readOnly && onUpdate) {
     return (
       <div className="todo-row todo-row-editing">
-        <input type="checkbox" checked={todo.status === "completed"} onChange={() => onToggle(todo)} className="todo-checkbox" />
+        <input type="checkbox" checked={done} onChange={() => onToggle(todo)} className="todo-checkbox" />
         <div className="todo-main">
-          <input className="input todo-edit-title" value={title} onChange={e => setTitle(e.target.value)} placeholder="To-do title..." />
-          <div className="todo-form-row">
-            <SelectWithCustom options={priorityOpts} value={priority} onChange={(v) => { setPriority(v); trackCustom("priority", priorityOpts, onAddCustomOption)(v); }} />
-            <input className="input" type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} />
-            <select className="input task-link-select" value={link} onChange={e => setLink(e.target.value)}>
-              <option value="">No link</option>
-              {deals.length > 0 && <optgroup label="Deals">{deals.map(d => <option key={d.id} value={`deal:${d.id}`}>{d.company}</option>)}</optgroup>}
-              {enablers.length > 0 && <optgroup label="Enablers">{enablers.map(en => <option key={en.id} value={`enabler:${en.id}`}>{en.name}</option>)}</optgroup>}
-            </select>
-            <button onClick={() => setEditing(false)} className="btn-sec">Cancel</button>
-            <button onClick={save} className="btn-primary" disabled={!title.trim()}>Save</button>
-          </div>
+          <TaskForm
+            deals={deals} enablers={enablers} organizations={organizations} contacts={contacts}
+            customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+            initial={todo} submitLabel="Save"
+            onSave={(form) => { onUpdate(todo.id, form); setEditing(false); }}
+            onCancel={() => setEditing(false)}
+          />
         </div>
       </div>
     );
   }
 
-  const done = todo.status === "completed";
   return (
     <div className={`todo-row ${done ? "todo-done" : ""}`}>
       <input type="checkbox" checked={done} onChange={() => onToggle(todo)} disabled={readOnly} className="todo-checkbox" />
       <div className="todo-main">
         <div className="todo-title-row">
           <span className="todo-title">{todo.title}</span>
-          {!readOnly && !done && onUpdate && <button onClick={startEdit} className="icon-btn" title="Edit task">✎</button>}
+          {!readOnly && !done && onUpdate && <button onClick={() => setEditing(true)} className="icon-btn" title="Edit task">✎</button>}
           {!readOnly && onUpdate
             ? <BadgeSelect options={PRIORITIES} value={todo.priority} color={PRIORITIES.find(p => p.id === todo.priority)?.color} onChange={(v) => onUpdate(todo.id, { priority: v })} title="Change priority" />
             : <PriorityBadge priority={todo.priority} />}
@@ -3595,43 +3678,43 @@ function TodoRow({ todo, contacts, deals = [], enablers = [], customOptions = []
         <div className="todo-meta-row">
           {done && todo.completed_at && <span className="todo-due">Completed {formatDate(todo.completed_at)}</span>}
           {!done && todo.due_date && <span className="todo-due">Due {formatDate(todo.due_date)}</span>}
-          {contact && <span className="todo-contact">{contact.name}</span>}
-          {(linkedDeal || linkedEnabler) && (onNavigate
-            ? <button onClick={() => onNavigate(linkedDeal ? { type: "deal", id: linkedDeal.id } : { type: "enabler", id: linkedEnabler.id })} className="task-link">{linkedDeal ? linkedDeal.company : linkedEnabler.name}</button>
-            : <span className="task-link-static">{linkedDeal ? linkedDeal.company : linkedEnabler.name}</span>)}
         </div>
+        <TaskPills todo={todo} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} onNavigate={onNavigate} />
       </div>
     </div>
   );
 }
 
-function TodoSection({ todos, contacts, deals = [], enablers = [], customOptions = [], onAddCustomOption = () => {}, onAdd, onToggle, onUpdate, onNavigate }) {
+// A tasks section for a sheet (institution "To-Dos" or person "Tasks"). The
+// "+ Task" button expands the shared TaskForm, pre-filled from `initial`.
+function TodoSection({ label = "To-Dos", todos, contacts = [], deals = [], enablers = [], organizations = [], customOptions = [], onAddCustomOption = () => {}, initial = {}, onAdd, onToggle, onUpdate, onNavigate }) {
   const readOnly = useReadOnly();
   const [showForm, setShowForm] = useState(false);
   const [showCompleted, setShowCompleted] = useState(false);
   const open = sortTodos(todos.filter(t => t.status !== "completed"));
   const completed = todos.filter(t => t.status === "completed").slice().sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at));
+  const rowProps = { contacts, deals, enablers, organizations, customOptions, onAddCustomOption, onToggle, onUpdate, onNavigate };
 
   return (
     <div className="todo-section">
       <div className="ai-summary-header">
-        <div className="section-label">To-Dos</div>
-        {!readOnly && <button onClick={() => setShowForm(s => !s)} className="btn-copy">{showForm ? "Cancel" : "+ Add To-Do"}</button>}
+        <div className="section-label">{label}</div>
+        {!readOnly && <button onClick={() => setShowForm(s => !s)} className="btn-copy">{showForm ? "Cancel" : "+ Task"}</button>}
       </div>
       {showForm && (
-        <TodoForm
-          contacts={contacts}
-          customOptions={customOptions}
-          onAddCustomOption={onAddCustomOption}
+        <TaskForm
+          deals={deals} enablers={enablers} organizations={organizations} contacts={contacts}
+          customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+          initial={initial} submitLabel="Add Task"
           onCancel={() => setShowForm(false)}
           onSave={async (form) => { await onAdd(form); setShowForm(false); }}
         />
       )}
       {open.length === 0 ? (
-        <div className="empty-small">No open to-dos.</div>
+        <div className="empty-small">No open tasks.</div>
       ) : (
         <div className="todo-list">
-          {open.map(t => <TodoRow key={t.id} todo={t} contacts={contacts} deals={deals} enablers={enablers} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onToggle={onToggle} onUpdate={onUpdate} onNavigate={onNavigate} />)}
+          {open.map(t => <TodoRow key={t.id} todo={t} {...rowProps} />)}
         </div>
       )}
       {completed.length > 0 && (
@@ -3639,49 +3722,11 @@ function TodoSection({ todos, contacts, deals = [], enablers = [], customOptions
           <button onClick={() => setShowCompleted(s => !s)} className="link-btn">{showCompleted ? "▾" : "▸"} Completed ({completed.length})</button>
           {showCompleted && (
             <div className="todo-list todo-list-completed">
-              {completed.map(t => <TodoRow key={t.id} todo={t} contacts={contacts} deals={deals} enablers={enablers} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onToggle={onToggle} onUpdate={onUpdate} onNavigate={onNavigate} />)}
+              {completed.map(t => <TodoRow key={t.id} todo={t} {...rowProps} />)}
             </div>
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function TaskQuickAdd({ deals, enablers, customOptions = [], onAddCustomOption = () => {}, onAdd }) {
-  const [title, setTitle] = useState("");
-  const [priority, setPriority] = useState("medium");
-  const [link, setLink] = useState("");
-  const priorityOpts = optionsWithCustom(PRIORITIES, customOptions, "priority");
-
-  const submit = () => {
-    const t = title.trim();
-    if (!t) return;
-    const form = { title: t, priority };
-    if (link.startsWith("deal:")) form.deal_id = link.slice(5);
-    else if (link.startsWith("enabler:")) form.enabler_id = link.slice(8);
-    onAdd(form);
-    setTitle(""); setPriority("medium"); setLink("");
-  };
-
-  return (
-    <div className="quickadd">
-      <div className="quickadd-row">
-        <input
-          className="input quickadd-input"
-          placeholder="New task..."
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          onKeyDown={e => { if (e.key === "Enter") submit(); }}
-        />
-        <SelectWithCustom className="input quickadd-type" options={priorityOpts} value={priority} onChange={(v) => { setPriority(v); trackCustom("priority", priorityOpts, onAddCustomOption)(v); }} />
-        <select className="input task-link-select" value={link} onChange={e => setLink(e.target.value)}>
-          <option value="">No link</option>
-          {deals.length > 0 && <optgroup label="Deals">{deals.map(d => <option key={d.id} value={`deal:${d.id}`}>{d.company}</option>)}</optgroup>}
-          {enablers.length > 0 && <optgroup label="Enablers">{enablers.map(en => <option key={en.id} value={`enabler:${en.id}`}>{en.name}</option>)}</optgroup>}
-        </select>
-        <button onClick={submit} className="btn-primary" disabled={!title.trim()}>Add</button>
-      </div>
     </div>
   );
 }
@@ -3849,7 +3894,7 @@ function InstitutionSheet({
   dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {},
   onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, linkedNotes = [], onOpenNote, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
-  onChangeStage, onChangeTier, todos = [], onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
+  onChangeStage, onChangeTier, todos = [], taskInitial = {}, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
   onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot,
 }) {
   const readOnly = useReadOnly();
@@ -4185,8 +4230,8 @@ function InstitutionSheet({
         </div>
       )}
 
-      {(inst.dealId || inst.enablerId) && onAddTodo && (
-        <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
+      {onAddTodo && (
+        <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} organizations={organizations} customOptions={customOptions} onAddCustomOption={onAddCustomOption} initial={taskInitial} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
       )}
 
       <div className="people-section">
