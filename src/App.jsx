@@ -50,6 +50,66 @@ function ActivityGlyph({ type }) {
   return <span className="timeline-icon" style={{ background: g.bg, color: g.fg }}>{g.glyph}</span>;
 }
 
+// Fathom-imported activities (from the Gmail sync) prefix their description with
+// this token; the React app strips it, shows a Fathom badge, and renders the
+// structured body. Keep in sync with FATHOM_MARKER in src/gmail-sync-updated.js.
+const FATHOM_MARKER = "[[FATHOM]]";
+const isFathomActivity = (a) => typeof a?.description === "string" && a.description.startsWith(FATHOM_MARKER);
+const stripFathomMarker = (desc) => {
+  const d = desc || "";
+  return d.startsWith(FATHOM_MARKER) ? d.slice(FATHOM_MARKER.length).replace(/^[ \t]+/, "") : d;
+};
+const firstLine = (s) => { const t = (s || "").trim(); const nl = t.indexOf("\n"); return nl === -1 ? t : t.slice(0, nl); };
+
+// Renders an activity description. Fathom notes (and any description that looks
+// structured: "Heading:" lines and "- " bullets) get light formatting; a Fathom
+// badge marks auto-imported recaps.
+function ActivityDescription({ description }) {
+  const fathom = isFathomActivity({ description });
+  const text = stripFathomMarker(description);
+  const lines = text.split("\n");
+  const structured = fathom
+    || lines.some((l) => /^\s*[-•]\s+/.test(l))
+    || lines.some((l) => /^[A-Za-z][\w ()/&'-]{0,40}:$/.test(l.trim()));
+  return (
+    <div className="act-desc">
+      {fathom && <span className="fathom-badge" title="Auto-imported from Fathom"><span className="fathom-badge-dot" />Fathom</span>}
+      {structured ? <FormattedActivityBody lines={lines} /> : text}
+    </div>
+  );
+}
+
+// Light Markdown-ish formatting: "Heading:" lines become bold headings, "- "
+// lines become bullet lists, "Label: value" lines get a bold label, the rest are
+// paragraphs.
+function FormattedActivityBody({ lines }) {
+  const blocks = [];
+  let bullets = [];
+  const flush = () => { if (bullets.length) { blocks.push({ type: "ul", items: bullets }); bullets = []; } };
+  lines.forEach((raw) => {
+    const t = raw.trim();
+    if (!t) { flush(); return; }
+    const bullet = t.match(/^[-•]\s+(.*)$/);
+    if (bullet) { bullets.push(bullet[1]); return; }
+    flush();
+    if (/^[A-Za-z][\w ()/&'-]{0,40}:$/.test(t)) { blocks.push({ type: "h", text: t.replace(/:$/, "") }); return; }
+    const kv = t.match(/^([A-Za-z][\w ()/&'-]{0,30}):\s+(.*)$/);
+    if (kv) { blocks.push({ type: "kv", label: kv[1], value: kv[2] }); return; }
+    blocks.push({ type: "p", text: t });
+  });
+  flush();
+  return (
+    <div className="act-structured">
+      {blocks.map((b, i) => {
+        if (b.type === "h") return <div key={i} className="act-heading">{b.text}</div>;
+        if (b.type === "kv") return <div key={i} className="act-para"><span className="act-kv-label">{b.label}:</span> {b.value}</div>;
+        if (b.type === "ul") return <ul key={i} className="act-bullets">{b.items.map((it, j) => <li key={j}>{it}</li>)}</ul>;
+        return <div key={i} className="act-para">{b.text}</div>;
+      })}
+    </div>
+  );
+}
+
 // Minimal geometric nav icons (2px strokes). Active color is handled via CSS.
 function NavIcon({ shape }) {
   if (shape === "square") return <span className="nav-icon nav-icon-square" />;
@@ -1404,7 +1464,7 @@ export default function App() {
     setSummarizing(true);
     try {
       const activityText = dealActivities.length > 0
-        ? dealActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${a.description}`).join("\n")
+        ? dealActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${stripFathomMarker(a.description)}`).join("\n")
         : "No activities logged yet.";
       const prompt = `You are a sales analyst summarizing a deal for a BD pipeline tool.
 
@@ -1433,7 +1493,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setSummarizing(true);
     try {
       const activityText = enablerActivities.length > 0
-        ? enablerActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${a.description}`).join("\n")
+        ? enablerActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${stripFathomMarker(a.description)}`).join("\n")
         : "No activities logged yet.";
       const prompt = `You are a partnerships analyst summarizing the relationship with an enabler (a VC, government body, research institution, strategic partner, accelerator, or connector) for a BD pipeline tool.
 
@@ -1461,7 +1521,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setSummarizing(true);
     try {
       const activityText = contactActivities.length > 0
-        ? contactActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${a.description}`).join("\n")
+        ? contactActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${stripFathomMarker(a.description)}`).join("\n")
         : "No activities logged yet.";
       const prompt = `You are a relationship manager summarizing interactions with a contact for a BD pipeline tool.
 
@@ -1496,7 +1556,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setSummarizing(true);
     try {
       const activityText = orgActivities.length > 0
-        ? orgActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${a.description}`).join("\n")
+        ? orgActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${stripFathomMarker(a.description)}`).join("\n")
         : "No activities logged yet.";
       const t = ORG_TYPES.find((x) => x.id === organization.type);
       const prompt = `You are a market intelligence analyst summarizing an organization for a BD pipeline tool.
@@ -1675,7 +1735,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       r += `TODAY'S ACTIVITY:\n`;
       todayActs.forEach((a) => {
         const deal = deals.find((d) => d.id === a.deal_id);
-        r += `${ACT_TYPES.find((t) => t.id === a.type)?.icon || "."} ${deal?.company || "General"}: ${a.description}\n`;
+        r += `${ACT_TYPES.find((t) => t.id === a.type)?.icon || "."} ${deal?.company || "General"}: ${firstLine(stripFathomMarker(a.description))}\n`;
       });
       r += "\n";
     }
@@ -2252,7 +2312,7 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
               <div key={a.id} className="home-card home-meeting" onClick={() => onOpenEntity(a)}>
                 <div className="home-meeting-time">{formatDateTime(a.created_at)}</div>
                 <div className="home-meeting-main">
-                  <div className="home-meeting-title">{a.description || "Meeting"}</div>
+                  <div className="home-meeting-title">{firstLine(stripFathomMarker(a.description)) || "Meeting"}</div>
                   {entityName(a) && <div className="home-meeting-sub">{entityName(a)}</div>}
                 </div>
               </div>
@@ -2300,7 +2360,10 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
               <div key={a.id} className="home-card home-act" onClick={() => onOpenEntity(a)}>
                 <ActivityGlyph type={a.type} />
                 <div className="home-act-main">
-                  <div className="home-act-desc">{a.description}</div>
+                  <div className="home-act-desc">
+                    {isFathomActivity(a) && <span className="fathom-badge sm" title="Auto-imported from Fathom">Fathom</span>}
+                    {isFathomActivity(a) ? firstLine(stripFathomMarker(a.description)) : a.description}
+                  </div>
                   <div className="home-act-meta">{entityName(a) || "General"} . {formatDateTime(a.created_at)}</div>
                 </div>
               </div>
@@ -3067,7 +3130,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
             <div key={a.id} className="timeline-item">
               <ActivityGlyph type={a.type} />
               <div>
-                <div className="act-desc">{a.description}</div>
+                <ActivityDescription description={a.description} />
                 <div className="act-date">{formatDate(a.created_at)}</div>
               </div>
             </div>
@@ -4195,7 +4258,7 @@ function InstitutionSheet({
           {filtered.map(a => (
             <div key={a.id} className="timeline-item">
               <ActivityGlyph type={a.type} />
-              <div><div className="act-desc">{a.description}</div><div className="act-date">{formatDate(a.created_at)}</div></div>
+              <div><ActivityDescription description={a.description} /><div className="act-date">{formatDate(a.created_at)}</div></div>
             </div>
           ))}
         </div>
