@@ -210,6 +210,50 @@ export const researchClinicalTrials = async (name) => {
   }
 };
 
+// Meeting prep brief (Feature 2): turns gathered CRM context into a short,
+// scannable four-section brief. The exact section headings ("WHO:" etc.) are a
+// contract with the React renderer, which formats "Heading:" lines and bullets.
+export const generateMeetingBrief = async (context) => {
+  const prompt = `Generate a concise meeting prep brief. Include: 1) WHO: name, role, relationship warmth, last interaction date. 2) CONTEXT: 3-4 sentence summary of the relationship history and recent discussions. 3) OPEN ITEMS: pending tasks or commitments involving this person. 4) SUGGESTED TALKING POINTS: 2-3 recommendations based on the history. Keep it scannable and short.
+
+Format the response as plain text with exactly these four heading lines: "WHO:", "CONTEXT:", "OPEN ITEMS:", "SUGGESTED TALKING POINTS:". Under each heading use short plain sentences or "- " bullet lines. No markdown, no asterisks, no backticks. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.
+
+Here is the data:
+${context}`;
+  const text = await plainText(prompt, 600);
+  if (!text) throw new Error("empty brief response");
+  return text;
+};
+
+// Pulls a JSON ARRAY out of a model response (news briefing): strips markdown
+// fences, keeps the substring from the first [ to the last ]. Returns null so
+// callers can decide whether to surface a retry.
+const parseJsonArray = (text) => {
+  const cleaned = (text || "").replace(/```json/gi, "").replace(/```/g, "").trim();
+  const first = cleaned.indexOf("[");
+  const last = cleaned.lastIndexOf("]");
+  if (first === -1 || last === -1 || last < first) return null;
+  try {
+    const arr = JSON.parse(cleaned.slice(first, last + 1));
+    return Array.isArray(arr) ? arr : null;
+  } catch {
+    return null;
+  }
+};
+
+// Daily news briefing (Feature 3): one web-search call per section, JSON-only
+// response parsed to [{headline, summary, source}]. Throws on failure so the
+// UI can show a per-section retry without breaking the other sections.
+export const fetchNewsStories = async (prompt) => {
+  const text = await webSearchText(prompt, 1000);
+  const arr = parseJsonArray(text);
+  if (!arr) throw new Error("could not parse news stories");
+  return arr
+    .filter((s) => s && s.headline)
+    .slice(0, 5)
+    .map((s) => ({ headline: String(s.headline), summary: String(s.summary || ""), source: String(s.source || "") }));
+};
+
 export const summarizeImage = async (base64, prompt) => {
   if (!ANTHROPIC_API_KEY) throw new Error("Missing VITE_ANTHROPIC_API_KEY");
   bumpApiCalls();

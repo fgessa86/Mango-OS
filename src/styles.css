@@ -631,6 +631,96 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 
 .map-mobile-notice { font-size: 15px; font-weight: 600; color: var(--muted); background: var(--card-tint); border-radius: 14px; padding: 28px 20px; text-align: center; line-height: 1.5; }
 
+/* ============================================================
+   Materials Library
+   ============================================================ */
+.nav-icon-folder { display: inline-flex; align-items: center; justify-content: center; color: #b9ac93; border: none; }
+.nav-item.active .nav-icon-folder, .mobile-tab.active .nav-icon-folder { color: var(--mango); }
+.materials-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+.material-card { background: var(--surface); border-radius: 14px; padding: 15px 16px; box-shadow: var(--shadow-card); display: flex; flex-direction: column; gap: 8px; }
+.material-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.material-name { font-size: 14.5px; font-weight: 700; color: var(--text); line-height: 1.3; min-width: 0; overflow-wrap: anywhere; }
+.material-meta-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.material-audience { font-size: 10.5px; font-weight: 700; color: var(--muted-2); background: #f1eadd; padding: 1px 9px; border-radius: 20px; }
+.material-version { font-size: 11px; font-weight: 800; color: var(--accent-strong); background: var(--next-tint); padding: 1px 8px; border-radius: 20px; }
+.material-notes { font-size: 12.5px; color: var(--text-2); line-height: 1.45; }
+.material-file-row { display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--muted); margin-top: auto; }
+.material-actions { display: flex; align-items: center; gap: 2px; border-top: 1px solid var(--divider); padding-top: 8px; margin: 4px -6px 0; }
+.material-delete { color: #C42B30; }
+.material-form { background: var(--surface); border-radius: 14px; padding: 16px; box-shadow: var(--shadow-card); margin-bottom: 18px; }
+.material-form-file { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.material-form-filename { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.material-form-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.material-form-name { flex: 2 1 200px; }
+.material-form-version { flex: 0 1 130px; }
+.material-form-notes { width: 100%; min-height: 54px; resize: vertical; }
+.material-card-editing .material-edit-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.material-picker { background: var(--card-tint); border-radius: 12px; padding: 8px; margin-bottom: 12px; max-height: 240px; overflow-y: auto; }
+.material-picker-row { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; border: none; background: transparent; border-radius: 8px; padding: 9px 10px; cursor: pointer; font-family: inherit; }
+.material-picker-row:hover { background: var(--surface); }
+.material-picker-name { font-size: 13.5px; font-weight: 600; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.material-links-list { display: flex; flex-direction: column; gap: 7px; }
+.material-link-row { display: flex; align-items: center; gap: 9px; background: var(--card-tint); border-radius: 10px; padding: 9px 12px; }
+.material-dl-btn { border: none; background: transparent; color: var(--accent-strong); cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 6px; }
+.material-dl-btn:hover { background: var(--next-tint); }
+
+/* ============================================================
+   Meeting Prep Briefs
+   ============================================================ */
+.home-prep-btn { flex-shrink: 0; align-self: center; border: 1px solid var(--dark); background: var(--surface); color: var(--accent-strong); font-size: 12px; font-weight: 700; padding: 7px 12px; border-radius: 9px; cursor: pointer; font-family: inherit; }
+.home-prep-btn:hover { background: var(--next-tint); border-color: var(--mango); }
+.home-prep-btn:disabled { opacity: 0.5; cursor: default; }
+.home-brief { display: flex; align-items: center; gap: 12px; }
+.home-brief-main { flex: 1; min-width: 0; }
+.home-brief-title { font-size: 14.5px; font-weight: 700; color: var(--text); }
+.home-brief-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 3px; }
+.home-brief-entity { font-weight: 700; color: var(--accent-strong); }
+.home-brief-open { font-size: 12px; font-weight: 700; color: var(--accent-strong); }
+.brief-modal { max-width: 640px; }
+.brief-sub { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted); margin-top: 3px; flex-wrap: wrap; }
+.brief-body { background: var(--card-tint); border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; }
+.brief-goal { margin-bottom: 16px; }
+.brief-goal-input { width: 100%; min-height: 64px; resize: vertical; margin-top: 6px; }
+.brief-materials { margin-bottom: 16px; }
+.brief-materials .section-label, .brief-goal .section-label { margin-bottom: 6px; }
+.brief-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--divider); padding-top: 12px; }
+.brief-created { font-size: 11.5px; color: var(--muted); }
+.brief-footer-actions { display: flex; align-items: center; gap: 14px; }
+.brief-delete { color: #C42B30; }
+.brief-generating { display: flex; align-items: center; gap: 12px; font-size: 14.5px; font-weight: 700; color: var(--accent-strong); padding: 22px 8px; }
+.brief-generating-spinner { width: 18px; height: 18px; border: 3px solid var(--next-tint); border-top-color: var(--mango); border-radius: 50%; animation: briefSpin 0.8s linear infinite; flex-shrink: 0; }
+@keyframes briefSpin { to { transform: rotate(360deg); } }
+@media print {
+  body * { visibility: hidden; }
+  .brief-modal, .brief-modal * { visibility: visible; }
+  .brief-modal { position: absolute; left: 0; top: 0; width: 100%; max-width: 100%; box-shadow: none; }
+  .brief-footer, .close-btn { display: none !important; }
+}
+
+/* ============================================================
+   Daily News Briefing
+   ============================================================ */
+.briefing-head-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.briefing-updated { font-size: 11.5px; color: var(--muted); }
+.news-section { background: var(--surface); border-radius: 14px; box-shadow: var(--shadow-card); margin-bottom: 10px; overflow: hidden; }
+.news-section-head { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: none; background: transparent; padding: 13px 16px; cursor: pointer; font-family: inherit; }
+.news-section-icon { font-size: 15px; }
+.news-section-label { flex: 1; font-size: 13.5px; font-weight: 800; color: var(--text); }
+.news-section-chevron { font-size: 11px; color: var(--muted); }
+.news-list { padding: 0 16px 12px; }
+.news-row { padding: 9px 0; border-top: 1px solid var(--divider); }
+.news-headline { font-size: 14px; font-weight: 700; color: var(--text); line-height: 1.35; }
+.news-summary { font-size: 13px; color: var(--muted-2); line-height: 1.45; margin-top: 2px; }
+.news-source { display: inline-block; font-size: 10.5px; font-weight: 700; color: var(--muted); background: #f1eadd; padding: 1px 8px; border-radius: 20px; margin-top: 5px; }
+.news-empty { padding: 4px 16px 14px; font-size: 13px; color: var(--muted); }
+.news-error { display: block; width: calc(100% - 32px); margin: 0 16px 14px; text-align: left; border: none; background: #FCE8E8; color: #C42B30; font-size: 13px; font-weight: 600; padding: 11px 14px; border-radius: 10px; cursor: pointer; font-family: inherit; }
+.news-skeletons { padding: 4px 16px 14px; }
+.news-skeleton { padding: 9px 0; border-top: 1px solid var(--divider); }
+.news-skeleton-line { height: 11px; border-radius: 6px; background: linear-gradient(90deg, #f1eadd 25%, #f8f2e7 50%, #f1eadd 75%); background-size: 200% 100%; animation: newsShimmer 1.2s ease-in-out infinite; margin-bottom: 6px; }
+.news-skeleton-line.w60 { width: 60%; }
+.news-skeleton-line.w90 { width: 90%; margin-bottom: 0; }
+@keyframes newsShimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
 /* Home / Command Center: My Notes cards + section head */
 .home-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .home-section-head .home-section-title { margin-bottom: 0; }
@@ -868,6 +958,12 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
   .map-side-panel { width: 100%; left: 0; right: 0; top: auto; bottom: 0; height: 60%; border-top: 1px solid var(--divider); border-radius: 18px 18px 0 0; box-shadow: 0 -8px 28px rgba(60,45,20,0.16); }
   .map-target-select { width: 100%; }
   .map-paths-panel { width: calc(100% - 24px); }
+
+  /* Materials + briefs + news on phones. */
+  .materials-grid { grid-template-columns: 1fr; }
+  .home-meeting { flex-wrap: wrap; }
+  .home-prep-btn { min-height: 40px; }
+  .briefing-head-right { width: 100%; justify-content: space-between; }
 
   /* Notes: full-screen list, then full-screen editor with a back button. */
   .notes-view { height: auto; min-height: 100vh; display: block; }

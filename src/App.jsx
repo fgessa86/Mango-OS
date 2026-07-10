@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
 import { api } from "./supabase";
-import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, getApiCallsToday } from "./anthropic";
+import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, fetchNewsStories, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import MapTab from "./MapTab";
@@ -110,6 +110,39 @@ function FormattedActivityBody({ lines }) {
   );
 }
 
+// Materials Library vocabularies (badge colors follow the constants.js pattern).
+const MATERIAL_TYPES = [
+  { id: "one_pager", label: "One-Pager", color: "#2A6FDB" },
+  { id: "deck", label: "Deck", color: "#8B5CF6" },
+  { id: "proposal", label: "Proposal", color: "#F59E0B" },
+  { id: "white_paper", label: "White Paper", color: "#14B8A6" },
+  { id: "contract", label: "Contract", color: "#EF4444" },
+  { id: "other", label: "Other", color: "#6B6B7B" },
+];
+const MATERIAL_AUDIENCES = [
+  { id: "payer_government", label: "Payer/Government" },
+  { id: "hospital", label: "Hospital" },
+  { id: "investor", label: "Investor" },
+  { id: "general", label: "General" },
+];
+const materialTypeMeta = (id) => MATERIAL_TYPES.find((t) => t.id === id) || MATERIAL_TYPES[MATERIAL_TYPES.length - 1];
+const materialAudienceLabel = (id) => MATERIAL_AUDIENCES.find((a) => a.id === id)?.label || id || "";
+const MAX_MATERIAL_BYTES = 5 * 1024 * 1024;
+const formatBytes = (b) => {
+  const n = Number(b) || 0;
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
+};
+
+// Daily news briefing sections (Feature 3). Prompts are a fixed contract with
+// fetchNewsStories in anthropic.js (JSON array only).
+const NEWS_SECTIONS = [
+  { key: "healthtech", label: "Health Tech and AI", icon: "⚕", prompt: `Search for today's top news in health technology and AI in healthcare. Return the 5 most significant stories. For each: headline, one-sentence summary, source name. Respond in JSON only: [{headline, summary, source}]. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.` },
+  { key: "oncology", label: "Oncology and Immunotherapy", icon: "🧬", prompt: `Search for today's top news in oncology, cancer research, and immunotherapy. Return the 5 most significant stories. For each: headline, one-sentence summary, source name. Respond in JSON only: [{headline, summary, source}]. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.` },
+  { key: "saudi", label: "Saudi Arabia", icon: "🇸🇦", prompt: `Search for today's top news in Saudi Arabia, focusing on healthcare, business, and Vision 2030 developments. Return the 5 most significant stories. For each: headline, one-sentence summary, source name. Respond in JSON only: [{headline, summary, source}]. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.` },
+];
+
 // Minimal geometric nav icons (2px strokes). Active color is handled via CSS.
 function NavIcon({ shape }) {
   if (shape === "square") return <span className="nav-icon nav-icon-square" />;
@@ -121,6 +154,11 @@ function NavIcon({ shape }) {
   if (shape === "note") return (
     <span className="nav-icon nav-icon-note">
       <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="3" y="2" width="10" height="12" rx="1.5" /><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3" strokeLinecap="round" /></svg>
+    </span>
+  );
+  if (shape === "folder") return (
+    <span className="nav-icon nav-icon-folder">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M2 4.5A1.5 1.5 0 013.5 3h3l1.5 2h4.5A1.5 1.5 0 0114 6.5v5a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5v-7z" strokeLinejoin="round" /></svg>
     </span>
   );
   if (shape === "house") return (
@@ -233,6 +271,8 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
     { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
     // Notes are Fahed's personal workspace, hidden in Boss View (like Reports).
     ...(bossMode ? [] : [{ id: "notes", label: "Notes", shape: "note" }]),
+    // Materials are shared collateral: visible in Boss View too (read-only).
+    { id: "materials", label: "Materials", shape: "folder" },
   ];
   const more = [
     { id: "reports", label: "Reports" },
@@ -758,6 +798,14 @@ export default function App() {
   const [notes, setNotes] = useState([]);
   const [noteFolders, setNoteFolders] = useState([]);
   const [selectedNoteId, setSelectedNoteId] = useState(null);
+  const [materials, setMaterials] = useState([]);
+  const [materialLinks, setMaterialLinks] = useState([]);
+  const [meetingBriefs, setMeetingBriefs] = useState([]);
+  // Meeting brief viewer / generation state. briefGenerating holds the meeting
+  // title while the AI call is in flight (drives a loading modal).
+  const [briefViewId, setBriefViewId] = useState(null);
+  const [briefGenerating, setBriefGenerating] = useState(null);
+  const [showNewBrief, setShowNewBrief] = useState(false);
   const [apiCallsToday, setApiCallsToday] = useState(() => getApiCallsToday());
   const [enablers, setEnablers] = useState([]);
   const [dealContacts, setDealContacts] = useState([]);
@@ -796,7 +844,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr, bc, nt, nf] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -812,11 +860,17 @@ export default function App() {
         api("boss_comments", "GET", null, "?select=*&order=created_at.desc").catch(() => []),
         api("notes", "GET", null, "?select=*&order=updated_at.desc").catch(() => []),
         api("note_folders", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        // Materials are listed WITHOUT file_data: base64 payloads can be ~7MB
+        // each, so the file body is only fetched on demand at download time.
+        api("materials", "GET", null, "?select=id,name,type,audience,version,file_name,file_size,mime_type,notes,created_at,updated_at&order=created_at.desc").catch(() => []),
+        api("material_links", "GET", null, "?select=*&order=created_at.desc").catch(() => []),
+        api("meeting_briefs", "GET", null, "?select=*&order=created_at.desc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []);
       setOrganizations(orgs || []); setDealEnablers(de || []); setNetworkEdges(ne || []);
       setCustomOptions(co || []); setContactRoles(cr || []); setBossComments(bc || []); setNotes(nt || []); setNoteFolders(nf || []);
+      setMaterials(mat || []); setMaterialLinks(ml || []); setMeetingBriefs(mb || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -1703,6 +1757,163 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   };
   const moveNoteToFolder = (noteId, folderId) => updateNote(noteId, { folder_id: folderId || null });
 
+  // MATERIALS LIBRARY. Rows in local state never carry file_data (too big);
+  // uploads strip it from the POST response and downloads fetch it on demand.
+  const uploadMaterial = async (form) => {
+    try {
+      const clean = { name: (form.name || form.file_name || "Untitled").trim(), type: form.type || "other" };
+      if (form.audience) clean.audience = form.audience;
+      if ((form.version || "").trim()) clean.version = form.version.trim();
+      if ((form.notes || "").trim()) clean.notes = form.notes.trim();
+      if (form.file_name) clean.file_name = form.file_name;
+      if (form.file_data) clean.file_data = form.file_data;
+      if (form.file_size) clean.file_size = form.file_size;
+      if (form.mime_type) clean.mime_type = form.mime_type;
+      const rows = await api("materials", "POST", clean);
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) { const { file_data, ...rest } = row; setMaterials((prev) => [rest, ...prev]); }
+      showToast("Material uploaded");
+      return row;
+    } catch { showToast("Error uploading material"); }
+  };
+  const updateMaterial = async (id, patch) => {
+    const now = new Date().toISOString();
+    try {
+      await api("materials", "PATCH", { ...patch, updated_at: now }, `?id=eq.${id}`);
+      setMaterials((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch, updated_at: now } : m)));
+      savedToast();
+    } catch { showToast("Error updating material"); }
+  };
+  const deleteMaterial = async (id) => {
+    try {
+      await api("material_links", "DELETE", null, `?material_id=eq.${id}`);
+      await api("materials", "DELETE", null, `?id=eq.${id}`);
+      setMaterials((prev) => prev.filter((m) => m.id !== id));
+      setMaterialLinks((prev) => prev.filter((l) => l.material_id !== id));
+      showToast("Material deleted");
+    } catch { showToast("Error deleting material"); }
+  };
+  // Fetch the stored base64 body on demand and trigger a browser download.
+  const downloadMaterial = async (m) => {
+    try {
+      const rows = await api("materials", "GET", null, `?id=eq.${m.id}&select=file_data,file_name,mime_type`);
+      const row = rows && rows[0];
+      if (!row || !row.file_data) { showToast("No file stored for this material"); return; }
+      const a = document.createElement("a");
+      a.href = row.file_data;
+      a.download = row.file_name || m.name || "material";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch { showToast("Error downloading material"); }
+  };
+  // tag is { deal_id } / { enabler_id } / { organization_id } / { contact_id }.
+  const attachMaterial = async (materialId, tag) => {
+    try {
+      const rows = await api("material_links", "POST", { material_id: materialId, ...tag });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setMaterialLinks((prev) => [row, ...prev]);
+      showToast("Material attached");
+    } catch { showToast("Error attaching material"); }
+  };
+  const removeMaterialLink = async (linkId) => {
+    try {
+      await api("material_links", "DELETE", null, `?id=eq.${linkId}`);
+      setMaterialLinks((prev) => prev.filter((l) => l.id !== linkId));
+    } catch { showToast("Error removing link"); }
+  };
+
+  // MEETING PREP BRIEFS. Context is gathered from already-loaded state, sent to
+  // the AI (max_tokens 600), and the result saved to meeting_briefs so it can
+  // be revisited without regenerating.
+  const gatherBriefContext = ({ contact, deal, enabler, org }) => {
+    const lines = [];
+    const actLine = (a) => `[${formatDate(a.created_at)}] ${a.type}: ${firstLine(stripFathomMarker(a.description))}`;
+    if (contact) {
+      lines.push(`PERSON: ${contact.name}${contact.role ? `, ${contact.role}` : ""}${contact.company ? ` at ${contact.company}` : ""}`);
+      lines.push(`Warmth: ${contact.warmth || "unknown"}. Last contacted: ${contact.last_contacted_at ? formatDate(contact.last_contacted_at) : "never logged"}.`);
+      const roles = resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles });
+      if (roles.length) lines.push(`Roles: ${roles.map((r) => `${r.role_title ? `${r.role_title} at ` : ""}${r.institutionName}`).join("; ")}`);
+      if (contact.notes) lines.push(`Notes on this person: ${contact.notes}`);
+      if (contact.ai_summary) lines.push(`Person summary: ${contact.ai_summary}`);
+      const acts = activities.filter((a) => a.contact_id === contact.id).slice(0, 10);
+      if (acts.length) lines.push(`Last interactions with ${contact.name}:\n${acts.map(actLine).join("\n")}`);
+    }
+    const entity = deal || enabler || org;
+    if (entity) {
+      const eName = deal ? deal.company : entity.name;
+      lines.push(`INSTITUTION/DEAL: ${eName}${deal ? ` (pipeline stage: ${deal.stage}${deal.tier ? `, ${deal.tier}` : ""})` : ""}`);
+      if (entity.ai_summary) lines.push(`Institution summary: ${entity.ai_summary}`);
+      if (entity.notes) lines.push(`Institution notes: ${entity.notes}`);
+      const acts = activities.filter((a) => (deal && a.deal_id === deal.id) || (enabler && a.enabler_id === enabler.id) || (org && a.organization_id === org.id)).slice(0, 10);
+      if (acts.length) lines.push(`Recent activity on ${eName}:\n${acts.map(actLine).join("\n")}`);
+    }
+    const openTasks = todos.filter((t) => t.status === "open" && (
+      (contact && t.contact_id === contact.id) || (deal && t.deal_id === deal.id) ||
+      (enabler && t.enabler_id === enabler.id) || (org && t.organization_id === org.id)));
+    if (openTasks.length) lines.push(`Open tasks:\n${openTasks.map((t) => `- ${t.title}${t.due_date ? ` (due ${formatDate(t.due_date)})` : ""} [${t.priority}]`).join("\n")}`);
+    const linkIds = new Set(materialLinks
+      .filter((l) => (deal && l.deal_id === deal.id) || (enabler && l.enabler_id === enabler.id) || (org && l.organization_id === org.id) || (contact && l.contact_id === contact.id))
+      .map((l) => l.material_id));
+    const mats = materials.filter((m) => linkIds.has(m.id));
+    if (mats.length) lines.push(`Materials on file for them: ${mats.map((m) => `${m.name}${m.version ? ` (${m.version})` : ""}`).join("; ")}`);
+    return lines.join("\n\n") || "No history on file yet.";
+  };
+
+  const generateBrief = async ({ meeting_title, meeting_date, contact_id, deal_id, enabler_id, organization_id, existingId = null }) => {
+    if (briefGenerating) return;
+    const contact = contact_id ? contacts.find((c) => c.id === contact_id) : null;
+    const deal = deal_id ? deals.find((d) => d.id === deal_id) : null;
+    const enabler = enabler_id ? enablers.find((e) => e.id === enabler_id) : null;
+    const org = organization_id ? organizations.find((o) => o.id === organization_id) : null;
+    setBriefGenerating(meeting_title || "meeting");
+    try {
+      const content = await generateMeetingBrief(gatherBriefContext({ contact, deal, enabler, org }));
+      if (existingId) {
+        await api("meeting_briefs", "PATCH", { brief_content: content }, `?id=eq.${existingId}`);
+        setMeetingBriefs((prev) => prev.map((b) => (b.id === existingId ? { ...b, brief_content: content } : b)));
+        setBriefViewId(existingId);
+      } else {
+        const clean = { meeting_title: meeting_title || "Meeting", brief_content: content };
+        if (meeting_date) clean.meeting_date = meeting_date;
+        if (contact_id) clean.contact_id = contact_id;
+        if (deal_id) clean.deal_id = deal_id;
+        if (enabler_id) clean.enabler_id = enabler_id;
+        if (organization_id) clean.organization_id = organization_id;
+        const rows = await api("meeting_briefs", "POST", clean);
+        const row = Array.isArray(rows) ? rows[0] : rows;
+        if (row) { setMeetingBriefs((prev) => [row, ...prev]); setBriefViewId(row.id); }
+      }
+    } catch (e) { showToast(`Error generating brief: ${e.message || "unknown error"}`); }
+    setBriefGenerating(null);
+  };
+
+  // "Prep Brief" from a Today's Agenda meeting: reuse an existing brief for the
+  // same title on the same day instead of regenerating.
+  const prepBriefForMeeting = (a) => {
+    const title = firstLine(stripFathomMarker(a.description)) || "Meeting";
+    const existing = meetingBriefs.find((b) => b.meeting_title === title && b.meeting_date && new Date(b.meeting_date).toDateString() === new Date(a.created_at).toDateString());
+    if (existing) { setBriefViewId(existing.id); return; }
+    generateBrief({ meeting_title: title, meeting_date: a.created_at, contact_id: a.contact_id, deal_id: a.deal_id, enabler_id: a.enabler_id, organization_id: a.organization_id });
+  };
+
+  const updateBriefGoal = async (id, goal) => {
+    try {
+      await api("meeting_briefs", "PATCH", { my_goal: goal || null }, `?id=eq.${id}`);
+      setMeetingBriefs((prev) => prev.map((b) => (b.id === id ? { ...b, my_goal: goal } : b)));
+      savedToast();
+    } catch { showToast("Error saving goal"); }
+  };
+
+  const deleteBrief = async (id) => {
+    try {
+      await api("meeting_briefs", "DELETE", null, `?id=eq.${id}`);
+      setMeetingBriefs((prev) => prev.filter((b) => b.id !== id));
+      setBriefViewId((cur) => (cur === id ? null : cur));
+      showToast("Brief deleted");
+    } catch { showToast("Error deleting brief"); }
+  };
+
   // Task/link navigation. Deals open the Pipeline deal sheet; enablers are
   // institutions, so open by name in the Ecosystem institution sheet.
   const openTaskLink = (link) => {
@@ -1937,6 +2148,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onDelete={() => deleteInstitution(inst)}
             onAddActivity={addActivity}
             linkedNotes={notes.filter((n) => (inst.dealId && n.deal_id === inst.dealId) || (inst.enablerId && n.enabler_id === inst.enablerId) || (inst.orgId && n.organization_id === inst.orgId))}
+            materials={materials}
+            materialLinks={materialLinks.filter((l) => (inst.dealId && l.deal_id === inst.dealId) || (inst.enablerId && l.enabler_id === inst.enablerId) || (inst.orgId && l.organization_id === inst.orgId))}
+            onAttachMaterial={(materialId) => { const p = institutionPrimaryEntity(inst); if (p) attachMaterial(materialId, { [`${p.type}_id`]: p.id }); }}
+            onRemoveMaterialLink={removeMaterialLink}
+            onDownloadMaterial={downloadMaterial}
             onOpenNote={openNote}
             onAddPersonRole={addPersonRole}
             onAddPersonWithRoles={addPersonWithRoles}
@@ -2034,6 +2250,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onOpenNote={openNote}
           onOpenNotesView={() => setView("notes")}
           onNewNote={async () => { await createNote(); setView("notes"); }}
+          onOpenMaterials={() => setView("materials")}
+          briefs={meetingBriefs}
+          onPrepBrief={prepBriefForMeeting}
+          onOpenBrief={setBriefViewId}
+          onNewBrief={() => setShowNewBrief(true)}
+          briefGenerating={briefGenerating}
         />
       )}
 
@@ -2243,6 +2465,18 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         />
       )}
 
+      {/* MATERIALS LIBRARY */}
+      {view === "materials" && (
+        <MaterialsTab
+          materials={materials}
+          onUpload={uploadMaterial}
+          onUpdate={updateMaterial}
+          onDelete={deleteMaterial}
+          onDownload={downloadMaterial}
+          showToast={showToast}
+        />
+      )}
+
       {/* REPORTS */}
       {view === "reports" && (
         <div className="section-pad reports">
@@ -2267,6 +2501,47 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           Only Fahed's opens clear the unread marker (the badge is Fahed's). */}
       <CommentPanel comments={bossComments} author={commentAuthor} unread={unreadComments} onOpen={bossMode ? undefined : markCommentsSeen} onPost={postBossComment} targetName={commentTargetName} />
 
+      {/* MEETING BRIEF viewer / generator (Feature 2) */}
+      {briefGenerating && (
+        <div className="overlay">
+          <div className="modal brief-modal">
+            <div className="brief-generating">
+              <div className="brief-generating-spinner" />
+              Generating brief for {briefGenerating}...
+            </div>
+          </div>
+        </div>
+      )}
+      {!briefGenerating && briefViewId && (() => {
+        const brief = meetingBriefs.find((b) => b.id === briefViewId);
+        if (!brief) return null;
+        const relatedLinkIds = new Set(materialLinks
+          .filter((l) => (brief.deal_id && l.deal_id === brief.deal_id) || (brief.enabler_id && l.enabler_id === brief.enabler_id) || (brief.organization_id && l.organization_id === brief.organization_id))
+          .map((l) => l.material_id));
+        return (
+          <BriefModal
+            brief={brief}
+            entityName={entityName}
+            relatedMaterials={materials.filter((m) => relatedLinkIds.has(m.id))}
+            onDownloadMaterial={downloadMaterial}
+            onSaveGoal={(goal) => updateBriefGoal(brief.id, goal)}
+            onRegenerate={bossMode ? null : () => generateBrief({ ...brief, existingId: brief.id })}
+            onDelete={bossMode ? null : () => { if (confirm("Delete this brief?")) deleteBrief(brief.id); }}
+            onOpenEntity={(row) => { setBriefViewId(null); openEntity(row); }}
+            readOnly={bossMode}
+            onClose={() => setBriefViewId(null)}
+          />
+        );
+      })()}
+      {showNewBrief && !bossMode && (
+        <NewBriefForm
+          contacts={contacts}
+          institutions={institutions}
+          onCancel={() => setShowNewBrief(false)}
+          onCreate={(form) => { setShowNewBrief(false); generateBrief(form); }}
+        />
+      )}
+
       {/* MODALS (creating new records only; hidden in Boss View) */}
       {!bossMode && modal?.type === "deal" && <DealForm deal={modal.data} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveDeal} onClose={() => setModal(null)} />}
       {!bossMode && modal?.type === "contact" && <ContactForm contact={modal.data} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveContact} onClose={() => setModal(null)} />}
@@ -2279,7 +2554,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
@@ -2331,6 +2606,39 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
                   <div className="home-meeting-title">{firstLine(stripFathomMarker(a.description)) || "Meeting"}</div>
                   {entityName(a) && <div className="home-meeting-sub">{entityName(a)}</div>}
                 </div>
+                {!bossMode && onPrepBrief && (
+                  <button className="home-prep-btn" disabled={!!briefGenerating} onClick={(e) => { e.stopPropagation(); onPrepBrief(a); }}>Prep Brief</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Daily news briefing (Feature 3), below Today's Agenda */}
+      <DailyBriefing isMobile={isMobile} />
+
+      {/* Meeting prep briefs (Feature 2) */}
+      <div className="home-section">
+        <div className="home-section-head">
+          <div className="home-section-title">Briefs</div>
+          {!bossMode && onNewBrief && <button className="home-section-action" disabled={!!briefGenerating} onClick={onNewBrief}>+ New Brief</button>}
+        </div>
+        {briefs.length === 0 ? (
+          <div className="home-empty">No briefs yet. Generate one from a meeting above, or create one manually.</div>
+        ) : (
+          <div className="home-list">
+            {briefs.slice(0, 5).map((b) => (
+              <div key={b.id} className="home-card home-brief" onClick={() => onOpenBrief(b.id)}>
+                <div className="home-brief-main">
+                  <div className="home-brief-title">{b.meeting_title || "Meeting brief"}</div>
+                  <div className="home-brief-meta">
+                    {b.meeting_date && <span>{formatDate(b.meeting_date)}</span>}
+                    {entityName(b) && <span className="home-brief-entity">{entityName(b)}</span>}
+                    <span className="home-brief-created">Prepared {formatDate(b.created_at)}</span>
+                  </div>
+                </div>
+                <span className="home-brief-open">Open</span>
               </div>
             ))}
           </div>
@@ -2445,8 +2753,425 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
       )}
 
       {!bossMode && isMobile && (
-        <button className="home-reports-link" onClick={onOpenReports}>View Reports</button>
+        <>
+          <button className="home-reports-link" onClick={onOpenMaterials}>View Materials</button>
+          <button className="home-reports-link" onClick={onOpenReports}>View Reports</button>
+        </>
       )}
+    </div>
+  );
+}
+
+// Daily news briefing (Feature 3): three web-search sections cached in
+// localStorage per day. Auto-fetches on the first Home load of the day; the
+// Refresh button re-fetches all three in parallel. Each section fails and
+// retries independently so one bad fetch never blanks the others.
+const NEWS_CACHE_KEY = "mango-news-briefing";
+function DailyBriefing({ isMobile }) {
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const [data, setData] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(NEWS_CACHE_KEY) || "null"); } catch { return null; }
+  });
+  const [loading, setLoading] = useState({});
+  const [errors, setErrors] = useState({});
+  const [collapsed, setCollapsed] = useState(() => Object.fromEntries(NEWS_SECTIONS.map((s) => [s.key, isMobile])));
+  const startedRef = useRef(false);
+
+  const cacheFresh = data && data.date === todayKey;
+
+  const fetchSection = useCallback(async (sec) => {
+    setLoading((l) => ({ ...l, [sec.key]: true }));
+    setErrors((e) => ({ ...e, [sec.key]: false }));
+    try {
+      const stories = await fetchNewsStories(sec.prompt);
+      setData((prev) => {
+        const sections = prev && prev.date === todayKey ? { ...prev.sections } : {};
+        sections[sec.key] = stories;
+        const next = { date: todayKey, updatedAt: new Date().toISOString(), sections };
+        try { localStorage.setItem(NEWS_CACHE_KEY, JSON.stringify(next)); } catch { /* storage full */ }
+        return next;
+      });
+    } catch {
+      setErrors((e) => ({ ...e, [sec.key]: true }));
+    }
+    setLoading((l) => ({ ...l, [sec.key]: false }));
+  }, [todayKey]);
+
+  const refreshAll = useCallback(() => { NEWS_SECTIONS.forEach((sec) => { fetchSection(sec); }); }, [fetchSection]);
+
+  // Fetch fresh news once per day: only on the first Home mount whose cache is stale.
+  useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    if (!cacheFresh) refreshAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const anyLoading = NEWS_SECTIONS.some((s) => loading[s.key]);
+  return (
+    <div className="home-section daily-briefing">
+      <div className="home-section-head">
+        <div className="home-section-title">Daily Briefing</div>
+        <div className="briefing-head-right">
+          {cacheFresh && data.updatedAt && <span className="briefing-updated">Last updated: {formatDateTime(data.updatedAt)}</span>}
+          <button className="home-section-action" disabled={anyLoading} onClick={refreshAll}>{anyLoading ? "Refreshing..." : "Refresh Briefing"}</button>
+        </div>
+      </div>
+      {NEWS_SECTIONS.map((sec) => {
+        const stories = cacheFresh ? data.sections[sec.key] : null;
+        const isCollapsed = collapsed[sec.key];
+        return (
+          <div key={sec.key} className="news-section">
+            <button className="news-section-head" onClick={() => setCollapsed((c) => ({ ...c, [sec.key]: !c[sec.key] }))}>
+              <span className="news-section-icon">{sec.icon}</span>
+              <span className="news-section-label">{sec.label}</span>
+              <span className="news-section-chevron">{isCollapsed ? "▸" : "▾"}</span>
+            </button>
+            {!isCollapsed && (
+              loading[sec.key] ? (
+                <div className="news-skeletons">
+                  {[0, 1, 2, 3, 4].map((i) => (
+                    <div key={i} className="news-skeleton"><div className="news-skeleton-line w60" /><div className="news-skeleton-line w90" /></div>
+                  ))}
+                </div>
+              ) : errors[sec.key] ? (
+                <button className="news-error" onClick={() => fetchSection(sec)}>Couldn't load {sec.label} news. Tap to retry.</button>
+              ) : !stories || stories.length === 0 ? (
+                <div className="news-empty">No stories loaded yet.</div>
+              ) : (
+                <div className="news-list">
+                  {stories.map((s, i) => (
+                    <div key={i} className="news-row">
+                      <div className="news-headline">{s.headline}</div>
+                      {s.summary && <div className="news-summary">{s.summary}</div>}
+                      {s.source && <span className="news-source">{s.source}</span>}
+                    </div>
+                  ))}
+                </div>
+              )
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ============================================================
+   Materials Library (Feature 1)
+   ============================================================ */
+
+// Reads a picked file into a base64 data URL, rejecting anything over 5MB.
+const readMaterialFile = (file) => new Promise((resolve, reject) => {
+  if (file.size > MAX_MATERIAL_BYTES) { reject(new Error("too_large")); return; }
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result);
+  reader.onerror = () => reject(new Error("read_failed"));
+  reader.readAsDataURL(file);
+});
+
+function MaterialTypeBadge({ type }) {
+  const m = materialTypeMeta(type);
+  return <span className="badge" style={{ background: m.color + "22", color: m.color, border: `1px solid ${m.color}44` }}>{m.label}</span>;
+}
+
+function MaterialUploadForm({ onSave, onCancel, showToast }) {
+  const [file, setFile] = useState(null); // { file_name, file_data, file_size, mime_type }
+  const [name, setName] = useState("");
+  const [type, setType] = useState("one_pager");
+  const [audience, setAudience] = useState("general");
+  const [version, setVersion] = useState("");
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const fileRef = useRef(null);
+
+  const pick = async (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    try {
+      const dataUrl = await readMaterialFile(f);
+      setFile({ file_name: f.name, file_data: dataUrl, file_size: f.size, mime_type: f.type || "application/octet-stream" });
+      // Auto-fill the name from the filename (sans extension), still editable.
+      if (!name.trim()) setName(f.name.replace(/\.[^.]+$/, ""));
+    } catch (err) {
+      showToast(err.message === "too_large" ? "File too large. Keep materials under 5MB." : "Could not read that file.");
+    }
+  };
+
+  const submit = async () => {
+    if (!file || !name.trim() || saving) return;
+    setSaving(true);
+    try { await onSave({ name, type, audience, version, notes, ...file }); onCancel(); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div className="material-form">
+      <input ref={fileRef} type="file" accept=".pdf,.pptx,.docx,.doc,.ppt,image/*,application/pdf" className="photo-input-hidden" onChange={pick} />
+      <div className="material-form-file">
+        <button className="btn-sec" onClick={() => fileRef.current?.click()}>{file ? "Change file" : "Choose file..."}</button>
+        {file && <span className="material-form-filename">{file.file_name} ({formatBytes(file.file_size)})</span>}
+      </div>
+      <div className="material-form-row">
+        <input className="input material-form-name" placeholder="Material name..." value={name} onChange={(e) => setName(e.target.value)} />
+        <select className="input" value={type} onChange={(e) => setType(e.target.value)}>
+          {MATERIAL_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+        </select>
+        <select className="input" value={audience} onChange={(e) => setAudience(e.target.value)}>
+          {MATERIAL_AUDIENCES.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+        </select>
+        <input className="input material-form-version" placeholder="Version (e.g. v2)" value={version} onChange={(e) => setVersion(e.target.value)} />
+      </div>
+      <textarea className="input material-form-notes" placeholder="Notes (optional)..." value={notes} onChange={(e) => setNotes(e.target.value)} />
+      <div className="task-form-actions">
+        <button className="btn-sec" onClick={onCancel}>Cancel</button>
+        <button className="btn-primary" onClick={submit} disabled={!file || !name.trim() || saving}>{saving ? "Uploading..." : "Upload"}</button>
+      </div>
+    </div>
+  );
+}
+
+function MaterialCard({ material: m, onUpdate, onDelete, onDownload }) {
+  const readOnly = useReadOnly();
+  const [editing, setEditing] = useState(false);
+  const [f, setF] = useState({ name: m.name, type: m.type, audience: m.audience || "general", version: m.version || "" });
+  const startEdit = () => { setF({ name: m.name, type: m.type, audience: m.audience || "general", version: m.version || "" }); setEditing(true); };
+  const save = () => {
+    if (!f.name.trim()) return;
+    onUpdate(m.id, { name: f.name.trim(), type: f.type, audience: f.audience, version: f.version.trim() || null });
+    setEditing(false);
+  };
+  if (editing) {
+    return (
+      <div className="material-card material-card-editing">
+        <input className="input" value={f.name} onChange={(e) => setF((p) => ({ ...p, name: e.target.value }))} />
+        <div className="material-edit-row">
+          <select className="input" value={f.type} onChange={(e) => setF((p) => ({ ...p, type: e.target.value }))}>
+            {MATERIAL_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </select>
+          <select className="input" value={f.audience} onChange={(e) => setF((p) => ({ ...p, audience: e.target.value }))}>
+            {MATERIAL_AUDIENCES.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+          </select>
+          <input className="input material-form-version" placeholder="Version" value={f.version} onChange={(e) => setF((p) => ({ ...p, version: e.target.value }))} />
+        </div>
+        <div className="task-form-actions">
+          <button className="btn-sec" onClick={() => setEditing(false)}>Cancel</button>
+          <button className="btn-primary" onClick={save} disabled={!f.name.trim()}>Save</button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="material-card">
+      <div className="material-card-top">
+        <div className="material-name">{m.name}</div>
+        <MaterialTypeBadge type={m.type} />
+      </div>
+      <div className="material-meta-row">
+        {m.audience && <span className="material-audience">{materialAudienceLabel(m.audience)}</span>}
+        {m.version && <span className="material-version">{m.version}</span>}
+      </div>
+      {m.notes && <div className="material-notes">{m.notes}</div>}
+      <div className="material-file-row">
+        {m.file_size ? <span>{formatBytes(m.file_size)}</span> : null}
+        <span>Uploaded {formatDate(m.created_at)}</span>
+      </div>
+      <div className="material-actions">
+        <button className="btn-copy" onClick={() => onDownload(m)}>Download</button>
+        {!readOnly && <button className="btn-copy" onClick={startEdit}>Edit</button>}
+        {!readOnly && <button className="btn-copy material-delete" onClick={() => { if (confirm(`Delete "${m.name}"?`)) onDelete(m.id); }}>Delete</button>}
+      </div>
+    </div>
+  );
+}
+
+function MaterialsTab({ materials, onUpload, onUpdate, onDelete, onDownload, showToast }) {
+  const readOnly = useReadOnly();
+  const [uploading, setUploading] = useState(false);
+  return (
+    <div className="section-pad">
+      <div className="page-header" style={{ padding: "0 0 16px" }}>
+        <div>
+          <div className="page-title">Materials</div>
+          <div className="page-sub">Sales collateral, ready to share</div>
+        </div>
+        {!readOnly && <button className="btn-primary" onClick={() => setUploading((u) => !u)}>{uploading ? "Cancel" : "+ Upload Material"}</button>}
+      </div>
+      {uploading && <MaterialUploadForm onSave={onUpload} onCancel={() => setUploading(false)} showToast={showToast} />}
+      {materials.length === 0 ? (
+        <div className="empty-state">No materials yet. Upload your first one-pager or deck.</div>
+      ) : (
+        <div className="materials-grid">
+          {materials.map((m) => <MaterialCard key={m.id} material={m} onUpdate={onUpdate} onDelete={onDelete} onDownload={onDownload} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// "Materials" section on the unified Institution Sheet: materials linked to any
+// of the institution's backing rows, plus an attach picker over the library.
+function MaterialsSection({ materials = [], links = [], onAttach, onRemoveLink, onDownload }) {
+  const readOnly = useReadOnly();
+  const [picking, setPicking] = useState(false);
+  const linked = links
+    .map((l) => ({ link: l, material: materials.find((m) => m.id === l.material_id) }))
+    .filter((x) => x.material);
+  const linkedIds = new Set(linked.map((x) => x.material.id));
+  const attachable = materials.filter((m) => !linkedIds.has(m.id));
+  return (
+    <div className="people-section">
+      <div className="ai-summary-header">
+        <div className="section-label">Materials</div>
+        {!readOnly && onAttach && <button className="btn-copy" onClick={() => setPicking((p) => !p)}>{picking ? "Cancel" : "Attach Material"}</button>}
+      </div>
+      {picking && (
+        <div className="material-picker">
+          {attachable.length === 0 ? (
+            <div className="empty-small">Every library material is already attached (or the library is empty).</div>
+          ) : attachable.map((m) => (
+            <button key={m.id} className="material-picker-row" onClick={() => { onAttach(m.id); setPicking(false); }}>
+              <span className="material-picker-name">{m.name}</span>
+              <MaterialTypeBadge type={m.type} />
+              {m.version && <span className="material-version">{m.version}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+      {linked.length === 0 ? (
+        <div className="empty-small">No materials attached yet.</div>
+      ) : (
+        <div className="material-links-list">
+          {linked.map(({ link, material: m }) => (
+            <div key={link.id} className="material-link-row">
+              <span className="material-picker-name">{m.name}</span>
+              {m.version && <span className="material-version">{m.version}</span>}
+              <button className="material-dl-btn" title="Download" onClick={() => onDownload(m)}>⬇</button>
+              {!readOnly && <button className="person-remove" title="Remove" onClick={() => onRemoveLink(link.id)}>✕</button>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   Meeting Prep Briefs (Feature 2)
+   ============================================================ */
+
+// Full brief viewer: AI sections rendered with the structured formatter, an
+// editable "My Goal" field, related materials, and a Regenerate link.
+function BriefModal({ brief, entityName, relatedMaterials = [], onDownloadMaterial, onSaveGoal, onRegenerate, onDelete, onOpenEntity, readOnly, onClose }) {
+  const [goal, setGoal] = useState(brief.my_goal || "");
+  useEffect(() => { setGoal(brief.my_goal || ""); }, [brief.id]);
+  const linkedName = entityName(brief);
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal brief-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <div className="modal-title">{brief.meeting_title || "Meeting brief"}</div>
+            <div className="brief-sub">
+              {brief.meeting_date && <span>{formatDateTime(brief.meeting_date)}</span>}
+              {linkedName && <button className="home-tag" onClick={() => onOpenEntity(brief)}>{linkedName}</button>}
+            </div>
+          </div>
+          <button className="close-btn" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="brief-body">
+          <FormattedActivityBody lines={(brief.brief_content || "No content.").split("\n")} />
+        </div>
+
+        <div className="brief-goal">
+          <div className="section-label">My Goal for This Meeting</div>
+          {readOnly ? (
+            <div className="notes-readonly">{brief.my_goal || "No goal set."}</div>
+          ) : (
+            <textarea
+              className="input brief-goal-input"
+              placeholder="What do I want out of this meeting?"
+              value={goal}
+              onChange={(e) => setGoal(e.target.value)}
+              onBlur={() => { if ((goal || "") !== (brief.my_goal || "")) onSaveGoal(goal.trim()); }}
+            />
+          )}
+        </div>
+
+        <div className="brief-materials">
+          <div className="section-label">Related Materials</div>
+          {relatedMaterials.length === 0 ? (
+            <div className="empty-small">No materials linked to this deal or institution.</div>
+          ) : (
+            <div className="material-links-list">
+              {relatedMaterials.map((m) => (
+                <div key={m.id} className="material-link-row">
+                  <span className="material-picker-name">{m.name}</span>
+                  {m.version && <span className="material-version">{m.version}</span>}
+                  <button className="material-dl-btn" title="Download" onClick={() => onDownloadMaterial(m)}>⬇</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="brief-footer">
+          <span className="brief-created">Generated {formatDateTime(brief.created_at)}</span>
+          <div className="brief-footer-actions">
+            {onDelete && <button className="link-btn brief-delete" onClick={onDelete}>Delete</button>}
+            {onRegenerate && <button className="link-btn" onClick={onRegenerate}>Regenerate</button>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Manual "+ New Brief": pick a contact or an institution, set title and date.
+function NewBriefForm({ contacts, institutions, onCancel, onCreate }) {
+  const [title, setTitle] = useState("");
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [contactId, setContactId] = useState("");
+  const [instKey, setInstKey] = useState("");
+  const submit = () => {
+    if (!title.trim() || (!contactId && !instKey)) return;
+    const form = { meeting_title: title.trim(), meeting_date: date || null };
+    if (contactId) form.contact_id = contactId;
+    const inst = instKey ? institutions.find((i) => i.key === instKey) : null;
+    const p = institutionPrimaryEntity(inst);
+    if (p) form[`${p.type}_id`] = p.id;
+    onCreate(form);
+  };
+  return (
+    <div className="overlay" onClick={onCancel}>
+      <div className="modal modal-sm" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div className="modal-title">New Meeting Brief</div>
+          <button className="close-btn" onClick={onCancel}>✕</button>
+        </div>
+        <div className="form-grid">
+          <div className="field-full"><label className="label">Meeting title</label><input className="input" placeholder="e.g. Intro call with KFSHRC" value={title} onChange={(e) => setTitle(e.target.value)} /></div>
+          <div className="field-full"><label className="label">Date</label><input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+          <div className="field-full"><label className="label">Contact</label>
+            <select className="input" value={contactId} onChange={(e) => setContactId(e.target.value)}>
+              <option value="">No contact</option>
+              {contacts.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+          <div className="field-full"><label className="label">Institution</label>
+            <select className="input" value={instKey} onChange={(e) => setInstKey(e.target.value)}>
+              <option value="">No institution</option>
+              {institutions.map((i) => <option key={i.key} value={i.key}>{i.name}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button className="btn-sec" onClick={onCancel}>Cancel</button>
+          <button className="btn-primary" onClick={submit} disabled={!title.trim() || (!contactId && !instKey)}>Generate Brief</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3895,6 +4620,7 @@ function InstitutionSheet({
   onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, linkedNotes = [], onOpenNote, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
   onChangeStage, onChangeTier, todos = [], taskInitial = {}, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
+  materials = [], materialLinks = [], onAttachMaterial, onRemoveMaterialLink, onDownloadMaterial,
   onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot,
 }) {
   const readOnly = useReadOnly();
@@ -4288,6 +5014,8 @@ function InstitutionSheet({
           )}
         </div>
       )}
+
+      <MaterialsSection materials={materials} links={materialLinks} onAttach={onAttachMaterial} onRemoveLink={onRemoveMaterialLink} onDownload={onDownloadMaterial} />
 
       <LinkedNotesSection notes={linkedNotes} onOpenNote={onOpenNote} />
 
