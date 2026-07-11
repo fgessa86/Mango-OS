@@ -10,8 +10,9 @@ Fixed and verified, one commit per batch:
 - **Batch 2 (559db05): C3 FIXED.** Tags, source, and an Internal Team toggle are inline on Person Sheets (internal drives Map nodes, verified); deal value/next action and region inline on Institution Sheets; dead ContactForm/InstitutionEditModal removed.
 - **Batch 3 (6d9e019): H1, H3, M1 FIXED.** Quick Add cross-link pickers write both institution FKs and contact_id (verified in DB); Back uses a navigation history stack with contextual labels (verified Home > institution > person round trip); high-frequency writes patch local state, measured 1 request per checkbox toggle (was 20), manual Refresh in sidebar and Home.
 - **Batch 4 (de88261): H2, H4, H5 FIXED.** Cmd+K global search over institutions/people/activities/tasks/notes/materials with grouped, navigable results (verified the NUPCO journey); Outreach is the fifth mobile tab; boss comment composer attaches files (2MB cap).
+- **Batch 5 (H7 e0c8591, M2 07b582d, M3 3353401, M7 caa076c): H7, M2, M3, M7 FIXED.** Institution and contact renames propagate to the denormalized copies (contacts.company, deals/enablers.contact_name), with a one-time production repair of stale contact.company strings (verified in DB). Entity pickers deduplicate institutions that exist as both enabler and organization via a shared dedupeInstitutionOptions helper (task/note/Quick Add pickers; verified Humain shows once). "+ New deal" now creates a full organizations row with a Type from a new dropdown, so every Target has a real institution behind it (verified the org row and its type in DB). The People table Role cell reads and writes the same source (the primary contact_roles.role_title, syncing the legacy junction, falling back to contacts.role only when no role row exists; verified the write landed on contact_roles, not contacts.role).
 
-Still open: H6, H7, M2 through M11, L1 through L10.
+Still open: H6, M4, M5, M6, M8, M9, M10, M11, L1 through L10.
 
 Legend: each finding has an ID (C/H/M/L + number) for referencing during fix work.
 
