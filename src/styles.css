@@ -587,8 +587,8 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .home-empty { font-size: 13.5px; color: var(--muted); background: var(--card-tint); border-radius: 12px; padding: 14px 16px; }
 .home-list { display: flex; flex-direction: column; gap: 10px; }
 .home-card { background: var(--surface); border-radius: 14px; padding: 14px 16px; box-shadow: var(--shadow-card); }
-.home-card[onclick], .home-meeting, .home-task, .home-act, .home-stale { cursor: pointer; }
-.home-meeting:hover, .home-task:hover, .home-act:hover, .home-stale:hover { box-shadow: var(--shadow-hover); }
+.home-card[onclick], .home-meeting, .home-task-clickable, .home-act, .home-stale { cursor: pointer; }
+.home-meeting:hover, .home-task-clickable:hover, .home-act:hover, .home-stale:hover { box-shadow: var(--shadow-hover); }
 
 .home-comment { display: flex; gap: 12px; align-items: flex-start; }
 .home-comment-main { flex: 1; min-width: 0; }
@@ -606,9 +606,16 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .home-meeting-title { font-size: 14.5px; font-weight: 600; color: var(--text); }
 .home-meeting-sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 
-.home-task { border-left: 3px solid transparent; }
+.home-task { border-left: 3px solid transparent; display: flex; align-items: flex-start; gap: 11px; }
 .home-task.is-overdue { border-left-color: #E5484D; }
 .home-task.is-today { border-left-color: #F59E0B; }
+.home-task-main { flex: 1; min-width: 0; }
+.home-task-check { flex-shrink: 0; width: 20px; height: 20px; margin-top: 1px; border: 2px solid var(--dark); border-radius: 6px; background: var(--surface); cursor: pointer; padding: 0; transition: background 0.12s, border-color 0.12s; }
+.home-task-check:hover { border-color: var(--mango); background: var(--next-tint); }
+.card-contact-link { cursor: pointer; }
+.card-contact-link:hover { color: var(--accent-strong); text-decoration: underline; }
+.followup-inst-link { cursor: pointer; }
+.followup-inst-link:hover { color: var(--accent-strong); text-decoration: underline; }
 .home-task-title { font-size: 14.5px; font-weight: 600; color: var(--text); }
 .home-task-meta { display: flex; align-items: center; gap: 9px; margin-top: 7px; flex-wrap: wrap; }
 .home-due { font-size: 12px; font-weight: 600; color: var(--muted); }

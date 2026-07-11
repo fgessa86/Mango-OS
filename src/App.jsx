@@ -453,7 +453,8 @@ function InlineText({ value, onSave, placeholder = "Add...", className = "", mul
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value || "");
   const ref = useRef(null);
-  if (readOnly) return <span className={className}>{value || ""}</span>;
+  // Hooks must run unconditionally; the readOnly early return comes after them
+  // so a future dynamic readOnly (or the React compiler) stays valid (M5).
   useEffect(() => {
     if (editing && ref.current) {
       ref.current.focus();
@@ -461,6 +462,7 @@ function InlineText({ value, onSave, placeholder = "Add...", className = "", mul
       ref.current.setSelectionRange(len, len);
     }
   }, [editing]);
+  if (readOnly) return <span className={className}>{value || ""}</span>;
   const commit = () => {
     setEditing(false);
     if ((draft || "") !== (value || "")) onSave(draft);
@@ -530,12 +532,13 @@ function InlineSelectField({ value, options, onSave, onAddCustomOption = () => {
   const readOnly = useReadOnly();
   const [editing, setEditing] = useState(false);
   const wrapRef = useRef(null);
-  if (readOnly) return <span>{render ? render(value) : (value || "")}</span>;
+  // Hooks before the readOnly early return, per the rules of hooks (M5).
   useEffect(() => {
     if (!editing || !wrapRef.current) return;
     const el = wrapRef.current.querySelector("select, input");
     if (el) { el.focus(); try { el.showPicker && el.showPicker(); } catch { /* not user-activated, stays focused */ } }
   }, [editing]);
+  if (readOnly) return <span>{render ? render(value) : (value || "")}</span>;
   if (editing) {
     return (
       <span ref={wrapRef} className="inline-select-wrap" onClick={(e) => e.stopPropagation()}
@@ -2345,7 +2348,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           {t && t.id !== "Untiered" && <span className="tier-badge" style={{ background: t.bg, color: t.fg }}>{t.label}</span>}
         </div>
         {typeMeta && <span className="badge card-type-badge" style={{ background: typeMeta.color + "22", color: typeMeta.color, border: `1px solid ${typeMeta.color}44` }}>{typeMeta.label}</span>}
-        {deal.contact_name && <div className="card-contact">{deal.contact_name}{deal.contact_role ? ` · ${deal.contact_role}` : ""}</div>}
+        {deal.contact_name && (
+          deal.contact_id
+            ? <div className="card-contact card-contact-link" onClick={(e) => { e.stopPropagation(); openPerson(deal.contact_id); }} title={`Open ${deal.contact_name}`}>{deal.contact_name}{deal.contact_role ? ` · ${deal.contact_role}` : ""}</div>
+            : <div className="card-contact">{deal.contact_name}{deal.contact_role ? ` · ${deal.contact_role}` : ""}</div>
+        )}
         <div className="card-city-row">
           <InlineCity city={cityText} options={dealCityOpts} onAddCustomOption={addCustomOption} onSave={saveCity} compact />
           {deal.value > 0 && <span className="card-value">${Number(deal.value).toLocaleString()}</span>}
@@ -2605,6 +2612,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           commentTargetName={commentTargetName}
           meetings={homeMeetings}
           urgentTasks={urgentTasks}
+          onToggleTodo={toggleTodo}
           recentActivities={recentActivities}
           staleDeals={staleDeals}
           entityName={entityName}
@@ -2866,6 +2874,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onSetStatus={setOutreachStatus}
           onCompose={(contactId, templateId = null) => setCompose({ contactId, templateId })}
           onOpenPerson={openPerson}
+          onOpenInstitution={(name) => openInstitution(name)}
         />
       )}
 
@@ -2981,7 +2990,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, onToggleTodo, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
@@ -3096,7 +3105,10 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
               const dueToday = t.due_date && isToday(t.due_date);
               const name = entityName(t);
               return (
-                <div key={t.id} className={`home-card home-task ${overdue ? "is-overdue" : dueToday ? "is-today" : ""}`} onClick={() => name && onOpenEntity(t)}>
+                <div key={t.id} className={`home-card home-task ${overdue ? "is-overdue" : dueToday ? "is-today" : ""} ${name ? "home-task-clickable" : ""}`} onClick={name ? () => onOpenEntity(t) : undefined}>
+                  {!bossMode && onToggleTodo && (
+                    <button className="home-task-check" title="Mark complete" onClick={(e) => { e.stopPropagation(); onToggleTodo(t); }} aria-label="Mark complete" />
+                  )}
                   <div className="home-task-main">
                     <div className="home-task-title">{t.title}</div>
                     <div className="home-task-meta">
@@ -3668,14 +3680,16 @@ function OutreachStatusSelect({ contact, onSetStatus }) {
 }
 
 // One row on the Follow-ups dashboard.
-function FollowupRow({ contact, institution, daysWaiting, onSetStatus, onOpenPerson, action }) {
+function FollowupRow({ contact, institution, daysWaiting, onSetStatus, onOpenPerson, onOpenInstitution, action }) {
   return (
     <div className="followup-row">
       <Avatar name={contact.name} size={32} />
       <div className="followup-main" onClick={() => onOpenPerson(contact.id)}>
         <div className="followup-name">{contact.name}</div>
         <div className="followup-meta">
-          {institution && <span>{institution}</span>}
+          {institution && (onOpenInstitution
+            ? <span className="followup-inst-link" onClick={(e) => { e.stopPropagation(); onOpenInstitution(institution); }} title={`Open ${institution}`}>{institution}</span>
+            : <span>{institution}</span>)}
           {daysWaiting != null && <span className={daysWaiting >= NUDGE_AFTER_DAYS ? "followup-days overdue" : "followup-days"}>{daysWaiting} day{daysWaiting === 1 ? "" : "s"} waiting</span>}
           {contact.last_outreach_at && <span>Last outreach {formatDate(contact.last_outreach_at)}</span>}
         </div>
@@ -3686,7 +3700,7 @@ function FollowupRow({ contact, institution, daysWaiting, onSetStatus, onOpenPer
   );
 }
 
-function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles, templates, onSaveTemplate, onDeleteTemplate, onSetStatus, onCompose, onOpenPerson }) {
+function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles, templates, onSaveTemplate, onDeleteTemplate, onSetStatus, onCompose, onOpenPerson, onOpenInstitution }) {
   const [subtab, setSubtab] = useState("followups");
   const [editingTemplate, setEditingTemplate] = useState(null); // null | "new" | template row
   const rolesCtx = { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles };
@@ -3742,6 +3756,7 @@ function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, e
               daysWaiting={daysOf ? daysOf(c) : null}
               onSetStatus={onSetStatus}
               onOpenPerson={onOpenPerson}
+              onOpenInstitution={onOpenInstitution}
               action={renderAction ? renderAction(c) : null}
             />
           ))}
