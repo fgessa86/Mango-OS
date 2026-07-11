@@ -1068,6 +1068,19 @@ export default function App() {
       } else {
         await api("deals", "POST", clean);
       }
+      // Keep the unified architecture: every deal has a full institution behind
+      // it. Ensure an organizations row exists for this name (a Target is just an
+      // institution with a deal row); carry the Type from the form (audit M4).
+      const type = (form.type || "").trim();
+      const existingOrg = organizations.find((o) => (o.name || "").trim().toLowerCase() === company.toLowerCase());
+      if (existingOrg) {
+        if (type && (existingOrg.type || "") !== type) await api("organizations", "PATCH", { type }, `?id=eq.${existingOrg.id}`).catch(() => {});
+      } else {
+        const orgClean = { name: company, country: "Saudi Arabia" };
+        if (type) orgClean.type = type;
+        for (const k of ["city", "region"]) { const v = (form[k] || "").trim(); if (v) orgClean[k] = v; }
+        await api("organizations", "POST", orgClean).catch(() => {});
+      }
       await loadData(); setModal(null); showToast(form.id ? "Deal updated" : "Deal added");
     } catch { showToast("Error saving deal"); }
   };
@@ -4212,10 +4225,11 @@ function LinkedNotesSection({ notes, onOpenNote }) {
 
 function DealForm({ deal, contacts, customOptions, onAddCustomOption, onSave, onClose }) {
   const isEdit = !!deal.id;
-  const [f, setF] = useState({ id:deal.id||"", company:deal.company||"", contact_id:deal.contact_id||"", contact_name:deal.contact_name||"", contact_role:deal.contact_role||"", value:deal.value||"", stage:deal.stage||"prospecting", tier:deal.tier||"Untiered", city:deal.city||"", region:deal.region||"", notes:deal.notes||"", next_action:deal.next_action||"" });
+  const [f, setF] = useState({ id:deal.id||"", company:deal.company||"", type:deal.type||"hospital", contact_id:deal.contact_id||"", contact_name:deal.contact_name||"", contact_role:deal.contact_role||"", value:deal.value||"", stage:deal.stage||"prospecting", tier:deal.tier||"Untiered", city:deal.city||"", region:deal.region||"", notes:deal.notes||"", next_action:deal.next_action||"" });
   const set = (k,v) => setF(p => ({...p,[k]:v}));
   const pickContact = (id) => { const c = contacts.find(x=>x.id===id); if(c){setF(p=>({...p, contact_id:id, contact_name:c.name||"", contact_role:c.role||"", company:p.company||c.company||""}));} else {set("contact_id","");} };
   const stageOpts = optionsWithCustom(STAGES, customOptions, "deal_stage");
+  const typeOpts = optionsWithCustom(INSTITUTION_TYPES, customOptions, "institution_type");
   const cityOpts = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
   const regionOpts = optionsWithCustom(REGION_OPTIONS, customOptions, "region");
   return (
@@ -4227,6 +4241,7 @@ function DealForm({ deal, contacts, customOptions, onAddCustomOption, onSave, on
         <div className="field"><label className="label">Contact Name</label><input className="input" value={f.contact_name} onChange={e=>set("contact_name",e.target.value)} /></div>
         <div className="field"><label className="label">Role</label><input className="input" value={f.contact_role} onChange={e=>set("contact_role",e.target.value)} /></div>
         <div className="field"><label className="label">Value (USD)</label><input className="input" type="number" value={f.value} onChange={e=>set("value",e.target.value)} placeholder="Optional" /></div>
+        <div className="field"><label className="label">Type</label><SelectWithCustom options={typeOpts} value={f.type} onChange={(v)=>{set("type",v); trackCustom("institution_type", typeOpts, onAddCustomOption)(v);}} placeholder="e.g. Hospital" /></div>
         <div className="field"><label className="label">Stage</label><SelectWithCustom options={stageOpts} value={f.stage} onChange={(v)=>{set("stage",v); trackCustom("deal_stage", stageOpts, onAddCustomOption)(v);}} /></div>
         <div className="field"><label className="label">Tier</label><select className="input" value={f.tier} onChange={e=>set("tier",e.target.value)}>{DEAL_TIERS.map(t=><option key={t.id} value={t.id}>{t.label}</option>)}</select></div>
         <div className="field"><label className="label">City</label><SelectWithCustom options={cityOpts} value={f.city} onChange={(v)=>{set("city",v); trackCustom("city", cityOpts, onAddCustomOption)(v);}} placeholder="City name..." /></div>
