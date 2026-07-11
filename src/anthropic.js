@@ -80,11 +80,11 @@ const RESEARCH_TIMEOUT_MS = 60000;
 
 // Low-level Anthropic call with a 60 second timeout, readable error messages,
 // and a raw-response console.log for debugging in browser dev tools.
-const callAnthropic = async (body) => {
+const callAnthropic = async (body, timeoutMs = RESEARCH_TIMEOUT_MS) => {
   if (!ANTHROPIC_API_KEY) throw new Error("Missing VITE_ANTHROPIC_API_KEY");
   bumpApiCalls();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), RESEARCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res;
   try {
     res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -100,7 +100,7 @@ const callAnthropic = async (body) => {
     });
   } catch (e) {
     clearTimeout(timer);
-    if (e.name === "AbortError") throw new Error("request timed out after 60 seconds");
+    if (e.name === "AbortError") throw new Error(`request timed out after ${Math.round(timeoutMs / 1000)} seconds`);
     throw new Error(e.message || "network error reaching Anthropic");
   }
   clearTimeout(timer);
@@ -118,22 +118,22 @@ const callAnthropic = async (body) => {
 // blocks, so we keep only the text and join it.
 const extractText = (data) => (data?.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
 
-const webSearchText = async (content, maxTokens = 4000) => {
+const webSearchText = async (content, maxTokens = 4000, timeoutMs) => {
   const data = await callAnthropic({
     model: "claude-sonnet-4-6",
     max_tokens: maxTokens,
     tools: [{ type: "web_search_20250305", name: "web_search" }],
     messages: [{ role: "user", content }],
-  });
+  }, timeoutMs);
   return extractText(data);
 };
 
-const plainText = async (content, maxTokens = 2000) => {
+const plainText = async (content, maxTokens = 2000, timeoutMs) => {
   const data = await callAnthropic({
     model: "claude-sonnet-4-6",
     max_tokens: maxTokens,
     messages: [{ role: "user", content }],
-  });
+  }, timeoutMs);
   return extractText(data);
 };
 
@@ -231,27 +231,75 @@ ${context}`;
 const parseJsonArray = (text) => {
   const cleaned = (text || "").replace(/```json/gi, "").replace(/```/g, "").trim();
   const first = cleaned.indexOf("[");
+  if (first === -1) return null;
   const last = cleaned.lastIndexOf("]");
-  if (first === -1 || last === -1 || last < first) return null;
-  try {
-    const arr = JSON.parse(cleaned.slice(first, last + 1));
-    return Array.isArray(arr) ? arr : null;
-  } catch {
-    return null;
+  if (last > first) {
+    try {
+      const arr = JSON.parse(cleaned.slice(first, last + 1));
+      if (Array.isArray(arr)) return arr;
+    } catch { /* fall through to partial recovery */ }
   }
+  // Partial recovery: the response was valid JSON until max_tokens cut it off
+  // (no closing ]). Walk the array body and keep every complete top-level
+  // {...} object, so a truncated response still yields the stories it did emit.
+  return recoverJsonObjects(cleaned.slice(first + 1));
 };
 
+// Scans a string for complete, balanced top-level {...} objects (string-aware,
+// so braces inside quoted values do not confuse the depth counter) and returns
+// the ones that parse. Returns null if none are recoverable.
+const recoverJsonObjects = (s) => {
+  const objs = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") { if (depth === 0) start = i; depth++; }
+    else if (ch === "}" && depth > 0) {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        try { objs.push(JSON.parse(s.slice(start, i + 1))); } catch { /* skip malformed */ }
+        start = -1;
+      }
+    }
+  }
+  return objs.length ? objs : null;
+};
+
+const normalizeStories = (arr, { defaultSource = "" } = {}) => arr
+  .filter((s) => s && s.headline)
+  .slice(0, 5)
+  .map((s) => {
+    const headline = String(s.headline);
+    const url = String(s.url || "").trim() || `https://www.google.com/search?q=${encodeURIComponent(headline)}`;
+    return { headline, summary: String(s.summary || ""), source: String(s.source || "").trim() || defaultSource, url };
+  });
+
 // Daily news briefing (Feature 3): one web-search call per section, JSON-only
-// response parsed to [{headline, summary, source, url}]. Throws on failure so
-// the UI can show a per-section retry without breaking the other sections.
-export const fetchNewsStories = async (prompt) => {
-  const text = await webSearchText(prompt, 1000);
+// response parsed to [{headline, summary, source, url}]. A longer timeout and
+// higher max_tokens (fewer truncations) suit the slow web-search path. Throws
+// on failure so the UI can retry that one section without touching the others.
+export const fetchNewsStories = async (prompt, { maxTokens = 1500, timeoutMs = 90000 } = {}) => {
+  const text = await webSearchText(prompt, maxTokens, timeoutMs);
   const arr = parseJsonArray(text);
   if (!arr) throw new Error("could not parse news stories");
-  return arr
-    .filter((s) => s && s.headline)
-    .slice(0, 5)
-    .map((s) => ({ headline: String(s.headline), summary: String(s.summary || ""), source: String(s.source || ""), url: String(s.url || "") }));
+  return normalizeStories(arr);
+};
+
+// Graceful fallback for a section that keeps failing the web-search path: a
+// plain (no web search) call using the model's own knowledge. Any story without
+// a url gets a Google search link, and a blank source degrades to a label.
+export const fetchNewsStoriesNoSearch = async (prompt) => {
+  const text = await plainText(prompt, 1500);
+  const arr = parseJsonArray(text);
+  if (!arr) throw new Error("could not parse fallback news stories");
+  return normalizeStories(arr, { defaultSource: "Model knowledge" });
 };
 
 export const summarizeImage = async (base64, prompt) => {

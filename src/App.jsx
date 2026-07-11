@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
 import { api } from "./supabase";
-import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, fetchNewsStories, getApiCallsToday } from "./anthropic";
+import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, fetchNewsStories, fetchNewsStoriesNoSearch, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import MapTab from "./MapTab";
@@ -189,9 +189,15 @@ function fillTemplate(text, contact, roles = []) {
 // Daily news briefing sections (Feature 3). Prompts are a fixed contract with
 // fetchNewsStories in anthropic.js (JSON array only).
 const NEWS_SECTIONS = [
-  { key: "healthtech", label: "Health Tech and AI", icon: "⚕", prompt: `Search for today's top news in health technology and AI in healthcare. Return the 5 most significant stories. For each: headline, one-sentence summary, source name, and the direct URL to the article. Respond in JSON only: [{headline, summary, source, url}]. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.` },
-  { key: "oncology", label: "Oncology and Immunotherapy", icon: "🧬", prompt: `Search for today's top news in oncology, cancer research, and immunotherapy. Return the 5 most significant stories. For each: headline, one-sentence summary, source name, and the direct URL to the article. Respond in JSON only: [{headline, summary, source, url}]. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.` },
-  { key: "saudi", label: "Saudi Arabia", icon: "🇸🇦", prompt: `Search for today's top news in Saudi Arabia, focusing on healthcare, business, and Vision 2030 developments. Return the 5 most significant stories. For each: headline, one-sentence summary, source name, and the direct URL to the article. Respond in JSON only: [{headline, summary, source, url}]. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.` },
+  { key: "healthtech", label: "Health Tech and AI", icon: "⚕",
+    prompt: `Search for recent news in health technology and AI in healthcare from the past week. Return the 5 most notable developments. For each: headline, one-sentence summary, source name, and url. Respond in JSON only, no other text: [{headline, summary, source, url}]`,
+    fallbackPrompt: `List 5 significant recent developments in health technology and AI in healthcare. Respond in JSON: [{headline, summary, source, url}]` },
+  { key: "oncology", label: "Oncology and Immunotherapy", icon: "🧬",
+    prompt: `Search for recent news in oncology, cancer treatment, and immunotherapy from the past week. Return the 5 most notable developments. For each: headline, one-sentence summary, source name, and url. Respond in JSON only, no other text: [{headline, summary, source, url}]`,
+    fallbackPrompt: `List 5 significant recent developments in oncology and immunotherapy. Respond in JSON: [{headline, summary, source, url}]` },
+  { key: "saudi", label: "Saudi Arabia", icon: "🇸🇦",
+    prompt: `Search for recent news in Saudi Arabia focusing on healthcare, business, and Vision 2030 from the past week. Return the 5 most notable developments. For each: headline, one-sentence summary, source name, and url. Respond in JSON only, no other text: [{headline, summary, source, url}]`,
+    fallbackPrompt: `List 5 significant recent developments in Saudi Arabia healthcare, business, and Vision 2030. Respond in JSON: [{headline, summary, source, url}]` },
 ];
 
 // Minimal geometric nav icons (2px strokes). Active color is handled via CSS.
@@ -3202,11 +3208,30 @@ function DailyBriefing({ isMobile }) {
 
   const cacheFresh = data && data.date === todayKey;
 
+  // Fetch one section with resilience: up to 2 retries with a 2s backoff (web
+  // search often times out transiently), then a no-web-search fallback on the
+  // model's own knowledge before finally surfacing the error. Errors are logged
+  // with their real message so a persistently failing section can be diagnosed.
   const fetchSection = useCallback(async (sec) => {
     setLoading((l) => ({ ...l, [sec.key]: true }));
-    setErrors((e) => ({ ...e, [sec.key]: false }));
-    try {
-      const stories = await fetchNewsStories(sec.prompt);
+    let stories = null;
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      try { stories = await fetchNewsStories(sec.prompt); break; }
+      catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(`[News] ${sec.key} attempt ${attempt + 1}/3 failed:`, err?.message || err);
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    if (!stories && sec.fallbackPrompt) {
+      try { stories = await fetchNewsStoriesNoSearch(sec.fallbackPrompt); }
+      catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[News] ${sec.key} fallback (no web search) failed:`, err?.message || err);
+      }
+    }
+    if (stories) {
+      setErrors((e) => ({ ...e, [sec.key]: false }));
       setData((prev) => {
         const sections = prev && prev.date === todayKey ? { ...prev.sections } : {};
         sections[sec.key] = stories;
@@ -3214,13 +3239,17 @@ function DailyBriefing({ isMobile }) {
         try { localStorage.setItem(NEWS_CACHE_KEY, JSON.stringify(next)); } catch { /* storage full */ }
         return next;
       });
-    } catch {
+    } else {
       setErrors((e) => ({ ...e, [sec.key]: true }));
     }
     setLoading((l) => ({ ...l, [sec.key]: false }));
   }, [todayKey]);
 
-  const refreshAll = useCallback(() => { NEWS_SECTIONS.forEach((sec) => { fetchSection(sec); }); }, [fetchSection]);
+  // Stagger the three calls by 1s each (fire, +1s, +2s) so three simultaneous
+  // web searches do not rate-limit or time each other out.
+  const refreshAll = useCallback(() => {
+    NEWS_SECTIONS.forEach((sec, i) => { setTimeout(() => fetchSection(sec), i * 1000); });
+  }, [fetchSection]);
 
   // Fetch fresh news once per day: only on the first Home mount whose cache is stale.
   useEffect(() => {
@@ -3252,14 +3281,14 @@ function DailyBriefing({ isMobile }) {
               <span className="news-section-chevron">{isCollapsed ? "▸" : "▾"}</span>
             </button>
             {!isCollapsed && (
-              loading[sec.key] ? (
+              errors[sec.key] ? (
+                <button className="news-error" disabled={loading[sec.key]} onClick={() => fetchSection(sec)}>{loading[sec.key] ? "Retrying..." : `Couldn't load ${sec.label} news. Tap to retry.`}</button>
+              ) : loading[sec.key] ? (
                 <div className="news-skeletons">
                   {[0, 1, 2, 3, 4].map((i) => (
                     <div key={i} className="news-skeleton"><div className="news-skeleton-line w60" /><div className="news-skeleton-line w90" /></div>
                   ))}
                 </div>
-              ) : errors[sec.key] ? (
-                <button className="news-error" onClick={() => fetchSection(sec)}>Couldn't load {sec.label} news. Tap to retry.</button>
               ) : !stories || stories.length === 0 ? (
                 <div className="news-empty">No stories loaded yet.</div>
               ) : (
