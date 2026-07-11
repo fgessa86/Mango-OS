@@ -128,6 +128,38 @@ const webSearchText = async (content, maxTokens = 4000, timeoutMs) => {
   return extractText(data);
 };
 
+// Like webSearchText but also returns the real article URLs the web_search tool
+// surfaced. The web_search_20250305 tool emits `web_search_tool_result` blocks
+// whose `content` is an array of `web_search_result` items ({url, title}); text
+// blocks additionally carry `citations` pointing at those same result URLs. We
+// harvest both so callers can replace a model-guessed homepage link with the
+// actual deep link to the story.
+const webSearchTextWithSources = async (content, maxTokens = 4000, timeoutMs) => {
+  const data = await callAnthropic({
+    model: "claude-sonnet-4-6",
+    max_tokens: maxTokens,
+    tools: [{ type: "web_search_20250305", name: "web_search" }],
+    messages: [{ role: "user", content }],
+  }, timeoutMs);
+  return { text: extractText(data), sources: extractSearchSources(data) };
+};
+
+const extractSearchSources = (data) => {
+  const sources = [];
+  const push = (url, title) => { if (url) sources.push({ url: String(url), title: String(title || "") }); };
+  for (const block of data?.content || []) {
+    if (block?.type === "web_search_tool_result" && Array.isArray(block.content)) {
+      for (const r of block.content) {
+        if (r && r.type === "web_search_result") push(r.url, r.title);
+      }
+    }
+    if (block?.type === "text" && Array.isArray(block.citations)) {
+      for (const c of block.citations) push(c?.url, c?.title || c?.cited_text);
+    }
+  }
+  return sources;
+};
+
 const plainText = async (content, maxTokens = 2000, timeoutMs) => {
   const data = await callAnthropic({
     model: "claude-sonnet-4-6",
@@ -272,29 +304,78 @@ const recoverJsonObjects = (s) => {
   return objs.length ? objs : null;
 };
 
-const normalizeStories = (arr, { defaultSource = "" } = {}) => arr
+const googleSearchLink = (headline) => `https://www.google.com/search?q=${encodeURIComponent(headline)}`;
+
+// A "homepage" URL is a bare domain with no article path (e.g. https://forbes.com
+// or https://forbes.com/). A real article deep-links to a path after the domain.
+// Unparseable URLs are treated as homepages (unusable) so they get the fallback.
+export const isHomepageUrl = (url) => {
+  try {
+    const u = new URL(url);
+    if (u.hostname.replace(/^www\./, "").toLowerCase() === "google.com") return false; // an intentional search link is fine
+    return u.pathname.replace(/\/+$/, "") === "";
+  } catch { return true; }
+};
+
+const STOPWORDS = new Set(["the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "at", "by", "from", "as", "is", "are", "new", "says", "study", "report"]);
+const tokenize = (s) => (s || "").toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !STOPWORDS.has(w));
+const domainOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, "").toLowerCase(); } catch { return ""; } };
+
+// Picks the real article URL for a story: prefer the model's own url when it is
+// already a deep link, otherwise match the story to one of the web-search result
+// URLs (deep links only) by headline/title word overlap, with a bonus when the
+// result's domain matches the story's stated source. Falls back to null so the
+// caller can substitute a Google search link.
+const pickArticleUrl = (story, sources = []) => {
+  const modelUrl = String(story.url || "").trim();
+  if (modelUrl && !isHomepageUrl(modelUrl)) return modelUrl;
+  const headlineWords = tokenize(story.headline);
+  const sourceWords = tokenize(story.source);
+  let best = null, bestScore = 0;
+  for (const s of sources) {
+    if (!s.url || isHomepageUrl(s.url)) continue;
+    const titleWords = tokenize(s.title);
+    let score = headlineWords.filter((w) => titleWords.includes(w)).length;
+    const domain = domainOf(s.url);
+    if (sourceWords.some((w) => domain.includes(w))) score += 2;
+    if (score > bestScore) { bestScore = score; best = s.url; }
+  }
+  return bestScore > 0 ? best : null;
+};
+
+const normalizeStories = (arr, { defaultSource = "", sources = [] } = {}) => arr
   .filter((s) => s && s.headline)
   .slice(0, 5)
   .map((s) => {
     const headline = String(s.headline);
-    const url = String(s.url || "").trim() || `https://www.google.com/search?q=${encodeURIComponent(headline)}`;
+    const url = pickArticleUrl(s, sources) || googleSearchLink(headline);
     return { headline, summary: String(s.summary || ""), source: String(s.source || "").trim() || defaultSource, url };
   });
 
+// Final render-time guard (audit: news links pointed at homepages): if a story's
+// resolved url is still a bare homepage (e.g. from an older cached payload), use
+// a Google search link for the headline instead.
+export const newsStoryHref = (story) => {
+  const url = String(story?.url || "").trim();
+  return url && !isHomepageUrl(url) ? url : googleSearchLink(String(story?.headline || ""));
+};
+
 // Daily news briefing (Feature 3): one web-search call per section, JSON-only
 // response parsed to [{headline, summary, source, url}]. A longer timeout and
-// higher max_tokens (fewer truncations) suit the slow web-search path. Throws
-// on failure so the UI can retry that one section without touching the others.
+// higher max_tokens (fewer truncations) suit the slow web-search path. The
+// article URL is taken from the model's deep link when it has one, else matched
+// to the web_search result URLs. Throws so the UI can retry that one section.
 export const fetchNewsStories = async (prompt, { maxTokens = 1500, timeoutMs = 90000 } = {}) => {
-  const text = await webSearchText(prompt, maxTokens, timeoutMs);
+  const { text, sources } = await webSearchTextWithSources(prompt, maxTokens, timeoutMs);
   const arr = parseJsonArray(text);
   if (!arr) throw new Error("could not parse news stories");
-  return normalizeStories(arr);
+  return normalizeStories(arr, { sources });
 };
 
 // Graceful fallback for a section that keeps failing the web-search path: a
-// plain (no web search) call using the model's own knowledge. Any story without
-// a url gets a Google search link, and a blank source degrades to a label.
+// plain (no web search) call using the model's own knowledge. There are no
+// search result URLs here, so a story without a real deep link gets a Google
+// search link, and a blank source degrades to a label.
 export const fetchNewsStoriesNoSearch = async (prompt) => {
   const text = await plainText(prompt, 1500);
   const arr = parseJsonArray(text);

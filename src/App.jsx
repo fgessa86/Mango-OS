@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
 import { api } from "./supabase";
-import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, fetchNewsStories, fetchNewsStoriesNoSearch, getApiCallsToday } from "./anthropic";
+import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
 import MapTab from "./MapTab";
@@ -190,13 +190,13 @@ function fillTemplate(text, contact, roles = []) {
 // fetchNewsStories in anthropic.js (JSON array only).
 const NEWS_SECTIONS = [
   { key: "healthtech", label: "Health Tech and AI", icon: "⚕",
-    prompt: `Search for recent news in health technology and AI in healthcare from the past week. Return the 5 most notable developments. For each: headline, one-sentence summary, source name, and url. Respond in JSON only, no other text: [{headline, summary, source, url}]`,
+    prompt: `Search for recent news in health technology and AI in healthcare from the past week. Return the 5 most notable developments. For each: headline, one-sentence summary, source name, and url. For the url field, provide the DIRECT link to the specific article, not the publication's homepage. The url must go straight to the individual story. If you cannot find the exact article URL from the web search results, set url to null. Respond in JSON only, no other text: [{headline, summary, source, url}]`,
     fallbackPrompt: `List 5 significant recent developments in health technology and AI in healthcare. Respond in JSON: [{headline, summary, source, url}]` },
   { key: "oncology", label: "Oncology and Immunotherapy", icon: "🧬",
-    prompt: `Search for recent news in oncology, cancer treatment, and immunotherapy from the past week. Return the 5 most notable developments. For each: headline, one-sentence summary, source name, and url. Respond in JSON only, no other text: [{headline, summary, source, url}]`,
+    prompt: `Search for recent news in oncology, cancer treatment, and immunotherapy from the past week. Return the 5 most notable developments. For each: headline, one-sentence summary, source name, and url. For the url field, provide the DIRECT link to the specific article, not the publication's homepage. The url must go straight to the individual story. If you cannot find the exact article URL from the web search results, set url to null. Respond in JSON only, no other text: [{headline, summary, source, url}]`,
     fallbackPrompt: `List 5 significant recent developments in oncology and immunotherapy. Respond in JSON: [{headline, summary, source, url}]` },
   { key: "saudi", label: "Saudi Arabia", icon: "🇸🇦",
-    prompt: `Search for recent news in Saudi Arabia focusing on healthcare, business, and Vision 2030 from the past week. Return the 5 most notable developments. For each: headline, one-sentence summary, source name, and url. Respond in JSON only, no other text: [{headline, summary, source, url}]`,
+    prompt: `Search for recent news in Saudi Arabia focusing on healthcare, business, and Vision 2030 from the past week. Return the 5 most notable developments. For each: headline, one-sentence summary, source name, and url. For the url field, provide the DIRECT link to the specific article, not the publication's homepage. The url must go straight to the individual story. If you cannot find the exact article URL from the web search results, set url to null. Respond in JSON only, no other text: [{headline, summary, source, url}]`,
     fallbackPrompt: `List 5 significant recent developments in Saudi Arabia healthcare, business, and Vision 2030. Respond in JSON: [{headline, summary, source, url}]` },
 ];
 
@@ -3193,9 +3193,9 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
 // localStorage per day. Auto-fetches on the first Home load of the day; the
 // Refresh button re-fetches all three in parallel. Each section fails and
 // retries independently so one bad fetch never blanks the others.
-// Bumped to v2 when stories gained clickable URLs: the old cache holds
-// URL-less stories, so a new key discards it and forces one fresh fetch.
-const NEWS_CACHE_KEY = "mango-news-briefing-v2";
+// Bumped to v3 when article URLs were corrected (deep links, not homepages):
+// a new key discards the older cached stories and forces one fresh fetch.
+const NEWS_CACHE_KEY = "mango-news-briefing-v3";
 function DailyBriefing({ isMobile }) {
   const todayKey = new Date().toISOString().slice(0, 10);
   const [data, setData] = useState(() => {
@@ -3255,7 +3255,7 @@ function DailyBriefing({ isMobile }) {
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
-    try { localStorage.removeItem("mango-news-briefing"); } catch { /* ignore */ }
+    try { localStorage.removeItem("mango-news-briefing"); localStorage.removeItem("mango-news-briefing-v2"); } catch { /* ignore */ }
     if (!cacheFresh) refreshAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -3294,7 +3294,7 @@ function DailyBriefing({ isMobile }) {
               ) : (
                 <div className="news-list">
                   {stories.map((s, i) => {
-                    const href = (s.url || "").trim() || `https://www.google.com/search?q=${encodeURIComponent(s.headline)}`;
+                    const href = newsStoryHref(s);
                     return (
                       <a key={i} className="news-row" href={href} target="_blank" rel="noopener noreferrer">
                         <div className="news-headline">{s.headline}</div>
