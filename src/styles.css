@@ -778,6 +778,13 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .compose-note-token { font-weight: 800; background: #F7E9AF; padding: 0 5px; border-radius: 5px; }
 .compose-actions { margin-top: 14px; }
 
+/* Inline contact editing (former edit-modal fields): internal toggle, tags */
+.internal-toggle { font-size: 12px; font-weight: 700; color: var(--text-2); display: inline-flex; align-items: center; gap: 5px; }
+.internal-badge { background: #E6F4EC; color: #1F8A5B; border: 1px solid #1F8A5B44; }
+.tag-edit-btn { cursor: pointer; border: 1px dashed var(--dim); background: transparent; color: var(--muted); font-family: inherit; }
+.tag-edit-btn:hover { color: var(--accent-strong); border-color: var(--mango); }
+.tags-edit-panel { margin: 8px 0 4px; background: var(--card-tint); border-radius: 12px; padding: 10px 12px; max-width: 640px; }
+
 /* Home / Command Center: My Notes cards + section head */
 .home-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .home-section-head .home-section-title { margin-bottom: 0; }

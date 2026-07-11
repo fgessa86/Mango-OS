@@ -1250,13 +1250,6 @@ export default function App() {
     return created;
   };
 
-  const saveContact = async (form) => {
-    try {
-      await persistContact(form);
-      await loadData(); setModal(null); showToast(form.id ? "Contact updated" : "Contact added");
-    } catch { showToast("Error saving contact"); }
-  };
-
   // Deleting a contact: pure link rows are deleted; rows that carry history
   // (activities, todos, notes, briefs) keep their content but have the dangling
   // contact reference nulled, and denormalized copies on deals/enablers are
@@ -1481,25 +1474,6 @@ export default function App() {
         autoFillInstitution({ key: name.toLowerCase(), name, city: form.city, orgId: org.id });
       }
     } catch { showToast("Error adding institution"); }
-  };
-
-  // Institution Sheet's edit modal. Ensures an organizations row exists, then
-  // reconciles the Target/Enabler checkboxes against the existing linked rows:
-  // checking creates the deal/enabler, unchecking archives it.
-  const saveInstitution = async (form) => {
-    const name = (form.name || "").trim();
-    if (!name) { showToast("Name is required"); return; }
-    try {
-      await persistOrganization({ id: form.orgId || undefined, name, type: form.type, city: form.city, region: form.region, sector: form.sector, description: form.description, website: form.website, notes: form.notes });
-      if (form.isTarget && !form.dealId) await createDealForInstitution({ name, city: form.city, region: form.region });
-      else if (!form.isTarget && form.dealId) await purgeDeal(form.dealId);
-      else if (form.isTarget && form.dealId) await api("deals", "PATCH", { company: name, ...(form.city ? { city: form.city } : {}), ...(form.region ? { region: form.region } : {}) }, `?id=eq.${form.dealId}`);
-      if (form.isEnabler && !form.enablerId) await createEnablerForInstitution({ name, city: form.city, region: form.region });
-      else if (!form.isEnabler && form.enablerId) await purgeEnabler(form.enablerId);
-      else if (form.isEnabler && form.enablerId) await api("enablers", "PATCH", { name, ...(form.city ? { city: form.city } : {}), ...(form.region ? { region: form.region } : {}) }, `?id=eq.${form.enablerId}`);
-      await loadData(); setModal(null); showToast("Institution updated");
-      setInstitutionSheetKey(name.toLowerCase());
-    } catch { showToast("Error saving institution"); }
   };
 
   // Toggles an institution's Target or Enabler flag directly from the sheet:
@@ -2364,6 +2338,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onAddConnection={addConnection}
             onChangeStage={(stage) => inst.dealId && moveDeal(inst.dealId, stage)}
             onChangeTier={inst.dealId ? ((t) => setDealTier(inst.dealId, t)) : null}
+            onUpdateDeal={inst.dealId ? ((patch) => updateDeal(inst.dealId, patch)) : null}
             todos={todos.filter((t) => (inst.dealId && t.deal_id === inst.dealId) || (inst.enablerId && t.enabler_id === inst.enablerId) || (inst.orgId && t.organization_id === inst.orgId))}
             taskInitial={(() => { const p = institutionPrimaryEntity(inst); return p ? { [`${p.type}_id`]: p.id } : {}; })()}
             onAddTodo={(form) => { const p = institutionPrimaryEntity(inst); return saveTodo({ ...(p ? { [`${p.type}_id`]: p.id } : {}), ...form }); }}
@@ -2788,8 +2763,6 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
       {/* MODALS (creating new records only; hidden in Boss View) */}
       {!bossMode && modal?.type === "deal" && <DealForm deal={modal.data} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveDeal} onClose={() => setModal(null)} />}
-      {!bossMode && modal?.type === "contact" && <ContactForm contact={modal.data} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveContact} onClose={() => setModal(null)} />}
-      {!bossMode && modal?.type === "institution" && <InstitutionEditModal institution={modal.data} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveInstitution} onClose={() => setModal(null)} />}
     </div>
     </ReadOnlyContext.Provider>
   );
@@ -4073,38 +4046,6 @@ function DealForm({ deal, contacts, customOptions, onAddCustomOption, onSave, on
   );
 }
 
-function ContactForm({ contact, customOptions, onAddCustomOption, onSave, onClose }) {
-  const isEdit = !!contact.id;
-  const [f, setF] = useState({ id:contact.id||"", name:contact.name||"", role:contact.role||"", company:contact.company||"", email:contact.email||"", phone:contact.phone||"", linkedin:contact.linkedin||"", source:contact.source||"", notes:contact.notes||"", tags:contact.tags||[], warmth:contact.warmth||"unknown", is_internal:!!contact.is_internal });
-  const set = (k,v) => setF(p=>({...p,[k]:v}));
-  const tagOpts = optionsWithCustom(toOptions(TAG_OPTIONS), customOptions, "tag").map((o) => o.id);
-  const toggleTag = (t) => {
-    setF(p=>({...p, tags:p.tags.includes(t)?p.tags.filter(x=>x!==t):[...p.tags,t]}));
-    if (!f.tags.includes(t)) trackCustom("tag", toOptions(tagOpts), onAddCustomOption)(t);
-  };
-  const warmthOpts = optionsWithCustom(WARMTH_LEVELS, customOptions, "warmth");
-  return (
-    <div className="overlay" onClick={onClose}><div className="modal" onClick={e=>e.stopPropagation()}>
-      <div className="modal-header"><div className="modal-title">{isEdit?"Edit Contact":"New Contact"}</div><button onClick={onClose} className="close-btn">✕</button></div>
-      <div className="form-grid">
-        <div className="field"><label className="label">Name *</label><input className="input" value={f.name} onChange={e=>set("name",e.target.value)} /></div>
-        <div className="field"><label className="label">Role / Title</label><input className="input" value={f.role} onChange={e=>set("role",e.target.value)} /></div>
-        <div className="field"><label className="label">Company</label><input className="input" value={f.company} onChange={e=>set("company",e.target.value)} /></div>
-        <div className="field"><label className="label">Email</label><input className="input" type="email" value={f.email} onChange={e=>set("email",e.target.value)} /></div>
-        <div className="field"><label className="label">Phone</label><input className="input" value={f.phone} onChange={e=>set("phone",e.target.value)} /></div>
-        <div className="field"><label className="label">LinkedIn</label><input className="input" value={f.linkedin} onChange={e=>set("linkedin",e.target.value)} /></div>
-        <div className="field"><label className="label">Source</label><input className="input" value={f.source} onChange={e=>set("source",e.target.value)} placeholder="e.g. Conference, Referral" /></div>
-        <div className="field-full"><label className="label">Warmth</label><ButtonGroupWithCustom options={warmthOpts} value={f.warmth} onChange={(v)=>{set("warmth",v); trackCustom("warmth", warmthOpts, onAddCustomOption)(v);}} renderOption={(w)=><><span className="warmth-dot" style={{background:w.color}} />{w.label}</>} /></div>
-        <div className="field-full"><label className="checkbox-label"><input type="checkbox" checked={f.is_internal} onChange={e=>set("is_internal",e.target.checked)} /> Internal team member</label></div>
-        <div className="field-full"><label className="label">Tags</label><TagPickerWithCustom options={tagOpts} value={f.tags} onToggle={toggleTag} /></div>
-        <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={f.notes} onChange={e=>set("notes",e.target.value)} /></div>
-      </div>
-      <div className="modal-actions"><button onClick={onClose} className="btn-sec">Cancel</button><button onClick={()=>f.name.trim()&&onSave(f)} className="btn-primary" disabled={!f.name.trim()}>{isEdit?"Save":"Add Contact"}</button></div>
-    </div></div>
-  );
-}
-
-
 const TIMELINE_TABS = [
   { id: "all", label: "All" },
   { id: "call", label: "Calls" },
@@ -4157,8 +4098,25 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
   const [addingConn, setAddingConn] = useState(false);
   const [connContactId, setConnContactId] = useState("");
   const [connRel, setConnRel] = useState("knows");
+  const [editingTags, setEditingTags] = useState(false);
   const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
   const warmth = WARMTH_LEVELS.find(w => w.id === (contact.warmth || "unknown"));
+
+  // The old edit-contact modal is gone; tags, source, and the internal flag are
+  // edited inline here. Marking someone internal auto-tags them "Internal Team"
+  // (same rule as persistContact); internal people drive the Network Map's
+  // Internal nodes.
+  const tagOpts = optionsWithCustom(toOptions(TAG_OPTIONS), customOptions, "tag").map((o) => o.id);
+  const toggleTag = (t) => {
+    const tags = (contact.tags || []).includes(t) ? (contact.tags || []).filter((x) => x !== t) : [...(contact.tags || []), t];
+    if (!(contact.tags || []).includes(t)) trackCustom("tag", toOptions(tagOpts), onAddCustomOption)(t);
+    onUpdate({ tags });
+  };
+  const setInternal = (checked) => {
+    const tags = [...(contact.tags || [])];
+    if (checked && !tags.includes("Internal Team")) tags.push("Internal Team");
+    onUpdate({ is_internal: checked, tags });
+  };
 
   const roles = resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles });
 
@@ -4228,6 +4186,13 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
             <div className="sheet-company"><InlineText value={contact.name} onSave={(v) => v.trim() && onUpdate({ name: v.trim() })} placeholder="Name" /></div>
             <div className="sheet-meta-row">
               <BadgeSelect options={WARMTH_LEVELS} value={contact.warmth || "unknown"} color={warmth?.color} onChange={(v) => onUpdate({ warmth: v })} dot title="Change warmth" />
+              {readOnly ? (
+                contact.is_internal ? <span className="badge internal-badge">Internal Team</span> : null
+              ) : (
+                <label className="checkbox-label internal-toggle" title="Internal team members are Path Finder roots on the Network Map">
+                  <input type="checkbox" checked={!!contact.is_internal} onChange={(e) => setInternal(e.target.checked)} /> Internal Team
+                </label>
+              )}
             </div>
             <div className="contact-details mb-sm">
               <div>📧 <InlineText value={contact.email} onSave={(v) => onUpdate({ email: v })} placeholder="Add email" />
@@ -4237,8 +4202,17 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
               </div>
               <div>📞 <InlineText value={contact.phone} onSave={(v) => onUpdate({ phone: v })} placeholder="Add phone" /></div>
               <div>🔗 <InlineText value={contact.linkedin} onSave={(v) => onUpdate({ linkedin: v })} placeholder="Add LinkedIn" /></div>
+              <div>🧭 Source: <InlineText value={contact.source} onSave={(v) => onUpdate({ source: v || null })} placeholder="e.g. Conference, Referral" /></div>
             </div>
-            {(contact.tags || []).length > 0 && <div className="tags-row">{contact.tags.map(t => <span key={t} className="tag">{t}</span>)}</div>}
+            <div className="tags-row">
+              {(contact.tags || []).map(t => <span key={t} className="tag">{t}</span>)}
+              {!readOnly && <button className="tag tag-edit-btn" onClick={() => setEditingTags(v => !v)}>{editingTags ? "Done" : (contact.tags || []).length ? "✎ Tags" : "+ Tags"}</button>}
+            </div>
+            {editingTags && !readOnly && (
+              <div className="tags-edit-panel">
+                <TagPickerWithCustom options={tagOpts} value={contact.tags || []} onToggle={toggleTag} />
+              </div>
+            )}
             </div>
           </div>
           <div className="sheet-actions">
@@ -5109,7 +5083,7 @@ function InstitutionSheet({
   dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {},
   onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, linkedNotes = [], onOpenNote, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
-  onChangeStage, onChangeTier, todos = [], taskInitial = {}, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
+  onChangeStage, onChangeTier, onUpdateDeal, todos = [], taskInitial = {}, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
   materials = [], materialLinks = [], onAttachMaterial, onRemoveMaterialLink, onDownloadMaterial,
   onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot,
 }) {
@@ -5279,6 +5253,7 @@ function InstitutionSheet({
             )}
             <div className="sheet-contact">Sector: <InlineText value={inst.sector} onSave={(v) => onUpdate({ sector: v })} placeholder="Add sector" /></div>
             <div className="sheet-contact">Website: <InlineText value={inst.website} onSave={(v) => onUpdate({ website: v })} placeholder="Add website" /></div>
+            <div className="sheet-contact">Region: <InlineText value={inst.region} onSave={(v) => onUpdate({ region: v || null })} placeholder="Add region" /></div>
           </div>
           {!readOnly && (
             <div className="sheet-actions">
@@ -5291,6 +5266,18 @@ function InstitutionSheet({
           <div className="sheet-next inst-stage-row">
             <span className="next-label">Pipeline stage:</span>
             <BadgeSelect options={STAGES} value={inst.stage || "prospecting"} color={stage?.color} onChange={(v) => onChangeStage(v)} dot title="Change stage" />
+            {onUpdateDeal && (
+              <>
+                <span className="next-label">Value (USD):</span>
+                <InlineText
+                  value={inst.deal?.value ? String(inst.deal.value) : ""}
+                  placeholder="Add value"
+                  onSave={(v) => { const n = Number(v); onUpdateDeal({ value: v !== "" && !Number.isNaN(n) && n > 0 ? n : null }); }}
+                />
+                <span className="next-label">Next action:</span>
+                <InlineText value={inst.deal?.next_action} placeholder="What happens next?" onSave={(v) => onUpdateDeal({ next_action: v || null })} />
+              </>
+            )}
           </div>
         )}
       </div>
@@ -5565,48 +5552,6 @@ function InstitutionAddPerson({ institutionName, availableContacts, customOption
         <button onClick={() => f.name.trim() && onAddNew(f)} className="btn-primary" disabled={!f.name.trim()}>Add New Person</button>
       </div>
     </div>
-  );
-}
-
-function InstitutionEditModal({ institution: inst, customOptions = [], onAddCustomOption = () => {}, onSave, onClose }) {
-  const [f, setF] = useState({
-    orgId: inst.orgId, dealId: inst.dealId, enablerId: inst.enablerId,
-    name: inst.name || "", type: inst.type || "hospital", city: inst.city || "", region: inst.region || "",
-    sector: inst.sector || "", description: inst.description || "", website: inst.website || "", notes: inst.notes || "",
-    isTarget: !!inst.isTarget, isEnabler: !!inst.isEnabler,
-  });
-  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
-  const typeOpts = optionsWithCustom(INSTITUTION_TYPES, customOptions, "institution_type");
-  const cityOpts = optionsWithCustom(CITY_OPTIONS, customOptions, "city");
-  const regionOpts = optionsWithCustom(REGION_OPTIONS, customOptions, "region");
-  const submit = () => {
-    if (!f.name.trim()) return;
-    if (!f.isTarget && inst.dealId && !confirm("Unchecking Target removes the linked pipeline deal (its people and pipeline stage). Activity history is kept. Continue?")) return;
-    if (!f.isEnabler && inst.enablerId && !confirm("Unchecking Enabler removes the linked enabler record. Activity history is kept. Continue?")) return;
-    onSave(f);
-  };
-  return (
-    <div className="overlay" onClick={onClose}><div className="modal" onClick={e => e.stopPropagation()}>
-      <div className="modal-header"><div className="modal-title">Edit Institution</div><button onClick={onClose} className="close-btn">✕</button></div>
-      <div className="form-grid">
-        <div className="field-full"><label className="label">Name *</label><input className="input" value={f.name} onChange={e => set("name", e.target.value)} /></div>
-        <div className="field"><label className="label">Type</label><SelectWithCustom options={typeOpts} value={f.type} onChange={(v) => { set("type", v); trackCustom("institution_type", typeOpts, onAddCustomOption)(v); }} /></div>
-        <div className="field"><label className="label">Sector</label><input className="input" value={f.sector} onChange={e => set("sector", e.target.value)} /></div>
-        <div className="field"><label className="label">City</label><SelectWithCustom options={cityOpts} value={f.city} onChange={(v) => { set("city", v); trackCustom("city", cityOpts, onAddCustomOption)(v); }} placeholder="City name..." /></div>
-        <div className="field"><label className="label">Region</label><SelectWithCustom options={regionOpts} value={f.region} onChange={(v) => { set("region", v); trackCustom("region", regionOpts, onAddCustomOption)(v); }} placeholder="Region name..." /></div>
-        <div className="field-full checkbox-row">
-          <label className="checkbox-label"><input type="checkbox" checked={f.isTarget} onChange={e => set("isTarget", e.target.checked)} /> Target (a sales/BD target)</label>
-          <label className="checkbox-label"><input type="checkbox" checked={f.isEnabler} onChange={e => set("isEnabler", e.target.checked)} /> Enabler (can help us reach targets)</label>
-        </div>
-        <div className="field-full"><label className="label">Website</label><input className="input" value={f.website} onChange={e => set("website", e.target.value)} placeholder="https://..." /></div>
-        <div className="field-full"><label className="label">Description</label><textarea className="input textarea" value={f.description} onChange={e => set("description", e.target.value)} /></div>
-        <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={f.notes} onChange={e => set("notes", e.target.value)} /></div>
-      </div>
-      <div className="modal-actions">
-        <button onClick={onClose} className="btn-sec">Cancel</button>
-        <button onClick={submit} className="btn-primary" disabled={!f.name.trim()}>Save</button>
-      </div>
-    </div></div>
   );
 }
 
