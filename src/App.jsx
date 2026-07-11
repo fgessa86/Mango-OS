@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, createContext, useContext } f
 import { api } from "./supabase";
 import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
-import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue } from "./utils";
+import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue, FATHOM_MARKER, isFathomActivity, stripFathomMarker } from "./utils";
 import MapTab from "./MapTab";
 import "./styles.css";
 
@@ -52,13 +52,8 @@ function ActivityGlyph({ type }) {
 
 // Fathom-imported activities (from the Gmail sync) prefix their description with
 // this token; the React app strips it, shows a Fathom badge, and renders the
-// structured body. Keep in sync with FATHOM_MARKER in src/gmail-sync-updated.js.
-const FATHOM_MARKER = "[[FATHOM]]";
-const isFathomActivity = (a) => typeof a?.description === "string" && a.description.startsWith(FATHOM_MARKER);
-const stripFathomMarker = (desc) => {
-  const d = desc || "";
-  return d.startsWith(FATHOM_MARKER) ? d.slice(FATHOM_MARKER.length).replace(/^[ \t]+/, "") : d;
-};
+// structured body (FATHOM_MARKER / isFathomActivity / stripFathomMarker now live
+// in utils.js so the Map side panel can strip the marker too, see M11).
 const firstLine = (s) => { const t = (s || "").trim(); const nl = t.indexOf("\n"); return nl === -1 ? t : t.slice(0, nl); };
 
 // Renders an activity description. Fathom notes (and any description that looks
@@ -326,7 +321,7 @@ function MobilePipelineNav({ kanbanRef }) {
 
 // Left sidebar: wordmark, primary nav (geometric icons), a More section for
 // Reports/Boss View, static Saved Views, and a user card pinned to the bottom.
-function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0, bossMode = false, onRefresh, onOpenSearch }) {
+function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0, bossMode = false, onRefresh, onOpenSearch, lastSynced }) {
   const nav = [
     { id: "home", label: "Home", shape: "house" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
@@ -382,13 +377,6 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
         </>
       )}
 
-      <div className="sidebar-section-label">Saved Views</div>
-      <div className="sidebar-saved">
-        {["Tier 1 targets", "Riyadh accounts", "Closing this quarter"].map((s) => (
-          <div key={s} className="saved-view">{s}</div>
-        ))}
-      </div>
-
       {bossMode ? (
         <div className="sidebar-user">
           <Avatar name="Andy Liu" size={34} initials="AL" />
@@ -408,6 +396,7 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
             </div>
           </div>
           <div className="sidebar-api-calls" title="Anthropic API calls made today (resets at midnight)">API calls today: {apiCallsToday}</div>
+          {lastSynced && <div className="sidebar-sync" title="Most recent auto-synced email or meeting activity (Gmail Apps Script)">{lastSynced}</div>}
           {onRefresh && <button className="sidebar-refresh" onClick={onRefresh} title="Reload all data from the server">↻ Refresh data</button>}
         </>
       )}

@@ -101,15 +101,13 @@ body {
 .sidebar-more { display: flex; flex-direction: column; gap: 1px; margin-top: 8px; }
 .nav-item-sm { padding: 7px 11px; font-size: 13.5px; font-weight: 600; color: #6b6b7b; }
 .nav-item-sm.active { color: var(--text); }
-.sidebar-saved { display: flex; flex-direction: column; gap: 1px; margin-top: 8px; }
-.saved-view { padding: 7px 11px; font-size: 13.5px; color: #6b6b7b; border-radius: 9px; cursor: default; }
-.saved-view:hover { background: #efe7d8; }
 
 .sidebar-user { margin-top: auto; display: flex; align-items: center; gap: 11px; padding: 9px; border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-card); }
 .sidebar-user-meta { line-height: 1.25; }
 .sidebar-user-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
 .sidebar-user-role { font-size: 11.5px; color: var(--muted); }
 .sidebar-api-calls { margin-top: 10px; text-align: center; font-size: 11px; font-weight: 600; color: var(--muted); }
+.sidebar-sync { margin-top: 4px; text-align: center; font-size: 11px; font-weight: 600; color: var(--muted); }
 
 /* Avatars */
 .avatar { border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; flex-shrink: 0; line-height: 1; }
@@ -939,7 +937,7 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
    ============================================================ */
 @media (max-width: 900px) {
   .sidebar { width: 76px; padding: 18px 10px; }
-  .sidebar-wordmark, .nav-label, .nav-count, .sidebar-section-label, .sidebar-more, .sidebar-saved, .sidebar-user-meta { display: none; }
+  .sidebar-wordmark, .nav-label, .nav-count, .sidebar-section-label, .sidebar-more, .sidebar-user-meta { display: none; }
   .nav-item { justify-content: center; }
 }
 @media (max-width: 900px) and (min-width: 769px) {

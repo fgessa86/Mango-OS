@@ -17,3 +17,13 @@ export const isOverdue = (d) => {
   const today = new Date(); today.setHours(0, 0, 0, 0);
   return due < today;
 };
+
+// Fathom recap marker: the Apps Script prefixes auto-imported meeting recaps
+// with this token (kept in sync with FATHOM_MARKER in gmail-sync-updated.js).
+// Shared so any surface that renders a raw description can strip it (M11).
+export const FATHOM_MARKER = "[[FATHOM]]";
+export const isFathomActivity = (a) => typeof a?.description === "string" && a.description.startsWith(FATHOM_MARKER);
+export const stripFathomMarker = (desc) => {
+  const d = desc || "";
+  return d.startsWith(FATHOM_MARKER) ? d.slice(FATHOM_MARKER.length).replace(/^[ \t]+/, "") : d;
+};
