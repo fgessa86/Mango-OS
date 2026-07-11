@@ -279,8 +279,10 @@ export default function MapTab({ institutions, contacts, contactRoles, dealEnabl
       if (d.type === "person") circle.style("fill", "var(--text)"); else circle.attr("fill", st.fill);
       const showLabel = isInstitutionType(d.type) || d.type === "internal_person";
       // Label fill comes from CSS (.map-node-label -> var(--text)) so it flips with the theme.
-      g.append("text").attr("class", "map-node-label").attr("text-anchor", "middle").attr("dy", r + 12)
+      const label = g.append("text").attr("class", "map-node-label").attr("text-anchor", "middle").attr("dy", r + 12)
         .attr("font-size", isPersonType(d.type) ? 10 : 11).attr("opacity", showLabel ? 1 : 0).text(truncate(d.label));
+      // Full name on hover when the label is truncated (L7).
+      if (d.label && d.label.length > 15) label.append("title").text(d.label);
     });
 
     // Hover: emphasize the node and its neighbors, dim the rest.

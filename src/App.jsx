@@ -43,7 +43,7 @@ const ACTIVITY_GLYPHS = {
   note: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
   proposal_sent: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
   transcript: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
-  voice_note: { glyph: "🎤", bg: "#FDF0DA", fg: "#B5791A" },
+  voice_note: { glyph: "❞", bg: "#FDF0DA", fg: "#B5791A" },
 };
 function ActivityGlyph({ type }) {
   const g = ACTIVITY_GLYPHS[type] || { glyph: "•", bg: "#F1EADD", fg: "#8A8072" };
@@ -55,6 +55,9 @@ function ActivityGlyph({ type }) {
 // structured body (FATHOM_MARKER / isFathomActivity / stripFathomMarker now live
 // in utils.js so the Map side panel can strip the marker too, see M11).
 const firstLine = (s) => { const t = (s || "").trim(); const nl = t.indexOf("\n"); return nl === -1 ? t : t.slice(0, nl); };
+// Loose email sanity check (a typo'd address otherwise produces a broken Gmail
+// compose link with no feedback, L5). Not RFC-exhaustive; just catches obvious mistakes.
+const isValidEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((s || "").trim());
 
 // Renders an activity description. Fathom notes (and any description that looks
 // structured: "Heading:" lines and "- " bullets) get light formatting; a Fathom
@@ -184,13 +187,13 @@ function fillTemplate(text, contact, roles = []) {
 // Daily news briefing sections (Feature 3). Prompts are a fixed contract with
 // fetchNewsStories in anthropic.js (JSON array only).
 const NEWS_SECTIONS = [
-  { key: "healthtech", label: "Health Tech and AI", icon: "⚕",
+  { key: "healthtech", label: "Health Tech and AI", icon: "🩺",
     prompt: `Search for recent news in health technology and AI in healthcare from the past week. Return the 5 most notable developments. For each: headline, one-sentence summary, source name, and url. For the url field, provide the DIRECT link to the specific article, not the publication's homepage. The url must go straight to the individual story. If you cannot find the exact article URL from the web search results, set url to null. Respond in JSON only, no other text: [{headline, summary, source, url}]`,
     fallbackPrompt: `List 5 significant recent developments in health technology and AI in healthcare. Respond in JSON: [{headline, summary, source, url}]` },
   { key: "oncology", label: "Oncology and Immunotherapy", icon: "🧬",
     prompt: `Search for recent news in oncology, cancer treatment, and immunotherapy from the past week. Return the 5 most notable developments. For each: headline, one-sentence summary, source name, and url. For the url field, provide the DIRECT link to the specific article, not the publication's homepage. The url must go straight to the individual story. If you cannot find the exact article URL from the web search results, set url to null. Respond in JSON only, no other text: [{headline, summary, source, url}]`,
     fallbackPrompt: `List 5 significant recent developments in oncology and immunotherapy. Respond in JSON: [{headline, summary, source, url}]` },
-  { key: "saudi", label: "Saudi Arabia", icon: "🇸🇦",
+  { key: "saudi", label: "Saudi Arabia", icon: "🌍",
     prompt: `Search for recent news in Saudi Arabia focusing on healthcare, business, and Vision 2030 from the past week. Return the 5 most notable developments. For each: headline, one-sentence summary, source name, and url. For the url field, provide the DIRECT link to the specific article, not the publication's homepage. The url must go straight to the individual story. If you cannot find the exact article URL from the web search results, set url to null. Respond in JSON only, no other text: [{headline, summary, source, url}]`,
     fallbackPrompt: `List 5 significant recent developments in Saudi Arabia healthcare, business, and Vision 2030. Respond in JSON: [{headline, summary, source, url}]` },
 ];
@@ -246,6 +249,9 @@ const formatSeconds = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2,
 // Best-effort conversion of a natural-language due-date hint ("tomorrow", "next
 // Thursday", "end of week") into an ISO date. Returns null when nothing matches,
 // in which case the caller keeps the hint text in the task title instead.
+// L10: parseFathomDueDate_ in gmail-sync-updated.js is the same logic for the
+// Apps Script runtime. The two cannot share a module (browser bundle vs. Google
+// Apps Script), so keep them in sync by hand if either changes.
 function parseDueHint(hint) {
   const h = (hint || "").toLowerCase().trim();
   if (!h) return null;
@@ -2870,6 +2876,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       {/* REPORTS */}
       {view === "reports" && (
         <div className="section-pad reports">
+          <div className="page-header">
+            <div>
+              <div className="page-title">Reports</div>
+              <div className="page-sub">Copy a ready-to-send end of day or end of week summary</div>
+            </div>
+          </div>
           {[["eod","End of Day Report","Today's activities and tomorrow's priorities"],["eow","End of Week Report","Weekly summary and pipeline breakdown"]].map(([k,t,d]) => (
             <div key={k} className="report-box">
               <div className="report-header">
@@ -3864,6 +3876,7 @@ function ComposeModal({ contact, roles, templates, initialTemplateId, onSent, sh
     if (t) { setSubject(fillTemplate(t.subject, contact, roles)); setBody(fillTemplate(t.body, contact, roles)); }
   };
   const hasNotePlaceholder = subject.includes("{my_note}") || body.includes("{my_note}");
+  const emailValid = isValidEmail(contact.email);
   const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(contact.email || "")}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   const openGmail = () => { window.open(gmailUrl, "_blank", "noopener"); onSent(subject); };
   const copyEmail = () => {
@@ -3892,9 +3905,12 @@ function ComposeModal({ contact, roles, templates, initialTemplateId, onSent, sh
         {hasNotePlaceholder && (
           <div className="compose-note-warning">The <span className="compose-note-token">{"{my_note}"}</span> placeholder is still in this email. Replace it with your personal note before sending.</div>
         )}
+        {contact.email && !emailValid && (
+          <div className="compose-note-warning">"{contact.email}" does not look like a valid email address. Fix it on the person's sheet before opening Gmail.</div>
+        )}
         <div className="modal-actions compose-actions">
           <button className="btn-sec" onClick={copyEmail} disabled={!subject.trim() && !body.trim()}>Copy to Clipboard</button>
-          <button className="btn-primary" onClick={openGmail} disabled={!contact.email || (!subject.trim() && !body.trim())}>Open in Gmail</button>
+          <button className="btn-primary" onClick={openGmail} disabled={!emailValid || (!subject.trim() && !body.trim())}>Open in Gmail</button>
         </div>
       </div>
     </div>
@@ -4998,15 +5014,10 @@ function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, sum
   const [collapsed, setCollapsed] = useState(true);
   const [draft, setDraft] = useState(entity.ai_summary || "");
 
-  // Only auto-generate when there is NO cached summary at all. An existing (even
-  // stale) summary is shown instantly with no API call; the "New activity" hint
-  // below prompts the user to Regenerate manually. Never auto-generate in
-  // read-only (Boss View) mode, since that would be an API-billing edit.
-  useEffect(() => {
-    if (!readOnly && !entity.ai_summary) onGenerateSummary(entity, activities);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entity.id]);
-
+  // Summaries are generated on demand, never automatically on sheet-open: opening
+  // a fresh institution or person sheet should not silently cost an API call (L8).
+  // An existing summary shows instantly; the empty state and Regenerate button
+  // are the only ways to spend. Hidden entirely in read-only (Boss View) mode.
   const mostRecent = activities.length > 0 ? Math.max(...activities.map(a => new Date(a.created_at).getTime())) : 0;
   const summaryTime = entity.ai_summary_updated_at ? new Date(entity.ai_summary_updated_at).getTime() : 0;
   const isStale = !!entity.ai_summary && mostRecent > summaryTime;
@@ -5039,8 +5050,10 @@ function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, sum
           <div className={`ai-summary-text ${collapsed ? "ai-summary-collapsed" : ""}`} onClick={readOnly ? undefined : startEdit} title={readOnly ? undefined : "Click to edit"}>{entity.ai_summary}</div>
           {!collapsed && <div className="ai-summary-updated">Last updated: {formatDate(entity.ai_summary_updated_at)}</div>}
         </>
-      ) : (
+      ) : readOnly ? (
         <div className="empty-small">No summary yet.</div>
+      ) : (
+        <button className="link-btn" onClick={(e) => { e.stopPropagation(); onGenerateSummary(entity, activities); }}>Generate summary</button>
       )}
     </div>
   );
