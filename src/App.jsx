@@ -1105,6 +1105,15 @@ export default function App() {
     try {
       await api("contacts", "PATCH", patch, `?id=eq.${id}`);
       setContacts((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+      // A renamed contact propagates to the denormalized contact_name copies on
+      // any deal/enabler that references them (audit H7).
+      if (patch.name !== undefined) {
+        const nm = patch.name;
+        await api("deals", "PATCH", { contact_name: nm }, `?contact_id=eq.${id}`).catch(() => {});
+        await api("enablers", "PATCH", { contact_name: nm }, `?contact_id=eq.${id}`).catch(() => {});
+        setDeals((prev) => prev.map((d) => (d.contact_id === id ? { ...d, contact_name: nm } : d)));
+        setEnablers((prev) => prev.map((e) => (e.contact_id === id ? { ...e, contact_name: nm } : e)));
+      }
       savedToast();
     } catch { showToast("Error saving"); }
   };
@@ -1156,18 +1165,31 @@ export default function App() {
       savedToast();
     } catch { showToast("Error saving"); }
   };
-  // Renaming an institution renames every backing row and re-keys the open sheet.
+  // Renaming an institution renames every backing row, propagates the new name
+  // to the denormalized contacts.company copies (audit H7), and re-keys the
+  // open sheet. Only contacts whose company text currently equals the old name
+  // are touched, so people who work elsewhere are left alone.
   const renameInstitution = async (inst, rawName) => {
     const name = (rawName || "").trim();
-    if (!name || name === inst.name) return;
+    const oldName = inst.name;
+    if (!name || name === oldName) return;
     try {
       if (inst.orgId) await api("organizations", "PATCH", { name }, `?id=eq.${inst.orgId}`);
       if (inst.dealId) await api("deals", "PATCH", { company: name }, `?id=eq.${inst.dealId}`);
       if (inst.enablerId) await api("enablers", "PATCH", { name }, `?id=eq.${inst.enablerId}`);
       if (!inst.orgId && !inst.dealId && !inst.enablerId) return;
+      const oldLower = (oldName || "").trim().toLowerCase();
+      const affectedContactIds = contacts.filter((c) => (c.company || "").trim().toLowerCase() === oldLower).map((c) => c.id);
+      if (affectedContactIds.length > 0) {
+        await api("contacts", "PATCH", { company: name }, `?company=ilike.${encodeURIComponent(oldName)}`).catch(() => {});
+      }
       setOrganizations((prev) => prev.map((o) => (o.id === inst.orgId ? { ...o, name } : o)));
       setDeals((prev) => prev.map((d) => (d.id === inst.dealId ? { ...d, company: name } : d)));
       setEnablers((prev) => prev.map((e) => (e.id === inst.enablerId ? { ...e, name } : e)));
+      if (affectedContactIds.length > 0) {
+        const idSet = new Set(affectedContactIds);
+        setContacts((prev) => prev.map((c) => (idSet.has(c.id) ? { ...c, company: name } : c)));
+      }
       setInstitutionSheetKey(name.toLowerCase()); savedToast();
     } catch { showToast("Error saving"); }
   };
