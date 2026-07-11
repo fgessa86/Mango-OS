@@ -2395,6 +2395,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   };
   // Tab-level navigation resets the sheet history.
   const navigateTab = (v) => { setNavStack([]); setInstitutionSheetKey(null); setPersonSheetId(null); setView(v); };
+  // Boss View hides Notes and Outreach; if it ever lands on one (deep link,
+  // stale URL) send it Home rather than rendering a blank main area (M4).
+  useEffect(() => {
+    if (bossMode && (view === "outreach" || view === "notes")) setView("home");
+  }, [bossMode, view]);
   const VIEW_BACK_LABELS = { home: "Home", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports" };
   const backTarget = navStack[navStack.length - 1];
   const backLabel = (() => {
@@ -2992,11 +2997,11 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
         </div>
       </div>
 
-      {/* 1. Unread comments from Andy */}
+      {/* 1. Unread comments from the other person (Andy for Fahed, Fahed for Andy) */}
       <div className="home-section">
         <div className="home-section-title">Unread Comments</div>
         {unreadComments.length === 0 ? (
-          <div className="home-empty">No new comments from Andy.</div>
+          <div className="home-empty">No new comments from {bossMode ? "Fahed" : "Andy"}.</div>
         ) : (
           <div className="home-list">
             {unreadComments.map((c) => {
@@ -3044,7 +3049,7 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
       </div>
 
       {/* Daily news briefing (Feature 3), below Today's Agenda */}
-      <DailyBriefing isMobile={isMobile} />
+      <DailyBriefing isMobile={isMobile} bossMode={bossMode} />
 
       {/* Meeting prep briefs (Feature 2) */}
       <div className="home-section">
@@ -3203,7 +3208,7 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
 // Bumped to v3 when article URLs were corrected (deep links, not homepages):
 // a new key discards the older cached stories and forces one fresh fetch.
 const NEWS_CACHE_KEY = "mango-news-briefing-v3";
-function DailyBriefing({ isMobile }) {
+function DailyBriefing({ isMobile, bossMode = false }) {
   const todayKey = new Date().toISOString().slice(0, 10);
   const [data, setData] = useState(() => {
     try { return JSON.parse(localStorage.getItem(NEWS_CACHE_KEY) || "null"); } catch { return null; }
@@ -3258,12 +3263,14 @@ function DailyBriefing({ isMobile }) {
     NEWS_SECTIONS.forEach((sec, i) => { setTimeout(() => fetchSection(sec), i * 1000); });
   }, [fetchSection]);
 
-  // Fetch fresh news once per day: only on the first Home mount whose cache is stale.
+  // Fetch fresh news once per day: only on the first Home mount whose cache is
+  // stale. Boss View never fetches: Andy's browser must not spend API calls on
+  // Fahed's key (M4). He sees whatever cache exists, else a static note.
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
     try { localStorage.removeItem("mango-news-briefing"); localStorage.removeItem("mango-news-briefing-v2"); } catch { /* ignore */ }
-    if (!cacheFresh) refreshAll();
+    if (!cacheFresh && !bossMode) refreshAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -3274,10 +3281,12 @@ function DailyBriefing({ isMobile }) {
         <div className="home-section-title">Daily Briefing</div>
         <div className="briefing-head-right">
           {cacheFresh && data.updatedAt && <span className="briefing-updated">Last updated: {formatDateTime(data.updatedAt)}</span>}
-          <button className="home-section-action" disabled={anyLoading} onClick={refreshAll}>{anyLoading ? "Refreshing..." : "Refresh Briefing"}</button>
+          {!bossMode && <button className="home-section-action" disabled={anyLoading} onClick={refreshAll}>{anyLoading ? "Refreshing..." : "Refresh Briefing"}</button>}
         </div>
       </div>
-      {NEWS_SECTIONS.map((sec) => {
+      {bossMode && !cacheFresh ? (
+        <div className="news-empty">Daily news is fetched on Fahed's device.</div>
+      ) : NEWS_SECTIONS.map((sec) => {
         const stories = cacheFresh ? data.sections[sec.key] : null;
         const isCollapsed = collapsed[sec.key];
         return (
