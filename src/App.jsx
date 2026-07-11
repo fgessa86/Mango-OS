@@ -1231,11 +1231,21 @@ export default function App() {
     }
     const created = (await api("contacts", "POST", clean) || [])[0];
     if (created && clean.company) {
+      // Auto-link by company name: contact_roles is the source of truth, with a
+      // mirror row in the legacy junction table (same dual-write as
+      // persistPersonRole, so the two never diverge again).
       const companyLower = clean.company.toLowerCase();
+      const roleTitle = (clean.role || "").trim() || null;
       const matchedDeal = deals.find((d) => (d.company || "").toLowerCase() === companyLower);
-      if (matchedDeal) await api("deal_contacts", "POST", { deal_id: matchedDeal.id, contact_id: created.id }).catch(() => {});
+      if (matchedDeal) {
+        await api("contact_roles", "POST", { contact_id: created.id, entity_type: "deal", entity_id: matchedDeal.id, role_title: roleTitle }).catch(() => {});
+        await api("deal_contacts", "POST", { deal_id: matchedDeal.id, contact_id: created.id }).catch(() => {});
+      }
       const matchedEnabler = enablers.find((en) => (en.name || "").toLowerCase() === companyLower);
-      if (matchedEnabler) await api("enabler_contacts", "POST", { enabler_id: matchedEnabler.id, contact_id: created.id }).catch(() => {});
+      if (matchedEnabler) {
+        await api("contact_roles", "POST", { contact_id: created.id, entity_type: "enabler", entity_id: matchedEnabler.id, role_title: roleTitle }).catch(() => {});
+        await api("enabler_contacts", "POST", { enabler_id: matchedEnabler.id, contact_id: created.id }).catch(() => {});
+      }
     }
     return created;
   };
@@ -1247,19 +1257,35 @@ export default function App() {
     } catch { showToast("Error saving contact"); }
   };
 
+  // Deleting a contact: pure link rows are deleted; rows that carry history
+  // (activities, todos, notes, briefs) keep their content but have the dangling
+  // contact reference nulled, and denormalized copies on deals/enablers are
+  // stripped. Activities left with no entity reference at all are removed.
   const deleteContact = async (id) => {
     try {
       await api("deal_contacts", "DELETE", null, `?contact_id=eq.${id}`);
       await api("enabler_contacts", "DELETE", null, `?contact_id=eq.${id}`);
       await api("contact_roles", "DELETE", null, `?contact_id=eq.${id}`);
       await api("network_edges", "DELETE", null, `?source_type=eq.contact&source_id=eq.${id}`);
-      await api("todos", "DELETE", null, `?contact_id=eq.${id}`);
       await api("network_edges", "DELETE", null, `?target_type=eq.contact&target_id=eq.${id}`);
+      await api("material_links", "DELETE", null, `?contact_id=eq.${id}`);
+      await api("activities", "PATCH", { contact_id: null }, `?contact_id=eq.${id}`).catch(() => {});
+      await api("todos", "PATCH", { contact_id: null }, `?contact_id=eq.${id}`).catch(() => {});
+      await api("notes", "PATCH", { contact_id: null }, `?contact_id=eq.${id}`).catch(() => {});
+      await api("meeting_briefs", "PATCH", { contact_id: null }, `?contact_id=eq.${id}`).catch(() => {});
+      await api("deals", "PATCH", { contact_id: null, contact_name: null, contact_role: null }, `?contact_id=eq.${id}`).catch(() => {});
+      await api("enablers", "PATCH", { contact_id: null, contact_name: null }, `?contact_id=eq.${id}`).catch(() => {});
+      await deleteFullyOrphanedActivities();
       await api("contacts", "DELETE", null, `?id=eq.${id}`);
       await loadData(); setModal(null); showToast("Person deleted");
       setView("network"); setPersonSheetId(null);
     } catch { showToast("Error deleting person"); }
   };
+
+  // Removes activities whose every entity reference has been nulled by an
+  // archive or delete: they are invisible on all sheets and only clutter Home.
+  const deleteFullyOrphanedActivities = () =>
+    api("activities", "DELETE", null, "?deal_id=is.null&contact_id=is.null&enabler_id=is.null&organization_id=is.null").catch(() => {});
 
   // PEOPLE (deal_contacts / enabler_contacts junction tables, plus contact_roles
   // as the newer unified source of truth; addPersonRole/removePersonRole below
@@ -1410,19 +1436,33 @@ export default function App() {
   const purgeDeal = async (id) => {
     await api("activities", "PATCH", { deal_id: null }, `?deal_id=eq.${id}`).catch(() => {});
     await api("todos", "PATCH", { deal_id: null }, `?deal_id=eq.${id}`).catch(() => {});
+    await api("notes", "PATCH", { deal_id: null }, `?deal_id=eq.${id}`).catch(() => {});
+    await api("meeting_briefs", "PATCH", { deal_id: null }, `?deal_id=eq.${id}`).catch(() => {});
+    await api("boss_comments", "PATCH", { deal_id: null }, `?deal_id=eq.${id}`).catch(() => {});
+    await api("material_links", "DELETE", null, `?deal_id=eq.${id}`).catch(() => {});
     await api("deal_contacts", "DELETE", null, `?deal_id=eq.${id}`).catch(() => {});
     await api("contact_roles", "DELETE", null, `?entity_type=eq.deal&entity_id=eq.${id}`).catch(() => {});
     await api("deal_enablers", "DELETE", null, `?deal_id=eq.${id}`).catch(() => {});
+    await api("network_edges", "DELETE", null, `?source_type=eq.deal&source_id=eq.${id}`).catch(() => {});
+    await api("network_edges", "DELETE", null, `?target_type=eq.deal&target_id=eq.${id}`).catch(() => {});
     await api("deals", "DELETE", null, `?id=eq.${id}`);
+    await deleteFullyOrphanedActivities();
   };
 
   const purgeEnabler = async (id) => {
     await api("activities", "PATCH", { enabler_id: null }, `?enabler_id=eq.${id}`).catch(() => {});
     await api("todos", "PATCH", { enabler_id: null }, `?enabler_id=eq.${id}`).catch(() => {});
+    await api("notes", "PATCH", { enabler_id: null }, `?enabler_id=eq.${id}`).catch(() => {});
+    await api("meeting_briefs", "PATCH", { enabler_id: null }, `?enabler_id=eq.${id}`).catch(() => {});
+    await api("boss_comments", "PATCH", { enabler_id: null }, `?enabler_id=eq.${id}`).catch(() => {});
+    await api("material_links", "DELETE", null, `?enabler_id=eq.${id}`).catch(() => {});
     await api("enabler_contacts", "DELETE", null, `?enabler_id=eq.${id}`).catch(() => {});
     await api("contact_roles", "DELETE", null, `?entity_type=eq.enabler&entity_id=eq.${id}`).catch(() => {});
     await api("deal_enablers", "DELETE", null, `?enabler_id=eq.${id}`).catch(() => {});
+    await api("network_edges", "DELETE", null, `?source_type=eq.enabler&source_id=eq.${id}`).catch(() => {});
+    await api("network_edges", "DELETE", null, `?target_type=eq.enabler&target_id=eq.${id}`).catch(() => {});
     await api("enablers", "DELETE", null, `?id=eq.${id}`);
+    await deleteFullyOrphanedActivities();
   };
 
   // Ecosystem tab's "+ Institution" form. Always creates an organizations row, and
@@ -1484,12 +1524,19 @@ export default function App() {
       if (inst.dealId) await purgeDeal(inst.dealId);
       if (inst.enablerId) await purgeEnabler(inst.enablerId);
       if (inst.orgId) {
-        await api("activities", "DELETE", null, `?organization_id=eq.${inst.orgId}`);
+        // Null the org reference on history rows (an activity may also belong to
+        // a contact); fully-orphaned activities are swept afterwards.
+        await api("activities", "PATCH", { organization_id: null }, `?organization_id=eq.${inst.orgId}`).catch(() => {});
         await api("todos", "PATCH", { organization_id: null }, `?organization_id=eq.${inst.orgId}`).catch(() => {});
+        await api("notes", "PATCH", { organization_id: null }, `?organization_id=eq.${inst.orgId}`).catch(() => {});
+        await api("meeting_briefs", "PATCH", { organization_id: null }, `?organization_id=eq.${inst.orgId}`).catch(() => {});
+        await api("boss_comments", "PATCH", { organization_id: null }, `?organization_id=eq.${inst.orgId}`).catch(() => {});
+        await api("material_links", "DELETE", null, `?organization_id=eq.${inst.orgId}`).catch(() => {});
         await api("network_edges", "DELETE", null, `?source_type=eq.organization&source_id=eq.${inst.orgId}`);
         await api("network_edges", "DELETE", null, `?target_type=eq.organization&target_id=eq.${inst.orgId}`);
         await api("contact_roles", "DELETE", null, `?entity_type=eq.organization&entity_id=eq.${inst.orgId}`);
         await api("organizations", "DELETE", null, `?id=eq.${inst.orgId}`);
+        await deleteFullyOrphanedActivities();
       }
       await loadData(); showToast("Institution deleted");
       setView("network"); setInstitutionSheetKey(null);
