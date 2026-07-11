@@ -264,12 +264,14 @@ function parseDueHint(hint) {
 // Fixed bottom tab bar shown only on mobile (CSS hides it on desktop and hides
 // the sidebar on mobile). Home is the landing tab; the Network Map is
 // desktop-only, and Reports is reachable from the Home screen on mobile.
-function MobileTabBar({ view, setView, tasksCount, sheetOrigin = "network" }) {
+function MobileTabBar({ view, setView, tasksCount, sheetOrigin = "network", bossMode = false }) {
   const tabs = [
     { id: "home", label: "Home", shape: "house" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Ecosystem", shape: "circle" },
     { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
+    // Outreach is an action workflow, hidden in Boss View (audit H4).
+    ...(bossMode ? [] : [{ id: "outreach", label: "Outreach", shape: "send" }]),
   ];
   const mapView = view === "institution-sheet" ? sheetOrigin : view === "person-sheet" ? "network" : view;
   return (
@@ -318,7 +320,7 @@ function MobilePipelineNav({ kanbanRef }) {
 
 // Left sidebar: wordmark, primary nav (geometric icons), a More section for
 // Reports/Boss View, static Saved Views, and a user card pinned to the bottom.
-function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0, bossMode = false, onRefresh }) {
+function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0, bossMode = false, onRefresh, onOpenSearch }) {
   const nav = [
     { id: "home", label: "Home", shape: "house" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
@@ -342,6 +344,13 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
         <span className="sidebar-logo">🥭</span>
         <span className="sidebar-wordmark">Mango OS</span>
       </div>
+      {onOpenSearch && (
+        <button className="sidebar-search-btn" onClick={onOpenSearch} title="Search everything (Cmd+K)">
+          <span className="sidebar-search-icon">🔍</span>
+          <span className="nav-label">Search</span>
+          <span className="sidebar-search-kbd">⌘K</span>
+        </button>
+      )}
       <nav className="sidebar-nav">
         {nav.map((n) => (
           <button key={n.id} onClick={() => setView(n.id)} className={`nav-item ${mapView === n.id ? "active" : ""}`}>
@@ -890,6 +899,8 @@ export default function App() {
   const [personSheetId, setPersonSheetId] = useState(null);
   // Sheet navigation history: where each open sheet was navigated from.
   const [navStack, setNavStack] = useState([]);
+  // Global search overlay (Cmd+K / Ctrl+K, or the sidebar / Home buttons).
+  const [searchOpen, setSearchOpen] = useState(false);
   const [customOptions, setCustomOptions] = useState([]);
   const [contactRoles, setContactRoles] = useState([]);
   const [summarizing, setSummarizing] = useState(false);
@@ -946,6 +957,15 @@ export default function App() {
   // Manual full reload: writes patch local state (see audit M1), so this is the
   // explicit way to pull changes made elsewhere (Gmail sync, Andy's browser).
   const refreshData = async () => { await loadData(); showToast("Data refreshed", 1500); };
+
+  // Cmd+K / Ctrl+K opens global search from anywhere.
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); setSearchOpen((v) => !v); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Boss View: ?view=boss loads the FULL app in read-only mode (Andy Liu). Same
   // tabs, sidebar, and data as Fahed; every edit affordance is hidden or disabled.
@@ -2363,7 +2383,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     <div className="app">
       {toast && <div className="toast">{toast}</div>}
 
-      <Sidebar view={view} setView={navigateTab} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} apiCallsToday={apiCallsToday} bossMode={bossMode} onRefresh={refreshData} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} />
+      <Sidebar view={view} setView={navigateTab} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} apiCallsToday={apiCallsToday} bossMode={bossMode} onRefresh={refreshData} onOpenSearch={() => setSearchOpen(true)} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} />
 
       <main className="main">
 
@@ -2529,6 +2549,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           needsNudgeCount={needsNudgeCount}
           onOpenOutreach={() => navigateTab("outreach")}
           onRefresh={refreshData}
+          onOpenSearch={() => setSearchOpen(true)}
         />
       )}
 
@@ -2789,11 +2810,31 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       </main>
 
       {/* Mobile-only bottom tab bar (the sidebar is hidden on phones). */}
-      <MobileTabBar view={view} setView={navigateTab} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} />
+      <MobileTabBar view={view} setView={navigateTab} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} bossMode={bossMode} />
 
       {/* Floating two-way comment thread, available on every tab for Fahed and Andy.
           Only Fahed's opens clear the unread marker (the badge is Fahed's). */}
-      <CommentPanel comments={bossComments} author={commentAuthor} unread={unreadComments} onOpen={bossMode ? undefined : markCommentsSeen} onPost={postBossComment} targetName={commentTargetName} />
+      <CommentPanel comments={bossComments} author={commentAuthor} unread={unreadComments} onOpen={bossMode ? undefined : markCommentsSeen} onPost={postBossComment} targetName={commentTargetName} showToast={showToast} />
+
+      {/* GLOBAL SEARCH (Cmd+K) */}
+      {searchOpen && (
+        <GlobalSearch
+          institutions={institutions}
+          contacts={contacts}
+          activities={activities}
+          todos={todos}
+          notes={notes}
+          materials={materials}
+          entityName={entityName}
+          onOpenInstitution={(name) => { setSearchOpen(false); openInstitution(name); }}
+          onOpenPerson={(id) => { setSearchOpen(false); openPerson(id); }}
+          onOpenEntity={(row) => { setSearchOpen(false); openEntity(row); }}
+          onOpenTasks={() => { setSearchOpen(false); navigateTab("tasks"); }}
+          onOpenNote={(id) => { setSearchOpen(false); openNote(id); }}
+          onOpenMaterials={() => { setSearchOpen(false); navigateTab("materials"); }}
+          onClose={() => setSearchOpen(false)}
+        />
+      )}
 
       {/* MEETING BRIEF viewer / generator (Feature 2) */}
       {briefGenerating && (
@@ -2863,7 +2904,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
@@ -2873,7 +2914,10 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
           <div className="home-greeting">Good {partOfDay}, {greetingName}</div>
           <div className="home-date">{formatFull(new Date())}</div>
         </div>
-        {onRefresh && <button className="home-refresh-btn" onClick={onRefresh} title="Reload all data from the server">↻</button>}
+        <div className="home-header-actions">
+          {onOpenSearch && <button className="home-refresh-btn" onClick={onOpenSearch} title="Search everything (Cmd+K)">🔍</button>}
+          {onRefresh && <button className="home-refresh-btn" onClick={onRefresh} title="Reload all data from the server">↻</button>}
+        </div>
       </div>
 
       {/* 1. Unread comments from Andy */}
@@ -6165,21 +6209,135 @@ function PeopleTable({ people, institutionNames, cities, onUpdateContact, onSetO
 }
 
 
+
+// ============================================================
+// Global search (Cmd+K): client-side search over every loaded entity type,
+// grouped by kind, each result navigating straight to its home.
+// ============================================================
+function GlobalSearch({ institutions, contacts, activities, todos, notes, materials, entityName, onOpenInstitution, onOpenPerson, onOpenEntity, onOpenTasks, onOpenNote, onOpenMaterials, onClose }) {
+  const [q, setQ] = useState("");
+  const inputRef = useRef(null);
+  useEffect(() => { if (inputRef.current) inputRef.current.focus(); }, []);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const query = q.trim().toLowerCase();
+  const hit = (s) => (s || "").toLowerCase().includes(query);
+  const CAP = 5;
+  const groups = query.length < 2 ? [] : [
+    {
+      label: "Institutions",
+      items: institutions.filter((i) => hit(i.name)).slice(0, CAP).map((i) => ({
+        key: `inst-${i.key}`, title: i.name,
+        sub: [i.isTarget ? "Target" : null, i.isEnabler ? "Enabler" : null, parseCities(i.city)[0] || null].filter(Boolean).join(" . "),
+        go: () => onOpenInstitution(i.name),
+      })),
+    },
+    {
+      label: "People",
+      items: contacts.filter((c) => hit(c.name) || hit(c.company) || hit(c.role) || hit(c.email)).slice(0, CAP).map((c) => ({
+        key: `c-${c.id}`, title: c.name, sub: [c.role, c.company].filter(Boolean).join(", "),
+        go: () => onOpenPerson(c.id),
+      })),
+    },
+    {
+      label: "Activities",
+      items: activities.filter((a) => hit(a.description)).slice(0, CAP).map((a) => ({
+        key: `a-${a.id}`, title: firstLine(stripFathomMarker(a.description)),
+        sub: [entityName(a) || "General", formatDate(a.created_at)].join(" . "),
+        go: () => onOpenEntity(a),
+      })),
+    },
+    {
+      label: "Tasks",
+      items: todos.filter((t) => hit(t.title)).slice(0, CAP).map((t) => ({
+        key: `t-${t.id}`, title: t.title,
+        sub: [t.status === "completed" ? "Completed" : "Open", entityName(t)].filter(Boolean).join(" . "),
+        go: () => (entityName(t) ? onOpenEntity(t) : onOpenTasks()),
+      })),
+    },
+    {
+      label: "Notes",
+      items: notes.filter((n) => hit(n.title) || hit(n.content)).slice(0, CAP).map((n) => ({
+        key: `n-${n.id}`, title: n.title || "Untitled",
+        sub: formatDate(n.updated_at || n.created_at),
+        go: () => onOpenNote(n.id),
+      })),
+    },
+    {
+      label: "Materials",
+      items: materials.filter((m) => hit(m.name) || hit(m.notes)).slice(0, CAP).map((m) => ({
+        key: `m-${m.id}`, title: m.name,
+        sub: [materialTypeMeta(m.type).label, m.version].filter(Boolean).join(" . "),
+        go: () => onOpenMaterials(),
+      })),
+    },
+  ].filter((g) => g.items.length > 0);
+  const total = groups.reduce((s, g) => s + g.items.length, 0);
+  const first = groups[0] && groups[0].items[0];
+
+  return (
+    <div className="overlay search-overlay" onClick={onClose}>
+      <div className="search-panel" onClick={(e) => e.stopPropagation()}>
+        <input
+          ref={inputRef}
+          className="input search-input"
+          placeholder="Search institutions, people, activities, tasks, notes, materials..."
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && first) first.go(); }}
+        />
+        <div className="search-results">
+          {query.length < 2 ? (
+            <div className="search-hint">Type at least 2 characters. Enter opens the top result, Esc closes.</div>
+          ) : total === 0 ? (
+            <div className="search-hint">No matches for "{q.trim()}".</div>
+          ) : groups.map((g) => (
+            <div key={g.label} className="search-group">
+              <div className="search-group-head">{g.label}</div>
+              {g.items.map((it) => (
+                <button key={it.key} className="search-result" onClick={it.go}>
+                  <span className="search-result-title">{it.title}</span>
+                  {it.sub && <span className="search-result-sub">{it.sub}</span>}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ============================================================
 // Two-way comment thread between Fahed and Andy. A floating button (bottom right)
 // opens a slide-up panel from any tab, in both the normal app and Boss View.
 // ============================================================
-function CommentPanel({ comments, author, unread = 0, onOpen, onPost, targetName }) {
+function CommentPanel({ comments, author, unread = 0, onOpen, onPost, targetName, showToast }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [posting, setPosting] = useState(false);
+  const [file, setFile] = useState(null); // { file_name, file_data }
+  const fileRef = useRef(null);
   const sorted = [...comments].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   const toggle = () => { const next = !open; setOpen(next); if (next && onOpen) onOpen(); };
+  const pickFile = (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    if (f.size > 2 * 1024 * 1024) { if (showToast) showToast("File too large. Keep attachments under 2MB."); return; }
+    const reader = new FileReader();
+    reader.onload = () => setFile({ file_name: f.name, file_data: reader.result });
+    reader.readAsDataURL(f);
+  };
   const send = async () => {
     const t = text.trim();
-    if (!t || posting) return;
+    if ((!t && !file) || posting) return;
     setPosting(true);
-    try { await onPost({ author, content: t }); setText(""); } finally { setPosting(false); }
+    try { await onPost({ author, content: t, ...(file || {}) }); setText(""); setFile(null); } finally { setPosting(false); }
   };
   return (
     <>
@@ -6194,8 +6352,15 @@ function CommentPanel({ comments, author, unread = 0, onOpen, onPost, targetName
           </div>
           <div className="comment-compose">
             <textarea className="input comment-compose-input" placeholder={author === "Andy Liu" ? "Leave a note for Fahed..." : "Reply to Andy..."} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); }} />
-            <button className="btn-primary" onClick={send} disabled={posting || !text.trim()}>Send</button>
+            <input ref={fileRef} type="file" className="photo-input-hidden" onChange={pickFile} />
+            <button className="boss-clip-btn" onClick={() => fileRef.current && fileRef.current.click()} title="Attach a file or screenshot">📎</button>
+            <button className="btn-primary" onClick={send} disabled={posting || (!text.trim() && !file)}>Send</button>
           </div>
+          {file && (
+            <div className="comment-attach-row">
+              <span className="boss-file-chip">📎 {file.file_name}<button className="person-remove" title="Remove attachment" onClick={() => setFile(null)}>✕</button></span>
+            </div>
+          )}
           <div className="comment-panel-author">Posting as {author}</div>
           <div className="comment-feed">
             {sorted.length === 0 && <div className="empty-small">No comments yet. Start the conversation.</div>}
