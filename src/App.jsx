@@ -189,9 +189,9 @@ function fillTemplate(text, contact, roles = []) {
 // Daily news briefing sections (Feature 3). Prompts are a fixed contract with
 // fetchNewsStories in anthropic.js (JSON array only).
 const NEWS_SECTIONS = [
-  { key: "healthtech", label: "Health Tech and AI", icon: "⚕", prompt: `Search for today's top news in health technology and AI in healthcare. Return the 5 most significant stories. For each: headline, one-sentence summary, source name. Respond in JSON only: [{headline, summary, source}]. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.` },
-  { key: "oncology", label: "Oncology and Immunotherapy", icon: "🧬", prompt: `Search for today's top news in oncology, cancer research, and immunotherapy. Return the 5 most significant stories. For each: headline, one-sentence summary, source name. Respond in JSON only: [{headline, summary, source}]. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.` },
-  { key: "saudi", label: "Saudi Arabia", icon: "🇸🇦", prompt: `Search for today's top news in Saudi Arabia, focusing on healthcare, business, and Vision 2030 developments. Return the 5 most significant stories. For each: headline, one-sentence summary, source name. Respond in JSON only: [{headline, summary, source}]. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.` },
+  { key: "healthtech", label: "Health Tech and AI", icon: "⚕", prompt: `Search for today's top news in health technology and AI in healthcare. Return the 5 most significant stories. For each: headline, one-sentence summary, source name, and the direct URL to the article. Respond in JSON only: [{headline, summary, source, url}]. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.` },
+  { key: "oncology", label: "Oncology and Immunotherapy", icon: "🧬", prompt: `Search for today's top news in oncology, cancer research, and immunotherapy. Return the 5 most significant stories. For each: headline, one-sentence summary, source name, and the direct URL to the article. Respond in JSON only: [{headline, summary, source, url}]. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.` },
+  { key: "saudi", label: "Saudi Arabia", icon: "🇸🇦", prompt: `Search for today's top news in Saudi Arabia, focusing on healthcare, business, and Vision 2030 developments. Return the 5 most significant stories. For each: headline, one-sentence summary, source name, and the direct URL to the article. Respond in JSON only: [{headline, summary, source, url}]. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.` },
 ];
 
 // Minimal geometric nav icons (2px strokes). Active color is handled via CSS.
@@ -3187,7 +3187,9 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
 // localStorage per day. Auto-fetches on the first Home load of the day; the
 // Refresh button re-fetches all three in parallel. Each section fails and
 // retries independently so one bad fetch never blanks the others.
-const NEWS_CACHE_KEY = "mango-news-briefing";
+// Bumped to v2 when stories gained clickable URLs: the old cache holds
+// URL-less stories, so a new key discards it and forces one fresh fetch.
+const NEWS_CACHE_KEY = "mango-news-briefing-v2";
 function DailyBriefing({ isMobile }) {
   const todayKey = new Date().toISOString().slice(0, 10);
   const [data, setData] = useState(() => {
@@ -3224,6 +3226,7 @@ function DailyBriefing({ isMobile }) {
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
+    try { localStorage.removeItem("mango-news-briefing"); } catch { /* ignore */ }
     if (!cacheFresh) refreshAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -3261,13 +3264,16 @@ function DailyBriefing({ isMobile }) {
                 <div className="news-empty">No stories loaded yet.</div>
               ) : (
                 <div className="news-list">
-                  {stories.map((s, i) => (
-                    <div key={i} className="news-row">
-                      <div className="news-headline">{s.headline}</div>
-                      {s.summary && <div className="news-summary">{s.summary}</div>}
-                      {s.source && <span className="news-source">{s.source}</span>}
-                    </div>
-                  ))}
+                  {stories.map((s, i) => {
+                    const href = (s.url || "").trim() || `https://www.google.com/search?q=${encodeURIComponent(s.headline)}`;
+                    return (
+                      <a key={i} className="news-row" href={href} target="_blank" rel="noopener noreferrer">
+                        <div className="news-headline">{s.headline}</div>
+                        {s.summary && <div className="news-summary">{s.summary}</div>}
+                        {s.source && <span className="news-source">{s.source}</span>}
+                      </a>
+                    );
+                  })}
                 </div>
               )
             )}

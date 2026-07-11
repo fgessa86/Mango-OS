@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="112" fill="#FBF8F3"/>
+  <g transform="rotate(-10 256 300)">
+    <!-- mango body -->
+    <ellipse cx="256" cy="300" rx="138" ry="162" fill="#F5A623"/>
+    <!-- soft highlight -->
+    <ellipse cx="206" cy="248" rx="40" ry="56" fill="#F9C066" opacity="0.65"/>
+  </g>
+  <!-- stem -->
+  <path d="M262 148 C 258 126 256 112 262 96" fill="none" stroke="#8A5A2B" stroke-width="10" stroke-linecap="round"/>
+  <!-- leaf -->
+  <path d="M262 150 C 256 108 282 78 330 78 C 326 122 304 150 262 150 Z" fill="#5C9E4F"/>
+  <path d="M300 96 C 288 112 278 128 268 144" fill="none" stroke="#4C8642" stroke-width="6" stroke-linecap="round"/>
+</svg>

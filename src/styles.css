@@ -708,7 +708,9 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .news-section-label { flex: 1; font-size: 13.5px; font-weight: 800; color: var(--text); }
 .news-section-chevron { font-size: 11px; color: var(--muted); }
 .news-list { padding: 0 16px 12px; }
-.news-row { padding: 9px 0; border-top: 1px solid var(--divider); }
+.news-row { display: block; padding: 9px 12px; margin: 0 -12px; border-top: 1px solid var(--divider); color: inherit; text-decoration: none; border-radius: 8px; transition: background 0.12s ease; cursor: pointer; }
+.news-row:hover { background: #f6f0e5; }
+.news-row:hover .news-headline { color: var(--mango, #F5A623); }
 .news-headline { font-size: 14px; font-weight: 700; color: var(--text); line-height: 1.35; }
 .news-summary { font-size: 13px; color: var(--muted-2); line-height: 1.45; margin-top: 2px; }
 .news-source { display: inline-block; font-size: 10.5px; font-weight: 700; color: var(--muted); background: #f1eadd; padding: 1px 8px; border-radius: 20px; margin-top: 5px; }

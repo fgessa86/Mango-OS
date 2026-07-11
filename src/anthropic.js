@@ -242,8 +242,8 @@ const parseJsonArray = (text) => {
 };
 
 // Daily news briefing (Feature 3): one web-search call per section, JSON-only
-// response parsed to [{headline, summary, source}]. Throws on failure so the
-// UI can show a per-section retry without breaking the other sections.
+// response parsed to [{headline, summary, source, url}]. Throws on failure so
+// the UI can show a per-section retry without breaking the other sections.
 export const fetchNewsStories = async (prompt) => {
   const text = await webSearchText(prompt, 1000);
   const arr = parseJsonArray(text);
@@ -251,7 +251,7 @@ export const fetchNewsStories = async (prompt) => {
   return arr
     .filter((s) => s && s.headline)
     .slice(0, 5)
-    .map((s) => ({ headline: String(s.headline), summary: String(s.summary || ""), source: String(s.source || "") }));
+    .map((s) => ({ headline: String(s.headline), summary: String(s.summary || ""), source: String(s.source || ""), url: String(s.url || "") }));
 };
 
 export const summarizeImage = async (base64, prompt) => {
