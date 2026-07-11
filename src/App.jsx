@@ -135,6 +135,57 @@ const formatBytes = (b) => {
   return `${n} B`;
 };
 
+// Outreach Engine vocabularies. outreach_status lives on contacts (default
+// "not_contacted" in the DB); colors follow the spec: gray / yellow / green /
+// blue / purple.
+const OUTREACH_STATUSES = [
+  { id: "not_contacted", label: "Not Contacted", color: "#6B6B7B" },
+  { id: "awaiting_reply", label: "Awaiting Reply", color: "#B77400" },
+  { id: "replied", label: "Replied", color: "#1F8A5B" },
+  { id: "meeting_booked", label: "Meeting Booked", color: "#2A6FDB" },
+  { id: "nurture", label: "Nurture", color: "#8B5CF6" },
+];
+const outreachStatusMeta = (id) => OUTREACH_STATUSES.find((s) => s.id === id) || OUTREACH_STATUSES[0];
+const TEMPLATE_CATEGORIES = [
+  { id: "intro_request", label: "Intro Request", color: "#2A6FDB" },
+  { id: "direct_intro", label: "Direct Intro", color: "#1F8A5B" },
+  { id: "post_meeting", label: "Post-Meeting", color: "#8B5CF6" },
+  { id: "materials", label: "Materials Send", color: "#B77400" },
+  { id: "reengagement", label: "Re-engagement", color: "#E5484D" },
+  { id: "custom", label: "Custom", color: "#6B6B7B" },
+];
+const templateCategoryMeta = (id) => TEMPLATE_CATEGORIES.find((c) => c.id === id) || TEMPLATE_CATEGORIES[TEMPLATE_CATEGORIES.length - 1];
+const MERGE_FIELDS = [
+  ["{first_name}", "the contact's first name"],
+  ["{full_name}", "their full name"],
+  ["{institution}", "their primary institution"],
+  ["{role}", "their role title"],
+  ["{my_note}", "left in place for you to fill in"],
+];
+// Days a contact can sit in awaiting_reply before landing in NEEDS NUDGE.
+const NUDGE_AFTER_DAYS = 5;
+
+// Seeded into email_templates on first load when the table is empty.
+const STARTER_TEMPLATES = [
+  { name: "Intro Request", category: "intro_request", subject: "Quick favor: intro to {full_name}?", body: "Hi {first_name},\n\nHope you're doing well. I noticed you're connected to {full_name} at {institution}. We're working on oncology data partnerships in the Kingdom and I think there could be a strong fit.\n\nWould you be open to making a brief introduction? Happy to send a short blurb you can forward.\n\n{my_note}\n\nBest,\nFahed" },
+  { name: "Direct Intro", category: "direct_intro", subject: "Mango Sciences x {institution}: oncology data partnership", body: "Dear {first_name},\n\nI'm Fahed Al Essa, VP of Commercial at Mango Sciences. We work with cancer centers across the region on real-world oncology data and value-based financing.\n\n{my_note}\n\nWould you have 20 minutes in the coming weeks for a brief introduction?\n\nBest regards,\nFahed Al Essa" },
+  { name: "Post-Meeting Follow-up", category: "post_meeting", subject: "Great speaking today, next steps", body: "Dear {first_name},\n\nThank you for the time today. As discussed, I'm attaching {my_note}.\n\nLooking forward to the next steps we outlined. I'll follow up on the specifics shortly.\n\nBest,\nFahed" },
+  { name: "Materials Send", category: "materials", subject: "Mango Sciences overview for {institution}", body: "Dear {first_name},\n\nAs promised, please find attached our overview materials relevant to {institution}.\n\n{my_note}\n\nHappy to walk through any of this in more detail.\n\nBest,\nFahed" },
+  { name: "Re-engagement", category: "reengagement", subject: "Following up: Mango Sciences x {institution}", body: "Dear {first_name},\n\nI wanted to circle back on my earlier note. I understand things get busy.\n\n{my_note}\n\nWould it make sense to find 15 minutes in the coming weeks?\n\nBest,\nFahed" },
+];
+
+// Replaces merge fields with the contact's data. {my_note} is intentionally
+// left in place as an editable placeholder for the sender to fill in.
+function fillTemplate(text, contact, roles = []) {
+  const primary = roles.find((r) => r.is_primary) || roles[0];
+  const first = (contact?.name || "").trim().split(/\s+/)[0] || "";
+  return (text || "")
+    .replaceAll("{first_name}", first)
+    .replaceAll("{full_name}", contact?.name || "")
+    .replaceAll("{institution}", (primary && primary.institutionName) || contact?.company || "")
+    .replaceAll("{role}", (primary && primary.role_title) || contact?.role || "");
+}
+
 // Daily news briefing sections (Feature 3). Prompts are a fixed contract with
 // fetchNewsStories in anthropic.js (JSON array only).
 const NEWS_SECTIONS = [
@@ -159,6 +210,11 @@ function NavIcon({ shape }) {
   if (shape === "folder") return (
     <span className="nav-icon nav-icon-folder">
       <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M2 4.5A1.5 1.5 0 013.5 3h3l1.5 2h4.5A1.5 1.5 0 0114 6.5v5a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5v-7z" strokeLinejoin="round" /></svg>
+    </span>
+  );
+  if (shape === "send") return (
+    <span className="nav-icon nav-icon-send">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M14 2L7.5 8.5M14 2L9.8 13.6a.4.4 0 01-.75.02L7.5 8.5m6.5-6.5L2.4 6.2a.4.4 0 00-.02.75L7.5 8.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
     </span>
   );
   if (shape === "house") return (
@@ -273,6 +329,8 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
     ...(bossMode ? [] : [{ id: "notes", label: "Notes", shape: "note" }]),
     // Materials are shared collateral: visible in Boss View too (read-only).
     { id: "materials", label: "Materials", shape: "folder" },
+    // Outreach is Fahed's action workflow (compose, nudge): hidden in Boss View.
+    ...(bossMode ? [] : [{ id: "outreach", label: "Outreach", shape: "send" }]),
   ];
   const more = [
     { id: "reports", label: "Reports" },
@@ -801,6 +859,10 @@ export default function App() {
   const [materials, setMaterials] = useState([]);
   const [materialLinks, setMaterialLinks] = useState([]);
   const [meetingBriefs, setMeetingBriefs] = useState([]);
+  const [emailTemplates, setEmailTemplates] = useState([]);
+  // Outreach compose modal: { contactId, templateId } or null. templateId
+  // preselects a template (Draft Nudge opens the Re-engagement one).
+  const [compose, setCompose] = useState(null);
   // Meeting brief viewer / generation state. briefGenerating holds the meeting
   // title while the AI call is in flight (drives a loading modal).
   const [briefViewId, setBriefViewId] = useState(null);
@@ -844,7 +906,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -865,12 +927,13 @@ export default function App() {
         api("materials", "GET", null, "?select=id,name,type,audience,version,file_name,file_size,mime_type,notes,created_at,updated_at&order=created_at.desc").catch(() => []),
         api("material_links", "GET", null, "?select=*&order=created_at.desc").catch(() => []),
         api("meeting_briefs", "GET", null, "?select=*&order=created_at.desc").catch(() => []),
+        api("email_templates", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []);
       setOrganizations(orgs || []); setDealEnablers(de || []); setNetworkEdges(ne || []);
       setCustomOptions(co || []); setContactRoles(cr || []); setBossComments(bc || []); setNotes(nt || []); setNoteFolders(nf || []);
-      setMaterials(mat || []); setMaterialLinks(ml || []); setMeetingBriefs(mb || []);
+      setMaterials(mat || []); setMaterialLinks(ml || []); setMeetingBriefs(mb || []); setEmailTemplates(et || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -1914,6 +1977,95 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Error deleting brief"); }
   };
 
+  // OUTREACH ENGINE.
+  // Seed the 5 starter templates exactly once when the table is empty (never
+  // from Boss View, which must not write).
+  const seededTemplatesRef = useRef(false);
+  useEffect(() => {
+    if (loading || bossMode || emailTemplates.length > 0 || seededTemplatesRef.current) return;
+    seededTemplatesRef.current = true;
+    (async () => {
+      try {
+        const rows = await api("email_templates", "POST", STARTER_TEMPLATES);
+        setEmailTemplates(Array.isArray(rows) ? rows : []);
+      } catch { showToast("Error seeding starter templates"); }
+    })();
+  }, [loading, bossMode, emailTemplates.length]);
+
+  const saveTemplate = async (form, id = null) => {
+    const clean = { name: (form.name || "").trim() || "Untitled Template", category: form.category || "custom", subject: form.subject || "", body: form.body || "" };
+    try {
+      if (id) {
+        const now = new Date().toISOString();
+        await api("email_templates", "PATCH", { ...clean, updated_at: now }, `?id=eq.${id}`);
+        setEmailTemplates((prev) => prev.map((t) => (t.id === id ? { ...t, ...clean, updated_at: now } : t)));
+      } else {
+        const rows = await api("email_templates", "POST", clean);
+        const row = Array.isArray(rows) ? rows[0] : rows;
+        if (row) setEmailTemplates((prev) => [...prev, row]);
+      }
+      savedToast();
+    } catch { showToast("Error saving template"); }
+  };
+  const deleteTemplate = async (id) => {
+    try {
+      await api("email_templates", "DELETE", null, `?id=eq.${id}`);
+      setEmailTemplates((prev) => prev.filter((t) => t.id !== id));
+      showToast("Template deleted");
+    } catch { showToast("Error deleting template"); }
+  };
+
+  // Manual status change (Follow-ups rows + People table). Moving INTO
+  // awaiting_reply stamps the wait clock; other statuses leave timestamps as is.
+  const setOutreachStatus = async (contactId, status) => {
+    const patch = { outreach_status: status };
+    if (status === "awaiting_reply") {
+      const c = contacts.find((x) => x.id === contactId);
+      if (!c || c.outreach_status !== "awaiting_reply") { patch.awaiting_reply_since = new Date().toISOString(); patch.last_outreach_at = patch.awaiting_reply_since; }
+    }
+    try {
+      await api("contacts", "PATCH", patch, `?id=eq.${contactId}`);
+      setContacts((prev) => prev.map((c) => (c.id === contactId ? { ...c, ...patch } : c)));
+    } catch { showToast("Error updating outreach status"); }
+  };
+
+  // After "Open in Gmail" / "Copy to Clipboard": mark awaiting reply and log
+  // the outreach as an email activity. The "Sent outreach:" prefix is the
+  // contract that keeps reply detection from counting our own sends.
+  const recordOutreach = async (contact, subject) => {
+    const now = new Date().toISOString();
+    try {
+      await api("contacts", "PATCH", { outreach_status: "awaiting_reply", last_outreach_at: now, awaiting_reply_since: now, last_contacted_at: now }, `?id=eq.${contact.id}`);
+      await api("activities", "POST", { type: "email", contact_id: contact.id, description: `Sent outreach: ${subject}` });
+      await loadData();
+      showToast("Outreach logged, awaiting reply");
+    } catch { showToast("Error logging outreach"); }
+  };
+
+  // REPLY DETECTION: the Gmail sync logs received emails as type "email" with
+  // the matched contact_id. Any such activity newer than awaiting_reply_since
+  // (and not one of our own "Sent outreach:" rows) flips the contact to
+  // "replied". Ref-guarded so each contact is only patched once per session.
+  const replyCheckedRef = useRef(new Set());
+  useEffect(() => {
+    if (loading || bossMode) return;
+    const repliers = contacts.filter((c) =>
+      c.outreach_status === "awaiting_reply" && c.awaiting_reply_since && !replyCheckedRef.current.has(c.id) &&
+      activities.some((a) => a.type === "email" && a.contact_id === c.id &&
+        !(a.description || "").startsWith("Sent outreach:") &&
+        new Date(a.created_at) > new Date(c.awaiting_reply_since)));
+    if (repliers.length === 0) return;
+    repliers.forEach((c) => replyCheckedRef.current.add(c.id));
+    (async () => {
+      try {
+        await Promise.all(repliers.map((c) => api("contacts", "PATCH", { outreach_status: "replied" }, `?id=eq.${c.id}`)));
+        const ids = new Set(repliers.map((c) => c.id));
+        setContacts((prev) => prev.map((c) => (ids.has(c.id) ? { ...c, outreach_status: "replied" } : c)));
+        showToast(`${repliers.length} contact${repliers.length === 1 ? "" : "s"} replied to your outreach`);
+      } catch { /* retried on next load */ }
+    })();
+  }, [loading, bossMode, contacts, activities]);
+
   // Task/link navigation. Deals open the Pipeline deal sheet; enablers are
   // institutions, so open by name in the Ecosystem institution sheet.
   const openTaskLink = (link) => {
@@ -2089,6 +2241,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     .sort((a, b) => daysAgo(b.last_activity_at) - daysAgo(a.last_activity_at))
     .slice(0, 8);
 
+  // Outreach: contacts awaiting a reply for NUDGE_AFTER_DAYS+ days (drives the
+  // NEEDS NUDGE group and the Home banner).
+  const needsNudgeCount = contacts.filter((c) => c.outreach_status === "awaiting_reply" && c.awaiting_reply_since && daysAgo(c.awaiting_reply_since) >= NUDGE_AFTER_DAYS).length;
+
   if (loading) return <div className="app loading-screen"><div className="loading-text">Loading Mango OS...</div></div>;
 
   return (
@@ -2206,6 +2362,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onAddCustomOption={addCustomOption}
             onUpdate={(patch) => updateContact(sheetContact.id, patch)}
             onDelete={deleteContact}
+            onCompose={() => setCompose({ contactId: sheetContact.id })}
             onAddActivity={addActivity}
             onAddTodo={(form) => saveTodo({ contact_id: sheetContact.id, ...form })}
             todos={todos.filter((t) => t.contact_id === sheetContact.id)}
@@ -2256,6 +2413,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onOpenBrief={setBriefViewId}
           onNewBrief={() => setShowNewBrief(true)}
           briefGenerating={briefGenerating}
+          needsNudgeCount={needsNudgeCount}
+          onOpenOutreach={() => setView("outreach")}
         />
       )}
 
@@ -2342,6 +2501,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onUpdateInstitution={updateInstitution}
             onUpdateInstitutionCity={updateInstitutionCity}
             onUpdateContact={updateContact}
+            onSetOutreach={setOutreachStatus}
             onLinkPersonToInstitution={(contactId, name) => {
               const i = institutions.find((x) => x.name.toLowerCase() === (name || "").toLowerCase());
               const primary = i && institutionPrimaryEntity(i);
@@ -2477,6 +2637,26 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         />
       )}
 
+      {/* OUTREACH ENGINE */}
+      {view === "outreach" && !bossMode && (
+        <OutreachTab
+          contacts={contacts}
+          deals={deals}
+          enablers={enablers}
+          organizations={organizations}
+          dealContacts={dealContacts}
+          enablerContacts={enablerContacts}
+          networkEdges={networkEdges}
+          contactRoles={contactRoles}
+          templates={emailTemplates}
+          onSaveTemplate={saveTemplate}
+          onDeleteTemplate={deleteTemplate}
+          onSetStatus={setOutreachStatus}
+          onCompose={(contactId, templateId = null) => setCompose({ contactId, templateId })}
+          onOpenPerson={openPerson}
+        />
+      )}
+
       {/* REPORTS */}
       {view === "reports" && (
         <div className="section-pad reports">
@@ -2542,6 +2722,23 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         />
       )}
 
+      {/* OUTREACH compose panel (Feature 2) */}
+      {compose && !bossMode && (() => {
+        const composeContact = contacts.find((c) => c.id === compose.contactId);
+        if (!composeContact) return null;
+        return (
+          <ComposeModal
+            contact={composeContact}
+            roles={resolveContactRoles(composeContact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles })}
+            templates={emailTemplates}
+            initialTemplateId={compose.templateId}
+            onSent={(subject) => { setCompose(null); recordOutreach(composeContact, subject); }}
+            showToast={showToast}
+            onClose={() => setCompose(null)}
+          />
+        );
+      })()}
+
       {/* MODALS (creating new records only; hidden in Boss View) */}
       {!bossMode && modal?.type === "deal" && <DealForm deal={modal.data} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveDeal} onClose={() => setModal(null)} />}
       {!bossMode && modal?.type === "contact" && <ContactForm contact={modal.data} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveContact} onClose={() => setModal(null)} />}
@@ -2554,7 +2751,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
@@ -2648,6 +2845,12 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
       {/* 3. Urgent tasks */}
       <div className="home-section">
         <div className="home-section-title">Urgent Tasks</div>
+        {!bossMode && needsNudgeCount > 0 && (
+          <button className="home-nudge-banner" onClick={onOpenOutreach}>
+            {needsNudgeCount} contact{needsNudgeCount === 1 ? "" : "s"} need{needsNudgeCount === 1 ? "s" : ""} a nudge
+            <span className="home-nudge-arrow">→</span>
+          </button>
+        )}
         {urgentTasks.length === 0 ? (
           <div className="home-empty">No urgent tasks. You are all caught up.</div>
         ) : (
@@ -3176,6 +3379,242 @@ function NewBriefForm({ contacts, institutions, onCancel, onCreate }) {
   );
 }
 
+/* ============================================================
+   Outreach Engine (templates, compose, follow-ups)
+   ============================================================ */
+
+function OutreachStatusSelect({ contact, onSetStatus }) {
+  const m = outreachStatusMeta(contact.outreach_status);
+  return (
+    <select
+      className="outreach-status-select"
+      value={contact.outreach_status || "not_contacted"}
+      onChange={(e) => onSetStatus(contact.id, e.target.value)}
+      style={{ color: m.color, borderColor: m.color + "55", background: m.color + "14" }}
+      title="Change outreach status"
+    >
+      {OUTREACH_STATUSES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+    </select>
+  );
+}
+
+// One row on the Follow-ups dashboard.
+function FollowupRow({ contact, institution, daysWaiting, onSetStatus, onOpenPerson, action }) {
+  return (
+    <div className="followup-row">
+      <Avatar name={contact.name} size={32} />
+      <div className="followup-main" onClick={() => onOpenPerson(contact.id)}>
+        <div className="followup-name">{contact.name}</div>
+        <div className="followup-meta">
+          {institution && <span>{institution}</span>}
+          {daysWaiting != null && <span className={daysWaiting >= NUDGE_AFTER_DAYS ? "followup-days overdue" : "followup-days"}>{daysWaiting} day{daysWaiting === 1 ? "" : "s"} waiting</span>}
+          {contact.last_outreach_at && <span>Last outreach {formatDate(contact.last_outreach_at)}</span>}
+        </div>
+      </div>
+      <OutreachStatusSelect contact={contact} onSetStatus={onSetStatus} />
+      {action}
+    </div>
+  );
+}
+
+function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles, templates, onSaveTemplate, onDeleteTemplate, onSetStatus, onCompose, onOpenPerson }) {
+  const [subtab, setSubtab] = useState("followups");
+  const [editingTemplate, setEditingTemplate] = useState(null); // null | "new" | template row
+  const rolesCtx = { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles };
+  const instOf = (c) => {
+    const roles = resolveContactRoles(c, rolesCtx);
+    const primary = roles.find((r) => r.is_primary) || roles[0];
+    return primary ? primary.institutionName : c.company || "";
+  };
+
+  // Grouping. Contacts with a null status count as not_contacted (DB default).
+  const awaitingAll = contacts.filter((c) => c.outreach_status === "awaiting_reply");
+  const needsNudge = awaitingAll.filter((c) => c.awaiting_reply_since && daysAgo(c.awaiting_reply_since) >= NUDGE_AFTER_DAYS);
+  const nudgeIds = new Set(needsNudge.map((c) => c.id));
+  const awaiting = awaitingAll.filter((c) => !nudgeIds.has(c.id));
+  const replied = contacts.filter((c) => c.outreach_status === "replied");
+  // NOT YET CONTACTED: untouched contacts linked to Tier 1 deals or warm/hot.
+  const tier1DealIds = new Set(deals.filter((d) => d.tier === "Tier 1").map((d) => d.id));
+  const tier1ContactIds = new Set([
+    ...dealContacts.filter((dc) => tier1DealIds.has(dc.deal_id)).map((dc) => dc.contact_id),
+    ...contactRoles.filter((r) => r.entity_type === "deal" && tier1DealIds.has(r.entity_id)).map((r) => r.contact_id),
+    ...deals.filter((d) => tier1DealIds.has(d.id) && d.contact_id).map((d) => d.contact_id),
+  ]);
+  const notContacted = contacts.filter((c) =>
+    (!c.outreach_status || c.outreach_status === "not_contacted") &&
+    (tier1ContactIds.has(c.id) || ["warm", "hot"].includes(c.warmth)));
+
+  const reengagement = templates.find((t) => t.category === "reengagement");
+  const byWait = (a, b) => new Date(a.awaiting_reply_since || 0) - new Date(b.awaiting_reply_since || 0);
+
+  const group = (title, tone, list, renderAction, daysOf = null, empty) => (
+    <div className="followup-group">
+      <div className={`followup-group-head tone-${tone}`}>{title} ({list.length})</div>
+      {list.length === 0 ? <div className="empty-small followup-empty">{empty}</div> : (
+        <div className="followup-list">
+          {list.map((c) => (
+            <FollowupRow
+              key={c.id}
+              contact={c}
+              institution={instOf(c)}
+              daysWaiting={daysOf ? daysOf(c) : null}
+              onSetStatus={onSetStatus}
+              onOpenPerson={onOpenPerson}
+              action={renderAction ? renderAction(c) : null}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="section-pad">
+      <div className="page-header" style={{ padding: "0 0 16px" }}>
+        <div>
+          <div className="page-title">Outreach</div>
+          <div className="page-sub">Who to email next, and what to say</div>
+        </div>
+      </div>
+      <div className="network-subtabs">
+        <button className={`subtab ${subtab === "followups" ? "active" : ""}`} onClick={() => setSubtab("followups")}>Follow-ups</button>
+        <button className={`subtab ${subtab === "templates" ? "active" : ""}`} onClick={() => setSubtab("templates")}>Templates</button>
+      </div>
+
+      {subtab === "followups" ? (
+        <>
+          {group("NEEDS NUDGE", "red", [...needsNudge].sort(byWait),
+            (c) => (c.email
+              ? <button className="btn-sec followup-action" onClick={() => onCompose(c.id, reengagement ? reengagement.id : null)}>Draft Nudge</button>
+              : <span className="followup-noemail">No email</span>),
+            (c) => daysAgo(c.awaiting_reply_since),
+            "Nobody is overdue for a nudge.")}
+          {group("AWAITING REPLY", "yellow", [...awaiting].sort(byWait), null,
+            (c) => (c.awaiting_reply_since ? daysAgo(c.awaiting_reply_since) : null),
+            "No open outreach under 5 days.")}
+          {group("RECENTLY REPLIED", "green", replied,
+            null, null, "No replies detected yet.")}
+          {group("NOT YET CONTACTED", "gray", notContacted,
+            (c) => (c.email
+              ? <button className="btn-sec followup-action" onClick={() => onCompose(c.id)}>Compose</button>
+              : <span className="followup-noemail">No email</span>),
+            null, "No untouched Tier 1 or warm contacts.")}
+        </>
+      ) : (
+        <>
+          <div className="ai-summary-header">
+            <div className="section-label">Email Templates</div>
+            <button className="btn-copy" onClick={() => setEditingTemplate("new")}>+ New Template</button>
+          </div>
+          {editingTemplate && (
+            <TemplateEditor
+              template={editingTemplate === "new" ? null : editingTemplate}
+              onSave={async (form) => { await onSaveTemplate(form, editingTemplate === "new" ? null : editingTemplate.id); setEditingTemplate(null); }}
+              onCancel={() => setEditingTemplate(null)}
+            />
+          )}
+          {templates.length === 0 ? (
+            <div className="empty-state">No templates yet.</div>
+          ) : (
+            <div className="template-list">
+              {templates.map((t) => {
+                const cat = templateCategoryMeta(t.category);
+                return (
+                  <div key={t.id} className="template-row" onClick={() => setEditingTemplate(t)}>
+                    <div className="template-main">
+                      <div className="template-name-row">
+                        <span className="template-name">{t.name}</span>
+                        <span className="badge" style={{ background: cat.color + "22", color: cat.color, border: `1px solid ${cat.color}44` }}>{cat.label}</span>
+                      </div>
+                      <div className="template-subject">{t.subject}</div>
+                    </div>
+                    <button className="person-remove" title="Delete template" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete template "${t.name}"?`)) onDeleteTemplate(t.id); }}>✕</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function TemplateEditor({ template, onSave, onCancel }) {
+  const [f, setF] = useState({ name: template?.name || "", category: template?.category || "custom", subject: template?.subject || "", body: template?.body || "" });
+  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  return (
+    <div className="template-editor">
+      <div className="template-editor-row">
+        <input className="input template-editor-name" placeholder="Template name..." value={f.name} onChange={(e) => set("name", e.target.value)} />
+        <select className="input" value={f.category} onChange={(e) => set("category", e.target.value)}>
+          {TEMPLATE_CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+        </select>
+      </div>
+      <input className="input template-editor-subject" placeholder="Subject line..." value={f.subject} onChange={(e) => set("subject", e.target.value)} />
+      <textarea className="input template-editor-body" placeholder="Email body..." value={f.body} onChange={(e) => set("body", e.target.value)} />
+      <div className="merge-legend">
+        Merge fields: {MERGE_FIELDS.map(([token, hint]) => <span key={token} className="merge-chip" title={hint}>{token}</span>)}
+      </div>
+      <div className="task-form-actions">
+        <button className="btn-sec" onClick={onCancel}>Cancel</button>
+        <button className="btn-primary" onClick={() => onSave(f)} disabled={!f.name.trim()}>Save Template</button>
+      </div>
+    </div>
+  );
+}
+
+// Compose panel: pick a template, merge fields fill from the contact, then
+// hand off to Gmail or the clipboard. Either action marks the contact
+// awaiting_reply and logs a "Sent outreach" activity via onSent.
+function ComposeModal({ contact, roles, templates, initialTemplateId, onSent, showToast, onClose }) {
+  const initial = initialTemplateId ? templates.find((t) => t.id === initialTemplateId) : null;
+  const [templateId, setTemplateId] = useState(initial ? initial.id : "");
+  const [subject, setSubject] = useState(initial ? fillTemplate(initial.subject, contact, roles) : "");
+  const [body, setBody] = useState(initial ? fillTemplate(initial.body, contact, roles) : "");
+  const pickTemplate = (id) => {
+    setTemplateId(id);
+    const t = templates.find((x) => x.id === id);
+    if (t) { setSubject(fillTemplate(t.subject, contact, roles)); setBody(fillTemplate(t.body, contact, roles)); }
+  };
+  const hasNotePlaceholder = subject.includes("{my_note}") || body.includes("{my_note}");
+  const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(contact.email || "")}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const openGmail = () => { window.open(gmailUrl, "_blank", "noopener"); onSent(subject); };
+  const copyEmail = () => {
+    navigator.clipboard.writeText(`Subject: ${subject}\n\n${body}`).then(
+      () => { showToast("Email copied to clipboard"); onSent(subject); },
+      () => showToast("Could not copy to clipboard"));
+  };
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal compose-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <div className="modal-title">Compose to {contact.name}</div>
+            <div className="brief-sub">{contact.email}</div>
+          </div>
+          <button className="close-btn" onClick={onClose}>✕</button>
+        </div>
+        <select className="input compose-template-select" value={templateId} onChange={(e) => pickTemplate(e.target.value)}>
+          <option value="">Pick a template...</option>
+          {templates.map((t) => <option key={t.id} value={t.id}>{t.name} ({templateCategoryMeta(t.category).label})</option>)}
+        </select>
+        <label className="label">Subject</label>
+        <input className="input compose-subject" value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Subject..." />
+        <label className="label">Body</label>
+        <textarea className="input compose-body" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Pick a template above, or write from scratch..." />
+        {hasNotePlaceholder && (
+          <div className="compose-note-warning">The <span className="compose-note-token">{"{my_note}"}</span> placeholder is still in this email. Replace it with your personal note before sending.</div>
+        )}
+        <div className="modal-actions compose-actions">
+          <button className="btn-sec" onClick={copyEmail} disabled={!subject.trim() && !body.trim()}>Copy to Clipboard</button>
+          <button className="btn-primary" onClick={openGmail} disabled={!contact.email || (!subject.trim() && !body.trim())}>Open in Gmail</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Resolve a note's single linked entity to { type, entityId, name } or null.
 function noteLinkedEntity(note, { deals, enablers, organizations, contacts }) {
   if (note.deal_id) { const d = deals.find((x) => x.id === note.deal_id); if (d) return { type: "deal", entityId: d.id, name: d.company, kind: "Deal" }; }
@@ -3662,7 +4101,7 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onAddActivity, onAddTodo, todos = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, bossNotesSlot }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onCompose, onAddActivity, onAddTodo, todos = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, bossNotesSlot }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -3744,7 +4183,11 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
               <BadgeSelect options={WARMTH_LEVELS} value={contact.warmth || "unknown"} color={warmth?.color} onChange={(v) => onUpdate({ warmth: v })} dot title="Change warmth" />
             </div>
             <div className="contact-details mb-sm">
-              <div>📧 <InlineText value={contact.email} onSave={(v) => onUpdate({ email: v })} placeholder="Add email" /></div>
+              <div>📧 <InlineText value={contact.email} onSave={(v) => onUpdate({ email: v })} placeholder="Add email" />
+                {contact.email && !readOnly && onCompose && (
+                  <button className="compose-btn" onClick={onCompose} title="Compose email to this contact">✉ Compose Email</button>
+                )}
+              </div>
               <div>📞 <InlineText value={contact.phone} onSave={(v) => onUpdate({ phone: v })} placeholder="Add phone" /></div>
               <div>🔗 <InlineText value={contact.linkedin} onSave={(v) => onUpdate({ linkedin: v })} placeholder="Add LinkedIn" /></div>
             </div>
@@ -5267,7 +5710,7 @@ const NETWORK_SUBTABS = [{ id: "institutions", label: "Institutions" }, { id: "p
 // name-keyed union of deals/enablers/organizations; people are contacts.
 function NetworkTab({
   institutions, contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles,
-  customOptions, onAddCustomOption, onAddInstitution, onAddPersonWithRoles, onUpdateInstitution, onUpdateInstitutionCity, onUpdateContact, onLinkPersonToInstitution, onOpenInstitution, onOpenPerson,
+  customOptions, onAddCustomOption, onAddInstitution, onAddPersonWithRoles, onUpdateInstitution, onUpdateInstitutionCity, onUpdateContact, onSetOutreach, onLinkPersonToInstitution, onOpenInstitution, onOpenPerson,
 }) {
   const [subtab, setSubtab] = useState("institutions");
   const [search, setSearch] = useState("");
@@ -5442,6 +5885,7 @@ function NetworkTab({
               customOptions={customOptions}
               onAddCustomOption={onAddCustomOption}
               onUpdateContact={onUpdateContact}
+              onSetOutreach={onSetOutreach}
               onLinkPersonToInstitution={onLinkPersonToInstitution}
               onOpenPerson={onOpenPerson}
             />
@@ -5495,12 +5939,12 @@ function TableTextCell({ value, onSave, placeholder, colKey, rowIndex, cellRefs,
 }
 
 // Editable, sortable table of people for rapid data entry (LinkedIn especially).
-function PeopleTable({ people, institutionNames, cities, onUpdateContact, onLinkPersonToInstitution, onOpenPerson }) {
+function PeopleTable({ people, institutionNames, cities, onUpdateContact, onSetOutreach, onLinkPersonToInstitution, onOpenPerson }) {
   const readOnly = useReadOnly();
   const [sort, setSort] = useState({ col: "institution", dir: "asc" });
   const cellRefs = useRef({});
   const cityList = Array.from(new Set([...SAUDI_CITIES, ...cities])).sort();
-  const cols = [["name", "Name"], ["role", "Role"], ["institution", "Institution"], ["city", "City"], ["email", "Email"], ["phone", "Phone"], ["linkedin", "LinkedIn"], ["warmth", "Warmth"], ["last", "Last Contacted"]];
+  const cols = [["name", "Name"], ["role", "Role"], ["institution", "Institution"], ["city", "City"], ["email", "Email"], ["phone", "Phone"], ["linkedin", "LinkedIn"], ["warmth", "Warmth"], ["outreach", "Outreach"], ["last", "Last Contacted"]];
 
   const rows = people.map((p) => {
     const primary = p.roles.find((r) => r.is_primary) || p.roles[0];
@@ -5514,6 +5958,7 @@ function PeopleTable({ people, institutionNames, cities, onUpdateContact, onLink
     if (col === "email") return r.contact.email || "";
     if (col === "phone") return r.contact.phone || "";
     if (col === "warmth") return r.contact.warmth || "";
+    if (col === "outreach") return r.contact.outreach_status || "not_contacted";
     if (col === "last") return r.contact.last_contacted_at || "";
     return "";
   };
@@ -5578,6 +6023,19 @@ function PeopleTable({ people, institutionNames, cities, onUpdateContact, onLink
                       {WARMTH_LEVELS.map((w) => <option key={w.id} value={w.id}>{w.label}</option>)}
                     </select>
                   )}
+                </td>
+                <td>
+                  {(() => {
+                    const om = outreachStatusMeta(c.outreach_status);
+                    return readOnly || !onSetOutreach ? (
+                      <span className="badge" style={{ background: om.color + "22", color: om.color, border: `1px solid ${om.color}44` }}>{om.label}</span>
+                    ) : (
+                      <select className="table-cell-select" value={c.outreach_status || "not_contacted"} ref={(el) => { cellRefs.current[`${idx}:outreach`] = el; }}
+                        onChange={(e) => onSetOutreach(c.id, e.target.value)} onKeyDown={(e) => selKey(e, "outreach", idx)} style={{ color: om.color, fontWeight: 700 }}>
+                        {OUTREACH_STATUSES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                      </select>
+                    );
+                  })()}
                 </td>
                 <td className="table-last">{c.last_contacted_at ? formatDate(c.last_contacted_at) : "Never"}</td>
                 <td><button className="table-open-btn" onClick={() => onOpenPerson(c.id)} title="Open profile">↗</button></td>
