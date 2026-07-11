@@ -318,7 +318,7 @@ function MobilePipelineNav({ kanbanRef }) {
 
 // Left sidebar: wordmark, primary nav (geometric icons), a More section for
 // Reports/Boss View, static Saved Views, and a user card pinned to the bottom.
-function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0, bossMode = false }) {
+function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0, bossMode = false, onRefresh }) {
   const nav = [
     { id: "home", label: "Home", shape: "house" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
@@ -393,6 +393,7 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
             </div>
           </div>
           <div className="sidebar-api-calls" title="Anthropic API calls made today (resets at midnight)">API calls today: {apiCallsToday}</div>
+          {onRefresh && <button className="sidebar-refresh" onClick={onRefresh} title="Reload all data from the server">↻ Refresh data</button>}
         </>
       )}
     </aside>
@@ -887,6 +888,8 @@ export default function App() {
   const [institutionSheetKey, setInstitutionSheetKey] = useState(null);
   const [sheetOrigin, setSheetOrigin] = useState("network");
   const [personSheetId, setPersonSheetId] = useState(null);
+  // Sheet navigation history: where each open sheet was navigated from.
+  const [navStack, setNavStack] = useState([]);
   const [customOptions, setCustomOptions] = useState([]);
   const [contactRoles, setContactRoles] = useState([]);
   const [summarizing, setSummarizing] = useState(false);
@@ -940,6 +943,10 @@ export default function App() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  // Manual full reload: writes patch local state (see audit M1), so this is the
+  // explicit way to pull changes made elsewhere (Gmail sync, Andy's browser).
+  const refreshData = async () => { await loadData(); showToast("Data refreshed", 1500); };
+
   // Boss View: ?view=boss loads the FULL app in read-only mode (Andy Liu). Same
   // tabs, sidebar, and data as Fahed; every edit affordance is hidden or disabled.
   const [bossMode] = useState(() => new URLSearchParams(window.location.search).get("view") === "boss");
@@ -964,8 +971,9 @@ export default function App() {
       if (deal_id) clean.deal_id = deal_id;
       if (enabler_id) clean.enabler_id = enabler_id;
       if (organization_id) clean.organization_id = organization_id;
-      await api("boss_comments", "POST", clean);
-      await loadData();
+      const rows = await api("boss_comments", "POST", clean);
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setBossComments((prev) => [row, ...prev]);
     } catch { showToast("Error posting comment"); }
   };
 
@@ -987,8 +995,10 @@ export default function App() {
   // Shows notes from the other person that have not been dismissed yet.
   const unreadBossComments = bossComments.filter((c) => !c.is_read && c.author !== commentAuthor);
   const markCommentRead = async (id) => {
-    try { await api("boss_comments", "PATCH", { is_read: true }, `?id=eq.${id}`); await loadData(); }
-    catch { showToast("Error updating comment"); }
+    try {
+      await api("boss_comments", "PATCH", { is_read: true }, `?id=eq.${id}`);
+      setBossComments((prev) => prev.map((c) => (c.id === id ? { ...c, is_read: true } : c)));
+    } catch { showToast("Error updating comment"); }
   };
 
   // Kick back to the Ecosystem tab if the open person's contact was deleted elsewhere
@@ -1008,8 +1018,9 @@ export default function App() {
     const exists = customOptions.some((o) => o.field_name === fieldName && o.value.toLowerCase() === v.toLowerCase());
     if (exists) return;
     try {
-      await api("custom_options", "POST", { field_name: fieldName, value: v });
-      await loadData();
+      const rows = await api("custom_options", "POST", { field_name: fieldName, value: v });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setCustomOptions((prev) => [...prev, row]);
     } catch { /* non critical, the typed value still works for this session */ }
   };
 
@@ -1043,37 +1054,45 @@ export default function App() {
 
 
   const moveDeal = async (dealId, newStage) => {
+    const now = new Date().toISOString();
     try {
-      await api("deals", "PATCH", { stage: newStage, last_activity_at: new Date().toISOString() }, `?id=eq.${dealId}`);
-      await api("activities", "POST", { deal_id: dealId, type: "note", description: `Moved to ${STAGES.find((s) => s.id === newStage)?.label}` });
-      await loadData();
+      await api("deals", "PATCH", { stage: newStage, last_activity_at: now }, `?id=eq.${dealId}`);
+      const rows = await api("activities", "POST", { deal_id: dealId, type: "note", description: `Moved to ${STAGES.find((s) => s.id === newStage)?.label}` });
+      setDeals((prev) => prev.map((d) => (d.id === dealId ? { ...d, stage: newStage, last_activity_at: now } : d)));
+      const act = Array.isArray(rows) ? rows[0] : rows;
+      if (act) setActivities((prev) => [act, ...prev]);
     } catch { showToast("Error moving deal"); }
   };
 
   const setDealTier = async (dealId, tier) => {
     try {
       await api("deals", "PATCH", { tier: tier || "Untiered" }, `?id=eq.${dealId}`);
-      await loadData(); savedToast();
+      setDeals((prev) => prev.map((d) => (d.id === dealId ? { ...d, tier: tier || "Untiered" } : d)));
+      savedToast();
     } catch { showToast("Error updating tier"); }
   };
 
   // ---- Generic inline-edit PATCH helpers (single-field saves from the sheets) ----
   const updateDeal = async (id, patch) => {
+    const now = new Date().toISOString();
     try {
-      await api("deals", "PATCH", { ...patch, last_activity_at: new Date().toISOString() }, `?id=eq.${id}`);
-      await loadData(); savedToast();
+      await api("deals", "PATCH", { ...patch, last_activity_at: now }, `?id=eq.${id}`);
+      setDeals((prev) => prev.map((d) => (d.id === id ? { ...d, ...patch, last_activity_at: now } : d)));
+      savedToast();
     } catch { showToast("Error saving"); }
   };
   const updateContact = async (id, patch) => {
     try {
       await api("contacts", "PATCH", patch, `?id=eq.${id}`);
-      await loadData(); savedToast();
+      setContacts((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+      savedToast();
     } catch { showToast("Error saving"); }
   };
   const updateEnabler = async (id, patch) => {
     try {
       await api("enablers", "PATCH", patch, `?id=eq.${id}`);
-      await loadData(); savedToast();
+      setEnablers((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+      savedToast();
     } catch { showToast("Error saving"); }
   };
   // Institution-level fields live on the organizations row. A Target-only
@@ -1089,10 +1108,14 @@ export default function App() {
   };
   const updateInstitution = async (inst, patch) => {
     try {
+      const hadOrg = !!inst.orgId;
       const orgId = await ensureOrgId(inst);
       if (!orgId) throw new Error("no org");
       await api("organizations", "PATCH", patch, `?id=eq.${orgId}`);
-      await loadData(); savedToast();
+      // Freshly created org rows need a full reload; simple field edits patch locally.
+      if (hadOrg) setOrganizations((prev) => prev.map((o) => (o.id === orgId ? { ...o, ...patch } : o)));
+      else await loadData();
+      savedToast();
     } catch { showToast("Error saving"); }
   };
   // City lives on every backing row, so keep the organization, deal, and enabler
@@ -1100,11 +1123,17 @@ export default function App() {
   const updateInstitutionCity = async (inst, city) => {
     const c = (city || "").trim() || null;
     try {
+      const hadOrg = !!inst.orgId;
       const orgId = await ensureOrgId(inst);
       if (orgId) await api("organizations", "PATCH", { city: c }, `?id=eq.${orgId}`);
       if (inst.dealId) await api("deals", "PATCH", { city: c }, `?id=eq.${inst.dealId}`);
       if (inst.enablerId) await api("enablers", "PATCH", { city: c }, `?id=eq.${inst.enablerId}`);
-      await loadData(); savedToast();
+      if (hadOrg || !orgId) {
+        setOrganizations((prev) => prev.map((o) => (o.id === orgId ? { ...o, city: c } : o)));
+        setDeals((prev) => prev.map((d) => (d.id === inst.dealId ? { ...d, city: c } : d)));
+        setEnablers((prev) => prev.map((e) => (e.id === inst.enablerId ? { ...e, city: c } : e)));
+      } else await loadData();
+      savedToast();
     } catch { showToast("Error saving"); }
   };
   // Renaming an institution renames every backing row and re-keys the open sheet.
@@ -1116,7 +1145,10 @@ export default function App() {
       if (inst.dealId) await api("deals", "PATCH", { company: name }, `?id=eq.${inst.dealId}`);
       if (inst.enablerId) await api("enablers", "PATCH", { name }, `?id=eq.${inst.enablerId}`);
       if (!inst.orgId && !inst.dealId && !inst.enablerId) return;
-      await loadData(); setInstitutionSheetKey(name.toLowerCase()); savedToast();
+      setOrganizations((prev) => prev.map((o) => (o.id === inst.orgId ? { ...o, name } : o)));
+      setDeals((prev) => prev.map((d) => (d.id === inst.dealId ? { ...d, company: name } : d)));
+      setEnablers((prev) => prev.map((e) => (e.id === inst.enablerId ? { ...e, name } : e)));
+      setInstitutionSheetKey(name.toLowerCase()); savedToast();
     } catch { showToast("Error saving"); }
   };
 
@@ -1622,8 +1654,10 @@ Write a concise status summary covering:
 
 Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the summary; use commas, periods, colons, or parentheses instead.`;
       const summary = await generateSummary(prompt);
-      await api("deals", "PATCH", { ai_summary: summary, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${deal.id}`);
-      await loadData(); showToast("Summary generated");
+      const at = new Date().toISOString();
+      await api("deals", "PATCH", { ai_summary: summary, ai_summary_updated_at: at }, `?id=eq.${deal.id}`);
+      setDeals((prev) => prev.map((r) => (r.id === deal.id ? { ...r, ai_summary: summary, ai_summary_updated_at: at } : r)));
+      showToast("Summary generated");
     } catch { showToast("Error generating summary"); }
     setSummarizing(false);
   };
@@ -1650,8 +1684,10 @@ Write a concise status summary covering:
 
 Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the summary; use commas, periods, colons, or parentheses instead.`;
       const summary = await generateSummary(prompt);
-      await api("enablers", "PATCH", { ai_summary: summary, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${enabler.id}`);
-      await loadData(); showToast("Summary generated");
+      const at = new Date().toISOString();
+      await api("enablers", "PATCH", { ai_summary: summary, ai_summary_updated_at: at }, `?id=eq.${enabler.id}`);
+      setEnablers((prev) => prev.map((r) => (r.id === enabler.id ? { ...r, ai_summary: summary, ai_summary_updated_at: at } : r)));
+      showToast("Summary generated");
     } catch { showToast("Error generating summary"); }
     setSummarizing(false);
   };
@@ -1678,16 +1714,20 @@ Write a concise status summary covering:
 
 Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the summary; use commas, periods, colons, or parentheses instead.`;
       const summary = await generateSummary(prompt);
-      await api("contacts", "PATCH", { ai_summary: summary, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${contact.id}`);
-      await loadData(); showToast("Summary generated");
+      const at = new Date().toISOString();
+      await api("contacts", "PATCH", { ai_summary: summary, ai_summary_updated_at: at }, `?id=eq.${contact.id}`);
+      setContacts((prev) => prev.map((r) => (r.id === contact.id ? { ...r, ai_summary: summary, ai_summary_updated_at: at } : r)));
+      showToast("Summary generated");
     } catch { showToast("Error generating summary"); }
     setSummarizing(false);
   };
 
   const saveContactSummary = async (id, text) => {
     try {
-      await api("contacts", "PATCH", { ai_summary: text, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${id}`);
-      await loadData(); showToast("Summary saved");
+      const at = new Date().toISOString();
+      await api("contacts", "PATCH", { ai_summary: text, ai_summary_updated_at: at }, `?id=eq.${id}`);
+      setContacts((prev) => prev.map((r) => (r.id === id ? { ...r, ai_summary: text, ai_summary_updated_at: at } : r)));
+      showToast("Summary saved");
     } catch { showToast("Error saving summary"); }
   };
 
@@ -1714,30 +1754,38 @@ Write a concise status summary covering:
 
 Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the summary; use commas, periods, colons, or parentheses instead.`;
       const summary = await generateSummary(prompt);
-      await api("organizations", "PATCH", { ai_summary: summary, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${organization.id}`);
-      await loadData(); showToast("Summary generated");
+      const at = new Date().toISOString();
+      await api("organizations", "PATCH", { ai_summary: summary, ai_summary_updated_at: at }, `?id=eq.${organization.id}`);
+      setOrganizations((prev) => prev.map((r) => (r.id === organization.id ? { ...r, ai_summary: summary, ai_summary_updated_at: at } : r)));
+      showToast("Summary generated");
     } catch { showToast("Error generating summary"); }
     setSummarizing(false);
   };
 
   const saveOrganizationSummary = async (id, text) => {
     try {
-      await api("organizations", "PATCH", { ai_summary: text, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${id}`);
-      await loadData(); showToast("Summary saved");
+      const at = new Date().toISOString();
+      await api("organizations", "PATCH", { ai_summary: text, ai_summary_updated_at: at }, `?id=eq.${id}`);
+      setOrganizations((prev) => prev.map((r) => (r.id === id ? { ...r, ai_summary: text, ai_summary_updated_at: at } : r)));
+      showToast("Summary saved");
     } catch { showToast("Error saving summary"); }
   };
 
   const saveDealSummary = async (id, text) => {
     try {
-      await api("deals", "PATCH", { ai_summary: text, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${id}`);
-      await loadData(); showToast("Summary saved");
+      const at = new Date().toISOString();
+      await api("deals", "PATCH", { ai_summary: text, ai_summary_updated_at: at }, `?id=eq.${id}`);
+      setDeals((prev) => prev.map((r) => (r.id === id ? { ...r, ai_summary: text, ai_summary_updated_at: at } : r)));
+      showToast("Summary saved");
     } catch { showToast("Error saving summary"); }
   };
 
   const saveEnablerSummary = async (id, text) => {
     try {
-      await api("enablers", "PATCH", { ai_summary: text, ai_summary_updated_at: new Date().toISOString() }, `?id=eq.${id}`);
-      await loadData(); showToast("Summary saved");
+      const at = new Date().toISOString();
+      await api("enablers", "PATCH", { ai_summary: text, ai_summary_updated_at: at }, `?id=eq.${id}`);
+      setEnablers((prev) => prev.map((r) => (r.id === id ? { ...r, ai_summary: text, ai_summary_updated_at: at } : r)));
+      showToast("Summary saved");
     } catch { showToast("Error saving summary"); }
   };
 
@@ -1752,23 +1800,27 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       if (form.deal_id) clean.deal_id = form.deal_id;
       if (form.enabler_id) clean.enabler_id = form.enabler_id;
       if (form.organization_id) clean.organization_id = form.organization_id;
-      await api("todos", "POST", clean);
-      await loadData(); showToast("To-do added");
+      const rows = await api("todos", "POST", clean);
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setTodos((prev) => [row, ...prev]);
+      showToast("To-do added");
     } catch { showToast("Error adding to-do"); }
   };
 
   const toggleTodo = async (todo) => {
     try {
       const completing = todo.status !== "completed";
-      await api("todos", "PATCH", { status: completing ? "completed" : "open", completed_at: completing ? new Date().toISOString() : null }, `?id=eq.${todo.id}`);
-      await loadData();
+      const patch = { status: completing ? "completed" : "open", completed_at: completing ? new Date().toISOString() : null };
+      await api("todos", "PATCH", patch, `?id=eq.${todo.id}`);
+      setTodos((prev) => prev.map((t) => (t.id === todo.id ? { ...t, ...patch } : t)));
     } catch { showToast("Error updating to-do"); }
   };
 
   const updateTodo = async (id, patch) => {
     try {
       await api("todos", "PATCH", patch, `?id=eq.${id}`);
-      await loadData(); showToast("To-do updated");
+      setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+      showToast("To-do updated");
     } catch { showToast("Error updating to-do"); }
   };
 
@@ -1805,7 +1857,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     if (entity) patch[`${entity.type}_id`] = entity.entityId;
     return updateNote(id, patch);
   };
-  const openNote = (id) => { setSelectedNoteId(id); setView("notes"); };
+  const openNote = (id) => { setSelectedNoteId(id); navigateTab("notes"); };
 
   // NOTE FOLDERS. Simple tree via parent_id; local state is patched on write.
   const createFolder = async (name = "New Folder", parent_id = null) => {
@@ -2056,9 +2108,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const recordOutreach = async (contact, subject) => {
     const now = new Date().toISOString();
     try {
-      await api("contacts", "PATCH", { outreach_status: "awaiting_reply", last_outreach_at: now, awaiting_reply_since: now, last_contacted_at: now }, `?id=eq.${contact.id}`);
-      await api("activities", "POST", { type: "email", contact_id: contact.id, description: `Sent outreach: ${subject}` });
-      await loadData();
+      const patch = { outreach_status: "awaiting_reply", last_outreach_at: now, awaiting_reply_since: now, last_contacted_at: now };
+      await api("contacts", "PATCH", patch, `?id=eq.${contact.id}`);
+      const rows = await api("activities", "POST", { type: "email", contact_id: contact.id, description: `Sent outreach: ${subject}` });
+      setContacts((prev) => prev.map((c) => (c.id === contact.id ? { ...c, ...patch } : c)));
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setActivities((prev) => [row, ...prev]);
       showToast("Outreach logged, awaiting reply");
     } catch { showToast("Error logging outreach"); }
   };
@@ -2098,12 +2153,18 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
   // ACTIVITY
   const addActivity = async (dealId, contactId, activity, enablerId = null, organizationId = null) => {
+    const now = new Date().toISOString();
     try {
-      await api("activities", "POST", { deal_id: dealId, contact_id: contactId, enabler_id: enablerId, organization_id: organizationId, ...activity });
-      if (dealId) await api("deals", "PATCH", { last_activity_at: new Date().toISOString() }, `?id=eq.${dealId}`);
-      if (contactId) await api("contacts", "PATCH", { last_contacted_at: new Date().toISOString() }, `?id=eq.${contactId}`);
-      if (enablerId) await api("enablers", "PATCH", { last_activity_at: new Date().toISOString() }, `?id=eq.${enablerId}`);
-      await loadData(); setModal(null); showToast("Activity logged");
+      const rows = await api("activities", "POST", { deal_id: dealId, contact_id: contactId, enabler_id: enablerId, organization_id: organizationId, ...activity });
+      if (dealId) await api("deals", "PATCH", { last_activity_at: now }, `?id=eq.${dealId}`);
+      if (contactId) await api("contacts", "PATCH", { last_contacted_at: now }, `?id=eq.${contactId}`);
+      if (enablerId) await api("enablers", "PATCH", { last_activity_at: now }, `?id=eq.${enablerId}`);
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setActivities((prev) => [row, ...prev]);
+      if (dealId) setDeals((prev) => prev.map((d) => (d.id === dealId ? { ...d, last_activity_at: now } : d)));
+      if (contactId) setContacts((prev) => prev.map((c) => (c.id === contactId ? { ...c, last_contacted_at: now } : c)));
+      if (enablerId) setEnablers((prev) => prev.map((e) => (e.id === enablerId ? { ...e, last_activity_at: now } : e)));
+      setModal(null); showToast("Activity logged");
     } catch { showToast("Error logging activity"); }
   };
 
@@ -2220,8 +2281,37 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const lastSyncedActivity = activities.find((a) => a.type === "email" || a.type === "meeting");
 
   // NAVIGATION: institutions are keyed by normalized name; people by contact id.
-  const openInstitution = (name, origin = "network") => { if (name) { setInstitutionSheetKey(name.trim().toLowerCase()); setSheetOrigin(origin); setView("institution-sheet"); } };
-  const openPerson = (id) => { setPersonSheetId(id); setView("person-sheet"); };
+  // A history stack records where each sheet was opened from, so Back always
+  // returns to the actual origin (another sheet, Home, Tasks, the Map, etc.).
+  // Switching tabs from the sidebar / tab bar clears the stack.
+  const pushNav = () => setNavStack((s) => [...s.slice(-19), { view, institutionSheetKey, personSheetId, sheetOrigin }]);
+  const openInstitution = (name, origin = null) => {
+    if (!name) return;
+    pushNav();
+    setInstitutionSheetKey(name.trim().toLowerCase());
+    if (origin) setSheetOrigin(origin);
+    setView("institution-sheet");
+  };
+  const openPerson = (id) => { pushNav(); setPersonSheetId(id); setView("person-sheet"); };
+  const goBack = () => {
+    const prev = navStack[navStack.length - 1];
+    setNavStack((s) => s.slice(0, -1));
+    if (!prev) { setView(sheetOrigin === "pipeline" ? "pipeline" : "network"); setInstitutionSheetKey(null); setPersonSheetId(null); return; }
+    setView(prev.view);
+    setInstitutionSheetKey(prev.institutionSheetKey);
+    setPersonSheetId(prev.personSheetId);
+    setSheetOrigin(prev.sheetOrigin);
+  };
+  // Tab-level navigation resets the sheet history.
+  const navigateTab = (v) => { setNavStack([]); setInstitutionSheetKey(null); setPersonSheetId(null); setView(v); };
+  const VIEW_BACK_LABELS = { home: "Home", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports" };
+  const backTarget = navStack[navStack.length - 1];
+  const backLabel = (() => {
+    if (!backTarget) return sheetOrigin === "pipeline" ? "Back to Pipeline" : "Back to Ecosystem";
+    if (backTarget.view === "institution-sheet") { const i = institutions.find((x) => x.key === backTarget.institutionSheetKey); return i ? `Back to ${i.name}` : "Back"; }
+    if (backTarget.view === "person-sheet") { const c = contacts.find((x) => x.id === backTarget.personSheetId); return c ? `Back to ${c.name}` : "Back"; }
+    return `Back to ${VIEW_BACK_LABELS[backTarget.view] || "Ecosystem"}`;
+  })();
 
   // Ref to the Pipeline kanban so the mobile stage nav can scroll-snap columns.
   const kanbanRef = useRef(null);
@@ -2273,7 +2363,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     <div className="app">
       {toast && <div className="toast">{toast}</div>}
 
-      <Sidebar view={view} setView={setView} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} apiCallsToday={apiCallsToday} bossMode={bossMode} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} />
+      <Sidebar view={view} setView={navigateTab} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} apiCallsToday={apiCallsToday} bossMode={bossMode} onRefresh={refreshData} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} />
 
       <main className="main">
 
@@ -2351,8 +2441,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             showToast={showToast}
             onOpenInstitution={openInstitution}
             onOpenPerson={openPerson}
-            backLabel={sheetOrigin === "pipeline" ? "Back to Pipeline" : "Back to Ecosystem"}
-            onBack={() => { setView(sheetOrigin); setInstitutionSheetKey(null); }}
+            backLabel={backLabel}
+            onBack={goBack}
             bossNotesSlot={(() => {
               const tagged = bossComments.filter((c) => (inst.dealId && c.deal_id === inst.dealId) || (inst.enablerId && c.enabler_id === inst.enablerId) || (inst.orgId && c.organization_id === inst.orgId));
               if (!bossMode && tagged.length === 0) return null;
@@ -2404,7 +2494,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             showToast={showToast}
             onOpenInstitution={openInstitution}
             onOpenPerson={openPerson}
-            onBack={() => { setView("network"); setPersonSheetId(null); }}
+            onBack={goBack}
+            backLabel={backLabel}
           />
         ) : null;
       })()}
@@ -2424,19 +2515,20 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onOpenEntity={openEntity}
           isMobile={isMobile}
           bossMode={bossMode}
-          onOpenReports={() => setView("reports")}
+          onOpenReports={() => navigateTab("reports")}
           notes={notes}
           onOpenNote={openNote}
-          onOpenNotesView={() => setView("notes")}
-          onNewNote={async () => { await createNote(); setView("notes"); }}
-          onOpenMaterials={() => setView("materials")}
+          onOpenNotesView={() => navigateTab("notes")}
+          onNewNote={async () => { await createNote(); navigateTab("notes"); }}
+          onOpenMaterials={() => navigateTab("materials")}
           briefs={meetingBriefs}
           onPrepBrief={prepBriefForMeeting}
           onOpenBrief={setBriefViewId}
           onNewBrief={() => setShowNewBrief(true)}
           briefGenerating={briefGenerating}
           needsNudgeCount={needsNudgeCount}
-          onOpenOutreach={() => setView("outreach")}
+          onOpenOutreach={() => navigateTab("outreach")}
+          onRefresh={refreshData}
         />
       )}
 
@@ -2697,7 +2789,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       </main>
 
       {/* Mobile-only bottom tab bar (the sidebar is hidden on phones). */}
-      <MobileTabBar view={view} setView={setView} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} />
+      <MobileTabBar view={view} setView={navigateTab} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} />
 
       {/* Floating two-way comment thread, available on every tab for Fahed and Andy.
           Only Fahed's opens clear the unread marker (the badge is Fahed's). */}
@@ -2771,14 +2863,17 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
     <div className="section-pad home">
       <div className="home-header">
-        <div className="home-greeting">Good {partOfDay}, {greetingName}</div>
-        <div className="home-date">{formatFull(new Date())}</div>
+        <div>
+          <div className="home-greeting">Good {partOfDay}, {greetingName}</div>
+          <div className="home-date">{formatFull(new Date())}</div>
+        </div>
+        {onRefresh && <button className="home-refresh-btn" onClick={onRefresh} title="Reload all data from the server">↻</button>}
       </div>
 
       {/* 1. Unread comments from Andy */}
@@ -4089,7 +4184,7 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onCompose, onAddActivity, onAddTodo, todos = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, bossNotesSlot }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onCompose, onAddActivity, onAddTodo, todos = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -4176,7 +4271,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
 
   return (
     <div className="deal-sheet">
-      <button onClick={onBack} className="sheet-back">← Back to Ecosystem</button>
+      <button onClick={onBack} className="sheet-back">← {backLabel}</button>
 
       <div className="sheet-top">
         <div className="sheet-top-row">
@@ -4338,7 +4433,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
 
       <LinkedNotesSection notes={linkedNotes} onOpenNote={onOpenNote} />
 
-      <QuickAdd contactId={contact.id} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
+      <QuickAdd contactId={contact.id} linkInstitutions={roles.map((r) => ({ key: `${r.entity_type}:${r.entity_id}`, label: r.institutionName, dealId: r.entity_type === "deal" ? r.entity_id : null, enablerId: r.entity_type === "enabler" ? r.entity_id : null, organizationId: r.entity_type === "organization" ? r.entity_id : null }))} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
 
       <div className="timeline">
         <div className="section-label">Activity Timeline</div>
@@ -4416,10 +4511,24 @@ function PeopleSection({ people, activities, contacts, institutionName, customOp
   );
 }
 
-function QuickAdd({ dealId = null, enablerId = null, organizationId = null, contactId, customOptions = [], onAddCustomOption = () => {}, onAddActivity, onCreateTasks, showToast }) {
+// linkPeople (institution sheets) and linkInstitutions (person sheets) power the
+// optional cross-link pickers: an activity logged here can carry BOTH the
+// institution FKs and a contact_id, so it appears on both timelines (audit H1).
+function QuickAdd({ dealId = null, enablerId = null, organizationId = null, contactId, linkPeople = [], linkInstitutions = [], customOptions = [], onAddCustomOption = () => {}, onAddActivity, onCreateTasks, showToast }) {
   const readOnly = useReadOnly();
   const [qType, setQType] = useState("call");
   const [qDesc, setQDesc] = useState("");
+  const [qWith, setQWith] = useState("");
+  const [qAt, setQAt] = useState("");
+  // Effective FK set for this log: the sheet's own entity plus the optional
+  // cross-link selection.
+  const linkedInst = linkInstitutions.find((li) => li.key === qAt) || null;
+  const fkArgs = () => ({
+    dealId: dealId || (linkedInst ? linkedInst.dealId : null),
+    enablerId: enablerId || (linkedInst ? linkedInst.enablerId : null),
+    organizationId: organizationId || (linkedInst ? linkedInst.organizationId : null),
+    contactId: contactId || qWith || null,
+  });
   const [posting, setPosting] = useState(false);
   const [summarizingText, setSummarizingText] = useState(false);
   const [photoFile, setPhotoFile] = useState(null);
@@ -4499,7 +4608,8 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
     if (!summary) { showToast("Summary is empty"); return; }
     setSavingVoice(true);
     try {
-      await onAddActivity(dealId, contactId, { type: "voice_note", description: summary }, enablerId, organizationId);
+      const fk = fkArgs();
+      await onAddActivity(fk.dealId, fk.contactId, { type: "voice_note", description: summary }, fk.enablerId, fk.organizationId);
       if (withTasks && onCreateTasks) {
         const tasks = voiceResult.action_items
           .filter((a) => a.checked && (a.title || "").trim())
@@ -4524,8 +4634,9 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
     if (!text || posting) return;
     setPosting(true);
     try {
-      await onAddActivity(dealId, contactId, { type: qType, description: text }, enablerId, organizationId);
-      setQDesc("");
+      const fk = fkArgs();
+      await onAddActivity(fk.dealId, fk.contactId, { type: qType, description: text }, fk.enablerId, fk.organizationId);
+      setQDesc(""); setQWith(""); setQAt("");
     } finally { setPosting(false); }
   };
 
@@ -4560,7 +4671,8 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
     try {
       const base64 = await fileToJpegBase64(photoFile);
       const text = await summarizeImage(base64, PHOTO_NOTE_PROMPT);
-      await onAddActivity(dealId, contactId, { type: "note", description: text }, enablerId, organizationId);
+      const fk = fkArgs();
+      await onAddActivity(fk.dealId, fk.contactId, { type: "note", description: text }, fk.enablerId, fk.organizationId);
       clearPhoto();
     } catch { showToast("Error processing photo"); }
     setPhotoLoading(false);
@@ -4592,6 +4704,18 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
           value={qType}
           onChange={(v) => { setQType(v); trackCustom("activity_type", optionsWithCustom(ACT_TYPES.map(t => ({ id: t.id, label: `${t.icon} ${t.label}` })), customOptions, "activity_type"), onAddCustomOption)(v); }}
         />
+        {linkPeople.length > 0 && (
+          <select className="input quickadd-link" value={qWith} onChange={(e) => setQWith(e.target.value)} title="Also log this on a person's timeline">
+            <option value="">With person...</option>
+            {linkPeople.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        )}
+        {linkInstitutions.length > 0 && (
+          <select className="input quickadd-link" value={qAt} onChange={(e) => setQAt(e.target.value)} title="Also log this on an institution's timeline">
+            <option value="">At institution...</option>
+            {linkInstitutions.map((li) => <option key={li.key} value={li.key}>{li.label}</option>)}
+          </select>
+        )}
         <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" className="photo-input-hidden" onChange={pickPhoto} />
         <button type="button" onClick={() => fileInputRef.current?.click()} className="btn-sec photo-btn" title="Upload photo of notes">📷</button>
         <button type="button" onClick={micTap} className={`btn-sec voice-mic-btn ${recording ? "recording" : ""}`} title="Record a voice note" disabled={voiceProcessing}>{recording ? "⏹" : "🎤"}</button>
@@ -5496,7 +5620,7 @@ function InstitutionSheet({
 
       <LinkedNotesSection notes={linkedNotes} onOpenNote={onOpenNote} />
 
-      <QuickAdd dealId={inst.dealId} enablerId={inst.enablerId} organizationId={inst.orgId} contactId={null} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
+      <QuickAdd dealId={inst.dealId} enablerId={inst.enablerId} organizationId={inst.orgId} contactId={null} linkPeople={people.map((p) => p.contact)} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
 
       <div className="timeline">
         <div className="section-label">Activity Timeline</div>
