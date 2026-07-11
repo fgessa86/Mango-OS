@@ -2180,6 +2180,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       const c = contacts.find((x) => x.id === contactId);
       if (!c || c.outreach_status !== "awaiting_reply") { patch.awaiting_reply_since = new Date().toISOString(); patch.last_outreach_at = patch.awaiting_reply_since; }
     }
+    // Stamp a reply time so the "Recently Replied" group can age out (H6).
+    if (status === "replied") patch.last_contacted_at = new Date().toISOString();
     try {
       await api("contacts", "PATCH", patch, `?id=eq.${contactId}`);
       setContacts((prev) => prev.map((c) => (c.id === contactId ? { ...c, ...patch } : c)));
@@ -2209,18 +2211,23 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const replyCheckedRef = useRef(new Set());
   useEffect(() => {
     if (loading || bossMode) return;
-    const repliers = contacts.filter((c) =>
-      c.outreach_status === "awaiting_reply" && c.awaiting_reply_since && !replyCheckedRef.current.has(c.id) &&
-      activities.some((a) => a.type === "email" && a.contact_id === c.id &&
+    const repliers = contacts.map((c) => {
+      if (!(c.outreach_status === "awaiting_reply" && c.awaiting_reply_since && !replyCheckedRef.current.has(c.id))) return null;
+      const replyActs = activities.filter((a) => a.type === "email" && a.contact_id === c.id &&
         !(a.description || "").startsWith("Sent outreach:") &&
-        new Date(a.created_at) > new Date(c.awaiting_reply_since)));
+        new Date(a.created_at) > new Date(c.awaiting_reply_since));
+      if (replyActs.length === 0) return null;
+      // Latest reply time drives the Recently Replied recency window (H6).
+      const repliedAt = replyActs.reduce((m, a) => (new Date(a.created_at) > new Date(m) ? a.created_at : m), replyActs[0].created_at);
+      return { contact: c, repliedAt };
+    }).filter(Boolean);
     if (repliers.length === 0) return;
-    repliers.forEach((c) => replyCheckedRef.current.add(c.id));
+    repliers.forEach((r) => replyCheckedRef.current.add(r.contact.id));
     (async () => {
       try {
-        await Promise.all(repliers.map((c) => api("contacts", "PATCH", { outreach_status: "replied" }, `?id=eq.${c.id}`)));
-        const ids = new Set(repliers.map((c) => c.id));
-        setContacts((prev) => prev.map((c) => (ids.has(c.id) ? { ...c, outreach_status: "replied" } : c)));
+        await Promise.all(repliers.map((r) => api("contacts", "PATCH", { outreach_status: "replied", last_contacted_at: r.repliedAt }, `?id=eq.${r.contact.id}`)));
+        const byId = new Map(repliers.map((r) => [r.contact.id, r.repliedAt]));
+        setContacts((prev) => prev.map((c) => (byId.has(c.id) ? { ...c, outreach_status: "replied", last_contacted_at: byId.get(c.id) } : c)));
         showToast(`${repliers.length} contact${repliers.length === 1 ? "" : "s"} replied to your outreach`);
       } catch { /* retried on next load */ }
     })();
@@ -3685,13 +3692,26 @@ function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, e
   const needsNudge = awaitingAll.filter((c) => c.awaiting_reply_since && daysAgo(c.awaiting_reply_since) >= NUDGE_AFTER_DAYS);
   const nudgeIds = new Set(needsNudge.map((c) => c.id));
   const awaiting = awaitingAll.filter((c) => !nudgeIds.has(c.id));
-  const replied = contacts.filter((c) => c.outreach_status === "replied");
-  // NOT YET CONTACTED: untouched contacts linked to Tier 1 deals or warm/hot.
-  const tier1DealIds = new Set(deals.filter((d) => d.tier === "Tier 1").map((d) => d.id));
+  // RECENTLY REPLIED is capped to the last 7 days so it does not grow forever (H6).
+  const replied = contacts.filter((c) => c.outreach_status === "replied" && c.last_contacted_at && daysAgo(c.last_contacted_at) <= 7);
+  // NOT YET CONTACTED: untouched contacts linked to Tier 1 deals or warm/hot. A
+  // Tier 1 deal is on an institution, so people count whether their tie is to
+  // the deal, the institution's organization row, or its enabler row (H6). We
+  // resolve each Tier 1 deal's institution by normalized name to its org/enabler
+  // backing rows, then gather people across every link table plus contacts.company.
+  const norm = (s) => (s || "").trim().toLowerCase();
+  const tier1Deals = deals.filter((d) => d.tier === "Tier 1");
+  const tier1DealIds = new Set(tier1Deals.map((d) => d.id));
+  const tier1Names = new Set(tier1Deals.map((d) => norm(d.company)).filter(Boolean));
+  const tier1OrgIds = new Set(organizations.filter((o) => tier1Names.has(norm(o.name))).map((o) => o.id));
+  const tier1EnablerIds = new Set(enablers.filter((e) => tier1Names.has(norm(e.name))).map((e) => e.id));
   const tier1ContactIds = new Set([
     ...dealContacts.filter((dc) => tier1DealIds.has(dc.deal_id)).map((dc) => dc.contact_id),
-    ...contactRoles.filter((r) => r.entity_type === "deal" && tier1DealIds.has(r.entity_id)).map((r) => r.contact_id),
+    ...enablerContacts.filter((ec) => tier1EnablerIds.has(ec.enabler_id)).map((ec) => ec.contact_id),
+    ...contactRoles.filter((r) => (r.entity_type === "deal" && tier1DealIds.has(r.entity_id)) || (r.entity_type === "organization" && tier1OrgIds.has(r.entity_id)) || (r.entity_type === "enabler" && tier1EnablerIds.has(r.entity_id))).map((r) => r.contact_id),
     ...deals.filter((d) => tier1DealIds.has(d.id) && d.contact_id).map((d) => d.contact_id),
+    ...networkEdges.filter((ne) => ne.source_type === "contact" && ne.target_type === "organization" && tier1OrgIds.has(ne.target_id)).map((ne) => ne.source_id),
+    ...contacts.filter((c) => tier1Names.has(norm(c.company))).map((c) => c.id),
   ]);
   const notContacted = contacts.filter((c) =>
     (!c.outreach_status || c.outreach_status === "not_contacted") &&
