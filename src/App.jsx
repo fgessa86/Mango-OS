@@ -3805,13 +3805,45 @@ function noteLinkedEntity(note, { deals, enablers, organizations, contacts }) {
   return null;
 }
 
-// Flat searchable list of linkable entities (deals, enablers, organizations, people).
+// Dedupes institutions across the deals/enablers/organizations tables by
+// normalized name, so an institution that exists as both an enabler and an
+// organization (or also a deal) shows up ONCE in a picker (audit M2). `prefer`
+// is the order in which a picked entry resolves to a backing record's id/type:
+// organization for org-to-x edges, enabler for enabler-specific tables, deal
+// where a Target's blue pill is most meaningful.
+function dedupeInstitutionOptions({ deals = [], enablers = [], organizations = [], prefer = ["organization", "enabler", "deal"] }) {
+  const byName = new Map();
+  const put = (rawName, kind, row) => {
+    const key = (rawName || "").trim().toLowerCase();
+    if (!key) return;
+    if (!byName.has(key)) byName.set(key, { name: (rawName || "").trim(), deal: null, enabler: null, org: null });
+    byName.get(key)[kind] = row;
+  };
+  organizations.forEach((o) => put(o.name, "org", o));
+  enablers.forEach((e) => put(e.name, "enabler", e));
+  deals.forEach((d) => put(d.company, "deal", d));
+  const pick = (rec) => {
+    for (const p of prefer) {
+      if (p === "deal" && rec.deal) return { type: "deal", id: rec.deal.id };
+      if (p === "enabler" && rec.enabler) return { type: "enabler", id: rec.enabler.id };
+      if (p === "organization" && rec.org) return { type: "organization", id: rec.org.id };
+    }
+    return null;
+  };
+  return [...byName.values()]
+    .map((rec) => { const p = pick(rec); return p ? { value: `${p.type}:${p.id}`, label: rec.name } : null; })
+    .filter(Boolean)
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+// Flat searchable list of linkable entities (deduped institutions plus people).
 function buildNoteEntityOptions({ deals, enablers, organizations, contacts }, query) {
   const q = (query || "").trim().toLowerCase();
+  const KIND = { deal: "Deal", enabler: "Enabler", organization: "Organization" };
+  const instOpts = dedupeInstitutionOptions({ deals, enablers, organizations, prefer: ["deal", "enabler", "organization"] })
+    .map((o) => { const i = o.value.indexOf(":"); const type = o.value.slice(0, i); return { type, entityId: o.value.slice(i + 1), name: o.label, kind: KIND[type] }; });
   const opts = [
-    ...deals.map((d) => ({ type: "deal", entityId: d.id, name: d.company, kind: "Deal" })),
-    ...enablers.map((e) => ({ type: "enabler", entityId: e.id, name: e.name, kind: "Enabler" })),
-    ...organizations.map((o) => ({ type: "organization", entityId: o.id, name: o.name, kind: "Organization" })),
+    ...instOpts,
     ...contacts.map((c) => ({ type: "contact", entityId: c.id, name: c.name, kind: "Person" })),
   ].filter((o) => o.name);
   return q ? opts.filter((o) => o.name.toLowerCase().includes(q)) : opts;
@@ -4499,7 +4531,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
 
       <LinkedNotesSection notes={linkedNotes} onOpenNote={onOpenNote} />
 
-      <QuickAdd contactId={contact.id} linkInstitutions={roles.map((r) => ({ key: `${r.entity_type}:${r.entity_id}`, label: r.institutionName, dealId: r.entity_type === "deal" ? r.entity_id : null, enablerId: r.entity_type === "enabler" ? r.entity_id : null, organizationId: r.entity_type === "organization" ? r.entity_id : null }))} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
+      <QuickAdd contactId={contact.id} linkInstitutions={(() => { const seen = new Set(); return roles.map((r) => ({ key: `${r.entity_type}:${r.entity_id}`, label: r.institutionName, dealId: r.entity_type === "deal" ? r.entity_id : null, enablerId: r.entity_type === "enabler" ? r.entity_id : null, organizationId: r.entity_type === "organization" ? r.entity_id : null })).filter((li) => { const k = (li.label || "").trim().toLowerCase(); if (!k || seen.has(k)) return false; seen.add(k); return true; }); })()} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
 
       <div className="timeline">
         <div className="section-label">Activity Timeline</div>
@@ -4962,10 +4994,9 @@ function TaskForm({ deals = [], enablers = [], organizations = [], contacts = []
   const priorityOpts = optionsWithCustom(PRIORITIES, customOptions, "priority");
 
   const dealOpts = deals.map((d) => ({ value: d.id, label: d.company })).filter((o) => o.label);
-  const instOpts = [
-    ...enablers.map((e) => ({ value: `enabler:${e.id}`, label: e.name })),
-    ...organizations.map((o) => ({ value: `organization:${o.id}`, label: o.name })),
-  ].filter((o) => o.label);
+  // Deals have their own picker, so the Institution picker only dedupes
+  // enablers and organizations (prefer enabler so its gold pill is kept).
+  const instOpts = dedupeInstitutionOptions({ enablers, organizations, prefer: ["enabler", "organization"] });
   const contactOpts = contacts.map((c) => ({ value: c.id, label: c.name })).filter((o) => o.label);
 
   const submit = async () => {
