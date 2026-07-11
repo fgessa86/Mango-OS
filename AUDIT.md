@@ -2,6 +2,17 @@
 
 Date: July 11, 2026. Scope: full codebase read (App.jsx 6,159 lines, MapTab.jsx, anthropic.js, supabase.js, utils.js, constants.js, gmail-sync-updated.js, styles.css), live database integrity checks against the shared Supabase project, and a 375px browser sweep with request tracing. No fixes applied; findings only.
 
+## Fix status (July 11, 2026, same day)
+
+Fixed and verified, one commit per batch:
+
+- **Batch 1 (49626ce): C1, C2 FIXED.** All delete/archive paths cascade to notes, material_links, meeting_briefs, boss_comments, network_edges, and denormalized deal/enabler contact copies; contact deletion nulls activity references and sweeps fully-orphaned activities. persistContact dual-writes contact_roles + legacy. Production repaired: divergent row backfilled, orphaned activity removed, all integrity checks zero.
+- **Batch 2 (559db05): C3 FIXED.** Tags, source, and an Internal Team toggle are inline on Person Sheets (internal drives Map nodes, verified); deal value/next action and region inline on Institution Sheets; dead ContactForm/InstitutionEditModal removed.
+- **Batch 3 (6d9e019): H1, H3, M1 FIXED.** Quick Add cross-link pickers write both institution FKs and contact_id (verified in DB); Back uses a navigation history stack with contextual labels (verified Home > institution > person round trip); high-frequency writes patch local state, measured 1 request per checkbox toggle (was 20), manual Refresh in sidebar and Home.
+- **Batch 4 (de88261): H2, H4, H5 FIXED.** Cmd+K global search over institutions/people/activities/tasks/notes/materials with grouped, navigable results (verified the NUPCO journey); Outreach is the fifth mobile tab; boss comment composer attaches files (2MB cap).
+
+Still open: H6, H7, M2 through M11, L1 through L10.
+
 Legend: each finding has an ID (C/H/M/L + number) for referencing during fix work.
 
 ---
