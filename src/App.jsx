@@ -1130,6 +1130,29 @@ export default function App() {
       savedToast();
     } catch { showToast("Error saving"); }
   };
+  // People-table Role cell: reads and writes the SAME source. If the contact has
+  // a real contact_roles entry, its primary role_title is the source of truth
+  // (keep the legacy junction copy in sync). Only when there is no contact_roles
+  // entry do we fall back to contacts.role for both read and write (audit M7).
+  const updateRoleTitle = async (contact, primaryRole, rawValue) => {
+    const title = (rawValue || "").trim() || null;
+    if (!(primaryRole && primaryRole.removable && primaryRole.id)) {
+      await updateContact(contact.id, { role: title });
+      return;
+    }
+    try {
+      await api("contact_roles", "PATCH", { role_title: title }, `?id=eq.${primaryRole.id}`);
+      if (primaryRole.entity_type === "deal") {
+        await api("deal_contacts", "PATCH", { role_in_deal: title }, `?deal_id=eq.${primaryRole.entity_id}&contact_id=eq.${contact.id}`).catch(() => {});
+      } else if (primaryRole.entity_type === "enabler") {
+        await api("enabler_contacts", "PATCH", { role_in_org: title }, `?enabler_id=eq.${primaryRole.entity_id}&contact_id=eq.${contact.id}`).catch(() => {});
+      } else if (primaryRole.entity_type === "organization") {
+        await api("network_edges", "PATCH", { notes: title }, `?source_type=eq.contact&source_id=eq.${contact.id}&target_type=eq.organization&target_id=eq.${primaryRole.entity_id}`).catch(() => {});
+      }
+      setContactRoles((prev) => prev.map((r) => (r.id === primaryRole.id ? { ...r, role_title: title } : r)));
+      savedToast();
+    } catch { showToast("Error saving"); }
+  };
   const updateEnabler = async (id, patch) => {
     try {
       await api("enablers", "PATCH", patch, `?id=eq.${id}`);
@@ -2671,6 +2694,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onUpdateInstitution={updateInstitution}
             onUpdateInstitutionCity={updateInstitutionCity}
             onUpdateContact={updateContact}
+            onUpdateRoleTitle={updateRoleTitle}
             onSetOutreach={setOutreachStatus}
             onLinkPersonToInstitution={(contactId, name) => {
               const i = institutions.find((x) => x.name.toLowerCase() === (name || "").toLowerCase());
@@ -5938,7 +5962,7 @@ const NETWORK_SUBTABS = [{ id: "institutions", label: "Institutions" }, { id: "p
 // name-keyed union of deals/enablers/organizations; people are contacts.
 function NetworkTab({
   institutions, contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles,
-  customOptions, onAddCustomOption, onAddInstitution, onAddPersonWithRoles, onUpdateInstitution, onUpdateInstitutionCity, onUpdateContact, onSetOutreach, onLinkPersonToInstitution, onOpenInstitution, onOpenPerson,
+  customOptions, onAddCustomOption, onAddInstitution, onAddPersonWithRoles, onUpdateInstitution, onUpdateInstitutionCity, onUpdateContact, onUpdateRoleTitle, onSetOutreach, onLinkPersonToInstitution, onOpenInstitution, onOpenPerson,
 }) {
   const [subtab, setSubtab] = useState("institutions");
   const [search, setSearch] = useState("");
@@ -6113,6 +6137,7 @@ function NetworkTab({
               customOptions={customOptions}
               onAddCustomOption={onAddCustomOption}
               onUpdateContact={onUpdateContact}
+              onUpdateRoleTitle={onUpdateRoleTitle}
               onSetOutreach={onSetOutreach}
               onLinkPersonToInstitution={onLinkPersonToInstitution}
               onOpenPerson={onOpenPerson}
@@ -6167,7 +6192,7 @@ function TableTextCell({ value, onSave, placeholder, colKey, rowIndex, cellRefs,
 }
 
 // Editable, sortable table of people for rapid data entry (LinkedIn especially).
-function PeopleTable({ people, institutionNames, cities, onUpdateContact, onSetOutreach, onLinkPersonToInstitution, onOpenPerson }) {
+function PeopleTable({ people, institutionNames, cities, onUpdateContact, onUpdateRoleTitle, onSetOutreach, onLinkPersonToInstitution, onOpenPerson }) {
   const readOnly = useReadOnly();
   const [sort, setSort] = useState({ col: "institution", dir: "asc" });
   const cellRefs = useRef({});
@@ -6176,7 +6201,11 @@ function PeopleTable({ people, institutionNames, cities, onUpdateContact, onSetO
 
   const rows = people.map((p) => {
     const primary = p.roles.find((r) => r.is_primary) || p.roles[0];
-    return { contact: p.contact, institution: primary ? primary.institutionName : "", roleTitle: p.contact.role || (primary ? primary.role_title : "") || "", extraRoles: Math.max(0, p.roles.length - 1) };
+    // Source of truth for the Role cell is the primary real contact_roles entry
+    // (removable). Only fall back to contacts.role when there is none (audit M7).
+    const primaryRole = p.roles.find((r) => r.removable && r.is_primary) || p.roles.find((r) => r.removable) || null;
+    const roleTitle = primaryRole ? (primaryRole.role_title || "") : (p.contact.role || (primary ? primary.role_title : "") || "");
+    return { contact: p.contact, institution: primary ? primary.institutionName : "", roleTitle, primaryRole, extraRoles: Math.max(0, p.roles.length - 1) };
   });
   const val = (r, col) => {
     if (col === "name") return r.contact.name || "";
@@ -6222,7 +6251,7 @@ function PeopleTable({ people, institutionNames, cities, onUpdateContact, onSetO
             return (
               <tr key={c.id}>
                 <td>{text(c, "name", idx, "Name")}</td>
-                <td className="table-role-cell">{text({ ...c, role: r.roleTitle }, "role", idx, "Role")}{r.extraRoles > 0 && <span className="table-more-roles" title="Has more roles">+{r.extraRoles}</span>}</td>
+                <td className="table-role-cell"><TableTextCell colKey="role" rowIndex={idx} cellRefs={cellRefs} placeholder="Role" value={r.roleTitle} onSave={(v) => onUpdateRoleTitle(r.contact, r.primaryRole, v)} onNext={() => focusCell("role", idx + 1)} />{r.extraRoles > 0 && <span className="table-more-roles" title="Has more roles">+{r.extraRoles}</span>}</td>
                 <td>
                   {readOnly ? <span className="table-cell-ro">{r.institution}</span> : (
                     <select className="table-cell-select" value={r.institution} ref={(el) => { cellRefs.current[`${idx}:institution`] = el; }}
