@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, createContext, useContext } f
 import { api } from "./supabase";
 import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
-import { formatDate, formatDateTime, formatFull, daysAgo, isToday, isThisWeek, isOverdue, FATHOM_MARKER, isFathomActivity, stripFathomMarker } from "./utils";
+import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, FATHOM_MARKER, isFathomActivity, stripFathomMarker } from "./utils";
 import MapTab from "./MapTab";
 import "./styles.css";
 
@@ -226,6 +226,11 @@ function NavIcon({ shape }) {
       <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M2 7.3L8 2.4l6 4.9M3.2 6.6V13h9.6V6.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
     </span>
   );
+  if (shape === "calendar") return (
+    <span className="nav-icon nav-icon-calendar">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="2.5" y="3.5" width="11" height="10" rx="1.5" /><path d="M2.5 6.5h11M5.5 2v3M10.5 2v3" strokeLinecap="round" /></svg>
+    </span>
+  );
   return null;
 }
 
@@ -330,6 +335,7 @@ function MobilePipelineNav({ kanbanRef }) {
 function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0, bossMode = false, onRefresh, onOpenSearch, lastSynced }) {
   const nav = [
     { id: "home", label: "Home", shape: "house" },
+    { id: "calendar", label: "Calendar", shape: "calendar" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Ecosystem", shape: "circle" },
     { id: "map", label: "Network Map", shape: "diamond" },
@@ -874,6 +880,7 @@ export default function App() {
   const [materialLinks, setMaterialLinks] = useState([]);
   const [meetingBriefs, setMeetingBriefs] = useState([]);
   const [emailTemplates, setEmailTemplates] = useState([]);
+  const [calendarEvents, setCalendarEvents] = useState([]);
   // Outreach compose modal: { contactId, templateId } or null. templateId
   // preselects a template (Draft Nudge opens the Re-engagement one).
   const [compose, setCompose] = useState(null);
@@ -924,7 +931,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -946,12 +953,13 @@ export default function App() {
         api("material_links", "GET", null, "?select=*&order=created_at.desc").catch(() => []),
         api("meeting_briefs", "GET", null, "?select=*&order=created_at.desc").catch(() => []),
         api("email_templates", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
+        api("calendar_events", "GET", null, "?select=*&order=start_time.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []);
       setOrganizations(orgs || []); setDealEnablers(de || []); setNetworkEdges(ne || []);
       setCustomOptions(co || []); setContactRoles(cr || []); setBossComments(bc || []); setNotes(nt || []); setNoteFolders(nf || []);
-      setMaterials(mat || []); setMaterialLinks(ml || []); setMeetingBriefs(mb || []); setEmailTemplates(et || []);
+      setMaterials(mat || []); setMaterialLinks(ml || []); setMeetingBriefs(mb || []); setEmailTemplates(et || []); setCalendarEvents(cal || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -961,6 +969,21 @@ export default function App() {
   // Manual full reload: writes patch local state (see audit M1), so this is the
   // explicit way to pull changes made elsewhere (Gmail sync, Andy's browser).
   const refreshData = async () => { await loadData(); showToast("Data refreshed", 1500); };
+
+  // Re-reads only calendar_events from Supabase (the actual Google Calendar sync
+  // runs hourly via the Apps Script; this just pulls whatever it last wrote).
+  const refreshCalendar = async () => {
+    try {
+      const rows = await api("calendar_events", "GET", null, "?select=*&order=start_time.asc");
+      setCalendarEvents(rows || []);
+      showToast("Calendar refreshed", 1500);
+    } catch { showToast("Could not refresh calendar"); }
+  };
+
+  // A calendar event carries matched_* FKs; entityName/openEntity/generateBrief
+  // all expect the deal_id/enabler_id/organization_id/contact_id shape, so shim it.
+  const eventEntityRow = (ev) => ({ contact_id: ev.matched_contact_id, deal_id: ev.matched_deal_id, enabler_id: ev.matched_enabler_id, organization_id: ev.matched_organization_id });
+  const eventIsMatched = (ev) => !!(ev.matched_contact_id || ev.matched_deal_id || ev.matched_enabler_id || ev.matched_organization_id);
 
   // Cmd+K / Ctrl+K opens global search from anywhere.
   useEffect(() => {
@@ -2115,6 +2138,29 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     generateBrief({ meeting_title: title, meeting_date: a.created_at, contact_id: a.contact_id, deal_id: a.deal_id, enabler_id: a.enabler_id, organization_id: a.organization_id });
   };
 
+  // "Prep Brief" from a calendar event: reuse an existing brief with the same
+  // title on the same day, else generate one from the event's matched entity.
+  const prepBriefForEvent = (ev) => {
+    const title = ev.title || "Meeting";
+    const day = ev.start_time ? new Date(ev.start_time).toDateString() : null;
+    const existing = meetingBriefs.find((b) => b.meeting_title === title && b.meeting_date && new Date(b.meeting_date).toDateString() === day);
+    if (existing) { setBriefViewId(existing.id); return; }
+    generateBrief({ meeting_title: title, meeting_date: ev.start_time, contact_id: ev.matched_contact_id, deal_id: ev.matched_deal_id, enabler_id: ev.matched_enabler_id, organization_id: ev.matched_organization_id });
+  };
+
+  // Manually associate an unmatched calendar event with a contact or institution.
+  // `pick` is { type: "contact"|"deal"|"enabler"|"organization", id }. Clears the
+  // other matched_* columns so an event links to exactly one entity at a time.
+  const linkCalendarEvent = async (eventId, pick) => {
+    const patch = { matched_contact_id: null, matched_deal_id: null, matched_enabler_id: null, matched_organization_id: null };
+    if (pick) patch[`matched_${pick.type}_id`] = pick.id;
+    try {
+      await api("calendar_events", "PATCH", patch, `?id=eq.${eventId}`);
+      setCalendarEvents((prev) => prev.map((e) => (e.id === eventId ? { ...e, ...patch } : e)));
+      savedToast();
+    } catch { showToast("Error linking event"); }
+  };
+
   const updateBriefGoal = async (id, goal) => {
     try {
       await api("meeting_briefs", "PATCH", { my_goal: goal || null }, `?id=eq.${id}`);
@@ -2402,7 +2448,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   useEffect(() => {
     if (bossMode && (view === "outreach" || view === "notes")) setView("home");
   }, [bossMode, view]);
-  const VIEW_BACK_LABELS = { home: "Home", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports" };
+  const VIEW_BACK_LABELS = { home: "Home", calendar: "Calendar", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports" };
   const backTarget = navStack[navStack.length - 1];
   const backLabel = (() => {
     if (!backTarget) return sheetOrigin === "pipeline" ? "Back to Pipeline" : "Back to Ecosystem";
@@ -2435,7 +2481,22 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   };
 
   // Command Center derived lists.
-  const homeMeetings = activities.filter((a) => a.type === "meeting" && isToday(a.created_at));
+  // Today's Agenda reads from calendar_events (Google Calendar via Apps Script),
+  // showing events whose start_time is today, ordered by start time.
+  const homeMeetings = calendarEvents
+    .filter((ev) => ev.start_time && isToday(ev.start_time))
+    .sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+  // "Last synced" = the most recent time the Apps Script wrote an event row.
+  const calendarLastSynced = (() => {
+    const times = calendarEvents.map((e) => e.updated_at).filter(Boolean).sort();
+    return times.length ? formatDateTime(times[times.length - 1]) : null;
+  })();
+  // Options for manually linking an unmatched event: deduped institutions
+  // (deal/enabler/organization, most-specific record) plus every contact.
+  const calendarLinkOptions = [
+    ...dedupeInstitutionOptions({ deals, enablers, organizations, prefer: ["deal", "enabler", "organization"] }),
+    ...contacts.map((c) => ({ value: `contact:${c.id}`, label: c.name })).filter((o) => o.label),
+  ];
   const urgencyRank = (t) => (isOverdue(t.due_date) ? 0 : (t.due_date && isToday(t.due_date)) ? 1 : t.priority === "high" ? 2 : 3);
   const urgentTasks = openTodos.slice().sort((a, b) => {
     const u = urgencyRank(a) - urgencyRank(b);
@@ -2606,6 +2667,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onMarkRead={markCommentRead}
           commentTargetName={commentTargetName}
           meetings={homeMeetings}
+          eventEntityRow={eventEntityRow}
+          onPrepBriefEvent={prepBriefForEvent}
+          onOpenCalendar={() => navigateTab("calendar")}
           urgentTasks={urgentTasks}
           onToggleTodo={toggleTodo}
           recentActivities={recentActivities}
@@ -2629,6 +2693,22 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onOpenOutreach={() => navigateTab("outreach")}
           onRefresh={refreshData}
           onOpenSearch={() => setSearchOpen(true)}
+        />
+      )}
+
+      {/* CALENDAR */}
+      {view === "calendar" && (
+        <CalendarTab
+          events={calendarEvents}
+          entityName={entityName}
+          eventEntityRow={eventEntityRow}
+          onOpenEntity={openEntity}
+          onPrepBrief={prepBriefForEvent}
+          onLink={linkCalendarEvent}
+          linkOptions={calendarLinkOptions}
+          onRefresh={refreshCalendar}
+          lastSynced={calendarLastSynced}
+          briefGenerating={briefGenerating}
         />
       )}
 
@@ -2991,7 +3071,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, urgentTasks, onToggleTodo, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, onPrepBriefEvent, onOpenCalendar, urgentTasks, onToggleTodo, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
@@ -3035,25 +3115,35 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
         )}
       </div>
 
-      {/* 2. Today's agenda (meetings) */}
+      {/* 2. Today's agenda (from Google Calendar via calendar_events) */}
       <div className="home-section">
-        <div className="home-section-title">Today's Agenda</div>
+        <div className="home-section-head">
+          <div className="home-section-title">Today's Agenda</div>
+          {onOpenCalendar && <button className="home-section-action" onClick={onOpenCalendar}>Open Calendar</button>}
+        </div>
         {meetings.length === 0 ? (
-          <div className="home-empty">No meetings synced today. Check Google Calendar sync.</div>
+          <div className="home-empty">No events on your calendar today. Check the Google Calendar sync.</div>
         ) : (
           <div className="home-list">
-            {meetings.map((a) => (
-              <div key={a.id} className="home-card home-meeting" onClick={() => onOpenEntity(a)}>
-                <div className="home-meeting-time">{formatDateTime(a.created_at)}</div>
-                <div className="home-meeting-main">
-                  <div className="home-meeting-title">{firstLine(stripFathomMarker(a.description)) || "Meeting"}</div>
-                  {entityName(a) && <div className="home-meeting-sub">{entityName(a)}</div>}
+            {meetings.map((ev) => {
+              const entRow = eventEntityRow ? eventEntityRow(ev) : null;
+              const ent = entRow ? entityName(entRow) : "";
+              return (
+                <div key={ev.id} className={`home-card home-meeting ${ent ? "home-task-clickable" : ""}`} onClick={ent ? () => onOpenEntity(entRow) : undefined}>
+                  <div className="home-meeting-time">{formatTime(ev.start_time)}</div>
+                  <div className="home-meeting-main">
+                    <div className="home-meeting-title">{ev.title || "Untitled event"}</div>
+                    <div className="home-meeting-sub">
+                      {ev.location && <span>{ev.location}</span>}
+                      {ent && <span className="home-meeting-entity">{ent}</span>}
+                    </div>
+                  </div>
+                  {!bossMode && onPrepBriefEvent && ent && (
+                    <button className="home-prep-btn" disabled={!!briefGenerating} onClick={(e) => { e.stopPropagation(); onPrepBriefEvent(ev); }}>Prep Brief</button>
+                  )}
                 </div>
-                {!bossMode && onPrepBrief && (
-                  <button className="home-prep-btn" disabled={!!briefGenerating} onClick={(e) => { e.stopPropagation(); onPrepBrief(a); }}>Prep Brief</button>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -3338,6 +3428,179 @@ function DailyBriefing({ isMobile, bossMode = false }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/* ============================================================
+   Calendar (Feature: Google Calendar via calendar_events)
+   ============================================================ */
+
+// Pill class by which matched_* FK an event carries (blue deal, gold enabler,
+// green contact, gray organization), matching the TaskPills color language.
+const eventMatchClass = (ev) => ev.matched_deal_id ? "task-pill-deal" : ev.matched_enabler_id ? "task-pill-enabler" : ev.matched_contact_id ? "task-pill-contact" : ev.matched_organization_id ? "task-pill-organization" : "";
+const eventMatchPickType = (ev) => ev.matched_deal_id ? "deal" : ev.matched_enabler_id ? "enabler" : ev.matched_contact_id ? "contact" : ev.matched_organization_id ? "organization" : null;
+
+// A day header label: Today / Tomorrow / weekday, month day.
+const agendaDayLabel = (d) => {
+  const date = new Date(d);
+  const t = new Date(); t.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(t); tomorrow.setDate(t.getDate() + 1);
+  if (isSameDay(date, t)) return "Today";
+  if (isSameDay(date, tomorrow)) return "Tomorrow";
+  return date.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+};
+
+const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
+// Monday-based start of the week containing `d`.
+const startOfWeek = (d) => { const x = startOfDay(d); const day = (x.getDay() + 6) % 7; x.setDate(x.getDate() - day); return x; };
+
+// One event row shared by Agenda and the Week popover: time, title, location,
+// attendees, matched-entity pill, and a Prep Brief / Link action.
+function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, briefGenerating, readOnly, compact = false }) {
+  const [linking, setLinking] = useState(false);
+  const entRow = eventEntityRow(ev);
+  const ent = entityName(entRow);
+  const matched = eventMatchPickType(ev);
+  const attendees = Array.isArray(ev.attendees) ? ev.attendees.filter(Boolean) : [];
+  return (
+    <div className={`cal-event ${compact ? "cal-event-compact" : ""}`}>
+      <div className="cal-event-time">{formatTime(ev.start_time)}{ev.end_time ? ` - ${formatTime(ev.end_time)}` : ""}</div>
+      <div className="cal-event-body">
+        <div className="cal-event-title">{ev.title || "Untitled event"}</div>
+        {ev.location && <div className="cal-event-loc">📍 {ev.location}</div>}
+        {attendees.length > 0 && <div className="cal-event-attendees">{attendees.slice(0, 5).join(", ")}{attendees.length > 5 ? ` +${attendees.length - 5}` : ""}</div>}
+        <div className="cal-event-actions">
+          {matched && ent && (
+            <button className={`task-pill ${eventMatchClass(ev)}`} onClick={() => onOpenEntity(entRow)} title={`Open ${ent}`}>{ent}</button>
+          )}
+          {!readOnly && matched && ent && (
+            <button className="cal-prep-btn" disabled={!!briefGenerating} onClick={() => onPrepBrief(ev)}>Prep Brief</button>
+          )}
+          {!readOnly && !matched && (
+            linking ? (
+              <EntityPicker placeholder="Link to contact or institution..." options={linkOptions} value="" onChange={(val) => { const i = val.indexOf(":"); onLink(ev.id, { type: val.slice(0, i), id: val.slice(i + 1) }); setLinking(false); }} />
+            ) : (
+              <button className="cal-link-btn" onClick={() => setLinking(true)}>Link to entity</button>
+            )
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Full-screen Calendar view: Agenda (default) or Week, plus a refresh + last-synced.
+function CalendarTab({ events, entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, onRefresh, lastSynced, briefGenerating }) {
+  const readOnly = useReadOnly();
+  const [mode, setMode] = useState("agenda");
+  const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
+  const [popoverEvent, setPopoverEvent] = useState(null);
+
+  const today0 = startOfDay(new Date());
+  const twoDaysAgo = new Date(today0); twoDaysAgo.setDate(today0.getDate() - 2);
+  const sorted = [...events].filter((e) => e.start_time).sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+  const recent = sorted.filter((e) => { const t = new Date(e.start_time); return t < today0 && t >= twoDaysAgo; }).reverse();
+  const upcoming = sorted.filter((e) => new Date(e.start_time) >= today0);
+
+  // Group upcoming by calendar day.
+  const dayGroups = [];
+  upcoming.forEach((e) => {
+    const key = new Date(e.start_time).toDateString();
+    let g = dayGroups.find((x) => x.key === key);
+    if (!g) { g = { key, date: e.start_time, items: [] }; dayGroups.push(g); }
+    g.items.push(e);
+  });
+
+  const [recentOpen, setRecentOpen] = useState(false);
+  const rowProps = { entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, briefGenerating, readOnly };
+
+  // Week grid days and their events.
+  const weekDays = Array.from({ length: 7 }, (_, i) => { const d = new Date(weekStart); d.setDate(weekStart.getDate() + i); return d; });
+  const eventsForDay = (d) => sorted.filter((e) => isSameDay(e.start_time, d));
+  const weekLabel = `${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${weekDays[6].toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+
+  return (
+    <div className="section-pad calendar-tab">
+      <div className="page-header">
+        <div>
+          <div className="page-title">Calendar</div>
+          <div className="page-sub">Your Google Calendar, synced hourly</div>
+        </div>
+        <div className="calendar-head-actions">
+          <div className="calendar-mode-toggle">
+            <button className={mode === "agenda" ? "active" : ""} onClick={() => setMode("agenda")}>Agenda</button>
+            <button className={mode === "week" ? "active" : ""} onClick={() => setMode("week")}>Week</button>
+          </div>
+          {lastSynced && <span className="calendar-synced">Last synced {lastSynced}</span>}
+          <button className="btn-sec calendar-refresh" onClick={onRefresh} title="Re-read events from the database">↻ Refresh</button>
+        </div>
+      </div>
+
+      {events.length === 0 ? (
+        <div className="empty-state">No calendar events yet. The Google Calendar sync (Apps Script) populates these hourly; use Refresh to re-check.</div>
+      ) : mode === "agenda" ? (
+        <div className="calendar-agenda">
+          {recent.length > 0 && (
+            <div className="cal-recent">
+              <button className="cal-recent-head" onClick={() => setRecentOpen((o) => !o)}>{recentOpen ? "▾" : "▸"} Recent ({recent.length})</button>
+              {recentOpen && <div className="cal-day-events">{recent.map((e) => <CalendarEventRow key={e.id} ev={e} {...rowProps} />)}</div>}
+            </div>
+          )}
+          {dayGroups.length === 0 ? (
+            <div className="home-empty">No upcoming events.</div>
+          ) : dayGroups.map((g) => (
+            <div key={g.key} className="cal-day">
+              <div className={`cal-day-head ${isSameDay(g.date, today0) ? "is-today" : ""}`}>{agendaDayLabel(g.date)}</div>
+              <div className="cal-day-events">{g.items.map((e) => <CalendarEventRow key={e.id} ev={e} {...rowProps} />)}</div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="calendar-week">
+          <div className="cal-week-nav">
+            <button onClick={() => { const d = new Date(weekStart); d.setDate(d.getDate() - 7); setWeekStart(d); }}>‹ Prev</button>
+            <span className="cal-week-label">{weekLabel}</span>
+            <button onClick={() => setWeekStart(startOfWeek(new Date()))}>Today</button>
+            <button onClick={() => { const d = new Date(weekStart); d.setDate(d.getDate() + 7); setWeekStart(d); }}>Next ›</button>
+          </div>
+          <div className="cal-week-grid">
+            {weekDays.map((d, i) => {
+              const dayEvents = eventsForDay(d);
+              return (
+                <div key={i} className={`cal-week-col ${isSameDay(d, new Date()) ? "is-today" : ""}`}>
+                  <div className="cal-week-colhead">
+                    <div className="cal-week-dow">{d.toLocaleDateString("en-US", { weekday: "short" })}</div>
+                    <div className="cal-week-date">{d.getDate()}</div>
+                  </div>
+                  <div className="cal-week-slots">
+                    {dayEvents.length === 0 ? <div className="cal-week-empty" /> : dayEvents.map((e) => (
+                      <button key={e.id} className={`cal-week-block ${eventMatchClass(e) || "cal-block-none"}`} onClick={() => setPopoverEvent(e)} title={e.title}>
+                        <span className="cal-week-block-time">{formatTime(e.start_time)}</span>
+                        <span className="cal-week-block-title">{e.title || "Untitled"}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {popoverEvent && (
+        <div className="overlay" onClick={() => setPopoverEvent(null)}>
+          <div className="modal cal-popover" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title">{popoverEvent.title || "Untitled event"}</div>
+              <button className="close-btn" onClick={() => setPopoverEvent(null)}>✕</button>
+            </div>
+            <div className="cal-popover-time">{formatFull(popoverEvent.start_time)} . {formatTime(popoverEvent.start_time)}{popoverEvent.end_time ? ` - ${formatTime(popoverEvent.end_time)}` : ""}</div>
+            <CalendarEventRow ev={popoverEvent} {...rowProps} compact />
+            {popoverEvent.description && <div className="cal-popover-desc">{popoverEvent.description}</div>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
