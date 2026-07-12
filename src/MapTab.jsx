@@ -14,6 +14,7 @@ const MAP_NODE_STYLES = {
   research: { r: 14, fill: "#14B8A6", label: "Research" },
   hospital: { r: 14, fill: "#059669", label: "Hospital" },
   institution: { r: 13, fill: "#64748B", label: "Institution" },
+  internal_institution: { r: 18, fill: "#8B5CF6", label: "Internal Team" },
   person: { r: 8, fill: "#E8ECF1", label: "Person" },
   internal_person: { r: 10, fill: "#10B981", label: "Internal Team" },
 };
@@ -28,7 +29,7 @@ const FILTER_DEFS = [
   { id: "enablers", label: "Enablers", types: ["enabler"] },
   { id: "competitors", label: "Competitors", types: ["competitor"] },
   { id: "people", label: "People", types: ["person"] },
-  { id: "internal", label: "Internal", types: ["internal_person"] },
+  { id: "internal", label: "Internal", types: ["internal_person", "internal_institution"] },
 ];
 const typeToFilter = (type) => FILTER_DEFS.find(f => f.types.includes(type))?.id || null;
 
@@ -37,6 +38,7 @@ const truncate = (s, n = 15) => (s && s.length > n ? s.slice(0, n - 1) + "…" :
 const DAY = 86400000;
 
 function nodeTypeForInstitution(inst) {
+  if (inst.isInternal) return "internal_institution";
   if (inst.isTarget) return "target";
   if (inst.isEnabler) return "enabler";
   const t = inst.type;
@@ -119,10 +121,13 @@ function buildGraph({ institutions, contacts, contactRoles, dealEnablers, enable
   return { nodes, links, nodeById, adjacency };
 }
 
-// Depth-limited search for all simple paths (<= 4 hops) from any team/known
-// person to the selected target institution node.
+// Depth-limited search for all simple paths (<= 4 hops) to the selected target
+// institution node. Paths originate from our own team: internal people are the
+// roots. If no one is marked internal yet, fall back to every known person so
+// the feature still works.
 function findPaths(graph, targetId) {
-  const roots = graph.nodes.filter(n => isPersonType(n.type)).map(n => n.id);
+  const internalRoots = graph.nodes.filter(n => n.type === "internal_person").map(n => n.id);
+  const roots = internalRoots.length ? internalRoots : graph.nodes.filter(n => isPersonType(n.type)).map(n => n.id);
   const results = [];
   const maxHops = 4;
   const dfs = (nodeId, path, visited) => {

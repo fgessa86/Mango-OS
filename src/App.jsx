@@ -694,6 +694,7 @@ function finalizeInstitution(i) {
     enablerId: enabler?.id || null,
     isTarget: !!deal,
     isEnabler: !!enabler,
+    isInternal: !!org?.is_internal,
     type: org ? normalizeTypeKey(org.type) : enabler ? (ENABLER_TYPE_TO_INSTITUTION[enabler.type] || "") : "",
     city: org?.city || deal?.city || enabler?.city || "",
     region: org?.region || deal?.region || enabler?.region || "",
@@ -1467,9 +1468,22 @@ export default function App() {
     }
   };
 
+  // True when the entity being linked belongs to an internal institution, so a
+  // person added there should be flagged internal team.
+  const entityIsInternal = (entityType, entityId) => {
+    if (entityType === "organization") return !!organizations.find((o) => o.id === entityId)?.is_internal;
+    const name = entityType === "enabler" ? enablers.find((e) => e.id === entityId)?.name : entityType === "deal" ? deals.find((d) => d.id === entityId)?.company : null;
+    if (!name) return false;
+    return !!organizations.find((o) => (o.name || "").trim().toLowerCase() === name.trim().toLowerCase())?.is_internal;
+  };
+
   const addPersonRole = async (args) => {
     try {
       await persistPersonRole(args);
+      // People at an internal institution automatically become internal team.
+      if (args.contactId && entityIsInternal(args.entityType, args.entityId)) {
+        await api("contacts", "PATCH", { is_internal: true }, `?id=eq.${args.contactId}`).catch(() => {});
+      }
       await loadData(); showToast("Person added");
     } catch { showToast("Error adding person (maybe already linked)"); }
   };
@@ -1539,6 +1553,7 @@ export default function App() {
       const v = (form[k] || "").trim();
       if (v) clean[k] = v;
     }
+    if (form.is_internal !== undefined) clean.is_internal = !!form.is_internal;
     if (form.id) {
       await api("organizations", "PATCH", clean, `?id=eq.${form.id}`);
       return { id: form.id, ...clean };
@@ -1602,8 +1617,10 @@ export default function App() {
     const name = (form.name || "").trim();
     if (!name) { showToast("Name is required"); return; }
     try {
-      const org = await persistOrganization({ name, type: form.type, city: form.city, region: form.region, sector: form.sector, description: form.description, website: form.website });
-      if (form.isTarget) await createDealForInstitution({ name, city: form.city, region: form.region });
+      const org = await persistOrganization({ name, type: form.type, city: form.city, region: form.region, sector: form.sector, description: form.description, website: form.website, is_internal: form.isInternal });
+      // Internal institutions are our own org, never a pipeline target: skip the
+      // deal even if Target was checked. Enabler is still allowed.
+      if (form.isTarget && !form.isInternal) await createDealForInstitution({ name, city: form.city, region: form.region });
       if (form.isEnabler) await createEnablerForInstitution({ name, city: form.city, region: form.region });
       await loadData(); showToast(`${name} added. Click to add people.`);
       // Auto-research the new institution unless the user supplied a description.
@@ -1618,16 +1635,35 @@ export default function App() {
   const setInstitutionFlag = async (inst, flag, checked) => {
     try {
       if (flag === "target") {
+        // An internal institution is never a pipeline target.
+        if (checked && inst.isInternal) { showToast("Internal institutions are not pipeline targets"); return; }
         if (checked && !inst.dealId) await createDealForInstitution({ name: inst.name, city: inst.city, region: inst.region });
         else if (!checked && inst.dealId) await purgeDeal(inst.dealId);
         else return;
-      } else {
+      } else if (flag === "enabler") {
         if (checked && !inst.enablerId) await createEnablerForInstitution({ name: inst.name, city: inst.city, region: inst.region });
         else if (!checked && inst.enablerId) await purgeEnabler(inst.enablerId);
         else return;
+      } else if (flag === "internal") {
+        // Marking internal ensures an org row exists, flips is_internal, and
+        // archives any pipeline deal (an internal org is not a target).
+        let orgId = inst.orgId;
+        if (!orgId) { const org = await persistOrganization({ name: inst.name, type: inst.type || "hospital", city: inst.city, region: inst.region }); orgId = org?.id; }
+        if (!orgId) throw new Error("no org");
+        await api("organizations", "PATCH", { is_internal: !!checked }, `?id=eq.${orgId}`);
+        if (checked && inst.dealId) await purgeDeal(inst.dealId);
+        if (checked) await markInstitutionPeopleInternal(inst);
       }
       await loadData(); savedToast();
     } catch { showToast("Error updating institution"); }
+  };
+
+  // When an institution becomes internal, its people become internal team too.
+  const markInstitutionPeopleInternal = async (inst) => {
+    const ppl = institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, networkEdges, contacts });
+    const ids = ppl.map((p) => p.contact?.id).filter(Boolean);
+    if (ids.length === 0) return;
+    await api("contacts", "PATCH", { is_internal: true }, `?id=in.(${ids.join(",")})`).catch(() => {});
   };
 
   const deleteInstitution = async (inst) => {
@@ -5842,6 +5878,7 @@ function InstitutionSheet({
                 onSave={(v) => onUpdate({ type: v })}
                 render={(v) => { const m = institutionTypeMeta(v, customOptions); return <span className="badge" style={{ background: m.color + "22", color: m.color, border: `1px solid ${m.color}44` }}>{m.label}</span>; }}
               />
+              {inst.isInternal && <span className="badge flag-badge-internal">Internal</span>}
               {inst.isTarget && <span className="badge flag-badge-target">Target</span>}
               {inst.isEnabler && <span className="badge flag-badge-enabler">Enabler</span>}
               {inst.isTarget && onChangeTier && (
@@ -5851,8 +5888,9 @@ function InstitutionSheet({
             </div>
             {!readOnly && (
               <div className="classification-row">
-                <label className="checkbox-label"><input type="checkbox" checked={inst.isTarget} onChange={(e) => { if (!e.target.checked && inst.dealId && !confirm("Unchecking Target removes the linked pipeline deal (its people and stage). Activity history is kept. Continue?")) return; onSetFlag("target", e.target.checked); }} /> Target</label>
+                <label className={`checkbox-label ${inst.isInternal ? "checkbox-disabled" : ""}`}><input type="checkbox" checked={inst.isTarget && !inst.isInternal} disabled={inst.isInternal} onChange={(e) => { if (!e.target.checked && inst.dealId && !confirm("Unchecking Target removes the linked pipeline deal (its people and stage). Activity history is kept. Continue?")) return; onSetFlag("target", e.target.checked); }} /> Target</label>
                 <label className="checkbox-label"><input type="checkbox" checked={inst.isEnabler} onChange={(e) => { if (!e.target.checked && inst.enablerId && !confirm("Unchecking Enabler removes the linked enabler record. Activity history is kept. Continue?")) return; onSetFlag("enabler", e.target.checked); }} /> Enabler</label>
+                <label className="checkbox-label"><input type="checkbox" checked={inst.isInternal} onChange={(e) => { if (e.target.checked && inst.dealId && !confirm("Marking Internal removes the linked pipeline deal (an internal org is not a target). Activity history is kept. Continue?")) return; onSetFlag("internal", e.target.checked); }} /> Internal</label>
               </div>
             )}
             <div className="sheet-contact">Sector: <InlineText value={inst.sector} onSave={(v) => onUpdate({ sector: v })} placeholder="Add sector" /></div>
@@ -6160,7 +6198,7 @@ function InstitutionAddPerson({ institutionName, availableContacts, customOption
 }
 
 function InstitutionForm({ customOptions = [], onAddCustomOption = () => {}, onSave, onCancel }) {
-  const [f, setF] = useState({ name: "", type: "hospital", city: "", region: "", isTarget: false, isEnabler: false, sector: "", description: "", website: "" });
+  const [f, setF] = useState({ name: "", type: "hospital", city: "", region: "", isTarget: false, isEnabler: false, isInternal: false, sector: "", description: "", website: "" });
   const [showMore, setShowMore] = useState(false);
   const [saving, setSaving] = useState(false);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
@@ -6180,8 +6218,9 @@ function InstitutionForm({ customOptions = [], onAddCustomOption = () => {}, onS
         <div className="field"><label className="label">City</label><SelectWithCustom options={cityOpts} value={f.city} onChange={(v) => { set("city", v); trackCustom("city", cityOpts, onAddCustomOption)(v); }} placeholder="City name..." /></div>
         <div className="field"><label className="label">Region</label><SelectWithCustom options={regionOpts} value={f.region} onChange={(v) => { set("region", v); trackCustom("region", regionOpts, onAddCustomOption)(v); }} placeholder="Region name..." /></div>
         <div className="field-full checkbox-row">
-          <label className="checkbox-label"><input type="checkbox" checked={f.isTarget} onChange={e => set("isTarget", e.target.checked)} /> Target (a sales/BD target)</label>
+          <label className={`checkbox-label ${f.isInternal ? "checkbox-disabled" : ""}`}><input type="checkbox" checked={f.isTarget && !f.isInternal} disabled={f.isInternal} onChange={e => set("isTarget", e.target.checked)} /> Target (a sales/BD target)</label>
           <label className="checkbox-label"><input type="checkbox" checked={f.isEnabler} onChange={e => set("isEnabler", e.target.checked)} /> Enabler (can help us reach targets)</label>
+          <label className="checkbox-label"><input type="checkbox" checked={f.isInternal} onChange={e => set("isInternal", e.target.checked)} /> Internal (our own team)</label>
         </div>
       </div>
       <button type="button" onClick={() => setShowMore(s => !s)} className="link-btn">{showMore ? "Hide details" : "More details"}</button>
@@ -6314,6 +6353,7 @@ function NetworkTab({
   const [cityFilter, setCityFilter] = useState("");
   const [targetsOnly, setTargetsOnly] = useState(false);
   const [enablersOnly, setEnablersOnly] = useState(false);
+  const [internalOnly, setInternalOnly] = useState(false);
   const [warmthFilter, setWarmthFilter] = useState("");
   const [instFilter, setInstFilter] = useState("");
   const [activeForm, setActiveForm] = useState(null);
@@ -6337,6 +6377,7 @@ function NetworkTab({
     (!cityFilter || parseCities(i.city).includes(cityFilter)) &&
     (!targetsOnly || i.isTarget) &&
     (!enablersOnly || i.isEnabler) &&
+    (!internalOnly || i.isInternal) &&
     (!q || i.name.toLowerCase().includes(q)));
 
   // People sub-tab data: every contact with their resolved roles.
@@ -6396,64 +6437,71 @@ function NetworkTab({
             <SelectWithCustom className="input select-filter" options={[{ id: "", label: "All Cities" }, ...toOptions(Array.from(new Set([...SAUDI_CITIES, ...cities])).sort())]} value={cityFilter} onChange={setCityFilter} />
             <label className="checkbox-label toggle-filter"><input type="checkbox" checked={targetsOnly} onChange={e => setTargetsOnly(e.target.checked)} /> Targets only</label>
             <label className="checkbox-label toggle-filter"><input type="checkbox" checked={enablersOnly} onChange={e => setEnablersOnly(e.target.checked)} /> Enablers only</label>
+            <label className="checkbox-label toggle-filter"><input type="checkbox" checked={internalOnly} onChange={e => setInternalOnly(e.target.checked)} /> Internal only</label>
           </div>
           {filteredInst.length === 0 ? (
             <div className="empty-state">No institutions match.</div>
           ) : (
-            orderedTypes.map(typeId => {
-              const group = filteredInst.filter(i => i.type === typeId);
-              if (group.length === 0) return null;
-              const meta = institutionTypeMeta(typeId, customOptions);
-              const plural = INSTITUTION_TYPE_PLURALS[typeId] || (meta.label.endsWith("s") ? meta.label : `${meta.label}s`);
-              return (
-                <div key={typeId || "other"} className="institution-group">
-                  <div className="institution-group-header">{plural.toUpperCase()} ({group.length})</div>
-                  <div className="institution-grid">
-                    {group.map(inst => {
-                      const ppl = institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, networkEdges, contacts });
-                      const preview = ppl.slice(0, 3);
-                      const stage = inst.isTarget ? STAGES.find(s => s.id === inst.stage) : null;
-                      return (
-                        <div key={inst.key} className="institution-card" onClick={() => onOpenInstitution(inst.name)}>
-                          <div className="institution-card-top">
-                            <div className="institution-name">{inst.name}</div>
-                            <InlineSelectField
-                              value={inst.type || "hospital"}
-                              options={typeOptsAll}
-                              fieldName="institution_type"
-                              onAddCustomOption={onAddCustomOption}
-                              onSave={(v) => onUpdateInstitution(inst, { type: v })}
-                              render={(v) => { const m = institutionTypeMeta(v, customOptions); return <span className="badge" style={{ background: m.color + "22", color: m.color, border: `1px solid ${m.color}44` }}>{m.label}</span>; }}
-                            />
-                          </div>
-                          <div className="institution-flags-row">
-                            {inst.isTarget && <span className="badge flag-badge-target">Target</span>}
-                            {inst.isEnabler && <span className="badge flag-badge-enabler">Enabler</span>}
-                            <InlineCity city={inst.city} options={cityOptsAll} onAddCustomOption={onAddCustomOption} onSave={(v) => onUpdateInstitutionCity(inst, v)} compact />
-                            {stage && <span className="badge" style={{background:stage.color+"22",color:stage.color,border:`1px solid ${stage.color}44`}}>{stage.label}</span>}
-                          </div>
-                          <div className="institution-people-count">{ppl.length} {ppl.length === 1 ? "person" : "people"}</div>
-                          {preview.length > 0 && (
-                            <div className="institution-people-preview">
-                              {preview.map((p, i) => (
-                                <div key={i} className="institution-preview-person">
-                                  <Avatar name={p.contact.name} size={28} />
-                                  <div className="preview-person-text">
-                                    <div className="preview-person-name">{p.contact.name}</div>
-                                    {p.role && <div className="preview-person-role">{p.role}</div>}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                          {inst.lastActivity && <div className="institution-last-activity">{daysAgo(inst.lastActivity)}d ago</div>}
+            // Internal Team group renders first (purple), then the type groups
+            // with internal institutions excluded so the team appears once.
+            [
+              ...(() => { const items = filteredInst.filter(i => i.isInternal); return items.length ? [{ key: "__internal", header: `INTERNAL TEAM (${items.length})`, items, internal: true }] : []; })(),
+              ...orderedTypes.map(typeId => {
+                const items = filteredInst.filter(i => i.type === typeId && !i.isInternal);
+                if (items.length === 0) return null;
+                const meta = institutionTypeMeta(typeId, customOptions);
+                const plural = INSTITUTION_TYPE_PLURALS[typeId] || (meta.label.endsWith("s") ? meta.label : `${meta.label}s`);
+                return { key: typeId || "other", header: `${plural.toUpperCase()} (${items.length})`, items, internal: false };
+              }).filter(Boolean),
+            ].map(grp => (
+              <div key={grp.key} className={`institution-group ${grp.internal ? "institution-group-internal" : ""}`}>
+                <div className="institution-group-header">{grp.header}</div>
+                <div className="institution-grid">
+                  {grp.items.map(inst => {
+                    const ppl = institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, networkEdges, contacts });
+                    const preview = ppl.slice(0, 3);
+                    const stage = inst.isTarget ? STAGES.find(s => s.id === inst.stage) : null;
+                    return (
+                      <div key={inst.key} className={`institution-card ${inst.isInternal ? "institution-card-internal" : ""}`} onClick={() => onOpenInstitution(inst.name)}>
+                        <div className="institution-card-top">
+                          <div className="institution-name">{inst.name}</div>
+                          <InlineSelectField
+                            value={inst.type || "hospital"}
+                            options={typeOptsAll}
+                            fieldName="institution_type"
+                            onAddCustomOption={onAddCustomOption}
+                            onSave={(v) => onUpdateInstitution(inst, { type: v })}
+                            render={(v) => { const m = institutionTypeMeta(v, customOptions); return <span className="badge" style={{ background: m.color + "22", color: m.color, border: `1px solid ${m.color}44` }}>{m.label}</span>; }}
+                          />
                         </div>
-                      );
-                    })}
-                  </div>
+                        <div className="institution-flags-row">
+                          {inst.isInternal && <span className="badge flag-badge-internal">Internal</span>}
+                          {inst.isTarget && <span className="badge flag-badge-target">Target</span>}
+                          {inst.isEnabler && <span className="badge flag-badge-enabler">Enabler</span>}
+                          <InlineCity city={inst.city} options={cityOptsAll} onAddCustomOption={onAddCustomOption} onSave={(v) => onUpdateInstitutionCity(inst, v)} compact />
+                          {stage && <span className="badge" style={{background:stage.color+"22",color:stage.color,border:`1px solid ${stage.color}44`}}>{stage.label}</span>}
+                        </div>
+                        <div className="institution-people-count">{ppl.length} {ppl.length === 1 ? "person" : "people"}</div>
+                        {preview.length > 0 && (
+                          <div className="institution-people-preview">
+                            {preview.map((p, i) => (
+                              <div key={i} className="institution-preview-person">
+                                <Avatar name={p.contact.name} size={28} />
+                                <div className="preview-person-text">
+                                  <div className="preview-person-name">{p.contact.name}</div>
+                                  {p.role && <div className="preview-person-role">{p.role}</div>}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {inst.lastActivity && <div className="institution-last-activity">{daysAgo(inst.lastActivity)}d ago</div>}
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })
+              </div>
+            ))
           )}
         </>
       ) : (
@@ -6495,6 +6543,7 @@ function NetworkTab({
                     <div className="institution-card-top" style={{ alignItems: "center", gap: 11 }}>
                       <Avatar name={contact.name} size={34} />
                       <div className="institution-name" style={{ flex: 1 }}>{contact.name}</div>
+                      {contact.is_internal && <span className="badge internal-badge">Internal</span>}
                       <span className="warmth-dot" style={{background:warmth?.color, marginRight: 0}} title={warmth?.label} />
                     </div>
                     {roleStr && <div className="person-net-roles">{roleStr}</div>}
@@ -6594,7 +6643,7 @@ function PeopleTable({ people, institutionNames, cities, onUpdateContact, onUpda
             const warmth = WARMTH_LEVELS.find((w) => w.id === (c.warmth || "unknown"));
             return (
               <tr key={c.id}>
-                <td>{text(c, "name", idx, "Name")}</td>
+                <td className="table-name-cell">{text(c, "name", idx, "Name")}{c.is_internal && <span className="badge internal-badge table-internal-badge">Internal</span>}</td>
                 <td className="table-role-cell"><TableTextCell colKey="role" rowIndex={idx} cellRefs={cellRefs} placeholder="Role" value={r.roleTitle} onSave={(v) => onUpdateRoleTitle(r.contact, r.primaryRole, v)} onNext={() => focusCell("role", idx + 1)} />{r.extraRoles > 0 && <span className="table-more-roles" title="Has more roles">+{r.extraRoles}</span>}</td>
                 <td>
                   {readOnly ? <span className="table-cell-ro">{r.institution}</span> : (

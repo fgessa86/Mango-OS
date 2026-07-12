@@ -143,7 +143,9 @@ select.tier-select { width: auto; max-width: 160px; padding: 6px 10px; font-size
 /* Target / Enabler pill badges (Institution Sheet header + cards) */
 .flag-badge-target { background: #E4EDFB; color: #2A6FDB; }
 .flag-badge-enabler { background: #FDF0DA; color: #B5791A; }
+.flag-badge-internal { background: #EFEAFB; color: #8B5CF6; }
 .classification-row { display: flex; gap: 18px; flex-wrap: wrap; margin: 10px 0 4px; }
+.checkbox-disabled { opacity: 0.45; }
 .classification-row .checkbox-label { font-size: 13px; font-weight: 600; color: var(--text-2); }
 
 .btn-primary { padding: 10px 18px; border-radius: 11px; border: none; background: var(--mango); color: var(--mango-ink); font-size: 14px; font-weight: 700; cursor: pointer; box-shadow: var(--shadow-gold); font-family: inherit; transition: background 0.15s; }
@@ -382,6 +384,8 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .institution-group-header { display: flex; align-items: center; gap: 9px; font-size: 16px; font-weight: 800; letter-spacing: -0.01em; color: var(--text); margin-bottom: 14px; text-transform: none; }
 .institution-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(272px, 1fr)); gap: 15px; }
 .institution-card { background: var(--surface); border: none; border-radius: 15px; padding: 18px 19px; cursor: pointer; box-shadow: var(--shadow-card); transition: box-shadow 0.15s, transform 0.15s; }
+.institution-group-internal .institution-group-header { color: #8B5CF6; }
+.institution-card-internal { border-left: 3px solid #8B5CF6; box-shadow: 0 0 0 1px #8B5CF622, var(--shadow-card); }
 .institution-card:hover { box-shadow: var(--shadow-hover); transform: translateY(-2px); }
 .institution-card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
 .institution-name { font-size: 16px; font-weight: 800; letter-spacing: -0.01em; color: var(--text); line-height: 1.25; }
@@ -788,7 +792,7 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 
 /* Inline contact editing (former edit-modal fields): internal toggle, tags */
 .internal-toggle { font-size: 12px; font-weight: 700; color: var(--text-2); display: inline-flex; align-items: center; gap: 5px; }
-.internal-badge { background: #E6F4EC; color: #1F8A5B; border: 1px solid #1F8A5B44; }
+.internal-badge { background: #EFEAFB; color: #8B5CF6; border: 1px solid #8B5CF644; }
 .tag-edit-btn { cursor: pointer; border: 1px dashed var(--dim); background: transparent; color: var(--muted); font-family: inherit; }
 .tag-edit-btn:hover { color: var(--accent-strong); border-color: var(--mango); }
 .tags-edit-panel { margin: 8px 0 4px; background: var(--card-tint); border-radius: 12px; padding: 10px 12px; max-width: 640px; }
@@ -1356,3 +1360,6 @@ select.inline-select, .inline-select-wrap .input { width: auto; min-width: 130px
   .cal-week-slots { flex: 1; }
   .cal-week-empty::after { content: "No events"; font-size: 11.5px; color: var(--dim); }
 }
+
+.table-name-cell { display: flex; align-items: center; gap: 8px; }
+.table-internal-badge { flex-shrink: 0; font-size: 9.5px; padding: 1px 7px; }
