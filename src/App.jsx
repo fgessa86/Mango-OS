@@ -1404,6 +1404,7 @@ export default function App() {
       await api("todos", "PATCH", { contact_id: null }, `?contact_id=eq.${id}`).catch(() => {});
       await api("notes", "PATCH", { contact_id: null }, `?contact_id=eq.${id}`).catch(() => {});
       await api("meeting_briefs", "PATCH", { contact_id: null }, `?contact_id=eq.${id}`).catch(() => {});
+      await api("calendar_events", "PATCH", { matched_contact_id: null }, `?matched_contact_id=eq.${id}`).catch(() => {});
       await api("deals", "PATCH", { contact_id: null, contact_name: null, contact_role: null }, `?contact_id=eq.${id}`).catch(() => {});
       await api("enablers", "PATCH", { contact_id: null, contact_name: null }, `?contact_id=eq.${id}`).catch(() => {});
       await deleteFullyOrphanedActivities();
@@ -1584,6 +1585,7 @@ export default function App() {
     await api("notes", "PATCH", { deal_id: null }, `?deal_id=eq.${id}`).catch(() => {});
     await api("meeting_briefs", "PATCH", { deal_id: null }, `?deal_id=eq.${id}`).catch(() => {});
     await api("boss_comments", "PATCH", { deal_id: null }, `?deal_id=eq.${id}`).catch(() => {});
+    await api("calendar_events", "PATCH", { matched_deal_id: null }, `?matched_deal_id=eq.${id}`).catch(() => {});
     await api("material_links", "DELETE", null, `?deal_id=eq.${id}`).catch(() => {});
     await api("deal_contacts", "DELETE", null, `?deal_id=eq.${id}`).catch(() => {});
     await api("contact_roles", "DELETE", null, `?entity_type=eq.deal&entity_id=eq.${id}`).catch(() => {});
@@ -1600,6 +1602,7 @@ export default function App() {
     await api("notes", "PATCH", { enabler_id: null }, `?enabler_id=eq.${id}`).catch(() => {});
     await api("meeting_briefs", "PATCH", { enabler_id: null }, `?enabler_id=eq.${id}`).catch(() => {});
     await api("boss_comments", "PATCH", { enabler_id: null }, `?enabler_id=eq.${id}`).catch(() => {});
+    await api("calendar_events", "PATCH", { matched_enabler_id: null }, `?matched_enabler_id=eq.${id}`).catch(() => {});
     await api("material_links", "DELETE", null, `?enabler_id=eq.${id}`).catch(() => {});
     await api("enabler_contacts", "DELETE", null, `?enabler_id=eq.${id}`).catch(() => {});
     await api("contact_roles", "DELETE", null, `?entity_type=eq.enabler&entity_id=eq.${id}`).catch(() => {});
@@ -1678,6 +1681,7 @@ export default function App() {
         await api("notes", "PATCH", { organization_id: null }, `?organization_id=eq.${inst.orgId}`).catch(() => {});
         await api("meeting_briefs", "PATCH", { organization_id: null }, `?organization_id=eq.${inst.orgId}`).catch(() => {});
         await api("boss_comments", "PATCH", { organization_id: null }, `?organization_id=eq.${inst.orgId}`).catch(() => {});
+        await api("calendar_events", "PATCH", { matched_organization_id: null }, `?matched_organization_id=eq.${inst.orgId}`).catch(() => {});
         await api("material_links", "DELETE", null, `?organization_id=eq.${inst.orgId}`).catch(() => {});
         await api("network_edges", "DELETE", null, `?source_type=eq.organization&source_id=eq.${inst.orgId}`);
         await api("network_edges", "DELETE", null, `?target_type=eq.organization&target_id=eq.${inst.orgId}`);
