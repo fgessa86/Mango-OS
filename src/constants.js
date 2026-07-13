@@ -10,6 +10,10 @@ export const STAGES = [
   { id: "lost", label: "Lost", color: "#EF4444" },
 ];
 
+// Stable lowercase ids; the Quick Add dropdown always saves `id`, never `label`.
+// Unknown/legacy types (old data, or a type this list has since dropped) are
+// handled gracefully wherever ACT_TYPES is looked up: a default icon/glyph and
+// the raw type string are shown instead of breaking.
 export const ACT_TYPES = [
   { id: "call", label: "Call", icon: "\u{1F4DE}" },
   { id: "email", label: "Email", icon: "\u{1F4E7}" },
@@ -17,8 +21,9 @@ export const ACT_TYPES = [
   { id: "whatsapp", label: "WhatsApp", icon: "\u{1F4AC}", color: "#25D366" },
   { id: "linkedin", label: "LinkedIn", icon: "in", color: "#0A66C2" },
   { id: "note", label: "Note", icon: "\u{1F4DD}" },
-  { id: "proposal_sent", label: "Proposal", icon: "\u{1F4C4}" },
+  { id: "proposal", label: "Proposal", icon: "\u{1F4C4}" },
   { id: "demo", label: "Demo", icon: "\u{1F5A5}" },
+  { id: "voice_note", label: "Voice Note", icon: "\u{1F3A4}" },
   { id: "transcript", label: "Paste Transcript", icon: "\u{1F4CB}" },
 ];
 

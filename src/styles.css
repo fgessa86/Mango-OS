@@ -269,7 +269,7 @@ select.tier-select { width: auto; max-width: 160px; padding: 6px 10px; font-size
 .timeline-item { display: flex; gap: 12px; padding: 9px 6px; border-left: 2px solid var(--divider); margin-left: 6px; }
 .timeline-icon { font-size: 15px; width: 30px; height: 30px; border-radius: 9px; background: var(--card-tint); display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin: -6px 0 0 -21px; }
 .act-desc { color: var(--text); font-size: 13.5px; font-weight: 700; line-height: 1.35; }
-.act-date { color: var(--muted); font-size: 11.5px; margin-top: 2px; font-weight: 600; }
+.act-date { color: var(--muted); font-size: 11.5px; margin-top: 4px; font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 /* Fathom-imported activity badge + light structured formatting */
 .fathom-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 800; letter-spacing: 0.02em; color: #6E56CF; background: #EEEBFA; border: 1px solid #DAD3F5; border-radius: 20px; padding: 1px 9px 1px 8px; margin-right: 8px; vertical-align: 1px; }
@@ -629,7 +629,17 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .home-act { display: flex; gap: 12px; align-items: flex-start; }
 .home-act-main { flex: 1; min-width: 0; }
 .home-act-desc { font-size: 14px; color: var(--text-2); line-height: 1.45; }
-.home-act-meta { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+.home-act-meta { font-size: 11.5px; color: var(--muted); margin-top: 3px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* Section 1: person + institution pills on every activity row */
+.act-pills { display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.act-pill { border: 1px solid transparent; border-radius: 20px; padding: 1px 9px; font-size: 11px; font-weight: 700; cursor: pointer; font-family: inherit; line-height: 1.6; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: none; }
+.act-pill:hover { filter: brightness(0.96); text-decoration: underline; }
+.act-pill-person { background: var(--card-tint); color: var(--muted-2); border-color: var(--divider); }
+.act-pill-deal { background: #E4EDFB; color: #2A6FDB; border-color: #2A6FDB44; }
+.act-pill-enabler { background: #FDECCB; color: #B77400; border-color: #B7740044; }
+.act-pill-organization { background: #ECECEF; color: #6B6B7B; border-color: #6B6B7B44; }
+button.act-pill { -webkit-appearance: none; appearance: none; }
 
 .home-stale { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .home-stale-main { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }

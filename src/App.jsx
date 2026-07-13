@@ -43,10 +43,12 @@ const ACTIVITY_GLYPHS = {
   linkedin: { glyph: "in", bg: "#0A66C222", fg: "#0A66C2" },
   demo: { glyph: "◎", bg: "#EFEAFB", fg: "#8B5CF6" },
   note: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
-  proposal_sent: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
+  proposal: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
   transcript: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
   voice_note: { glyph: "❞", bg: "#FDF0DA", fg: "#B5791A" },
 };
+// Unknown or legacy activity types (renamed ids, old data) fall back to a
+// neutral dot glyph rather than breaking (Section 3: graceful degradation).
 function ActivityGlyph({ type }) {
   const g = ACTIVITY_GLYPHS[type] || { glyph: "•", bg: "#F1EADD", fg: "#8A8072" };
   return <span className="timeline-icon" style={{ background: g.bg, color: g.fg }}>{g.glyph}</span>;
@@ -75,6 +77,51 @@ function ActivityDescription({ description }) {
     <div className="act-desc">
       {fathom && <span className="fathom-badge" title="Auto-imported from Fathom"><span className="fathom-badge-dot" />Fathom</span>}
       {structured ? <FormattedActivityBody lines={lines} /> : text}
+    </div>
+  );
+}
+
+// Resolves an activity's linked institution (deal/enabler/organization, in that
+// priority) to { kind, name } for a colored pill, or null if none is set. New
+// activities always have this stored (Section 2, addActivity); for older rows
+// that only ever carried a contact_id, fall back to deriving the person's
+// CURRENT primary role at display time so the pill still shows (Section 2:
+// "if it can only be derived at display time, derive it").
+function activityInstitutionInfo(a, { deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles }) {
+  if (a.deal_id) { const d = deals.find((x) => x.id === a.deal_id); return d ? { kind: "deal", name: d.company } : null; }
+  if (a.enabler_id) { const e = enablers.find((x) => x.id === a.enabler_id); return e ? { kind: "enabler", name: e.name } : null; }
+  if (a.organization_id) { const o = organizations.find((x) => x.id === a.organization_id); return o ? { kind: "organization", name: o.name } : null; }
+  if (a.contact_id && contacts && contactRoles) {
+    const contact = contacts.find((c) => c.id === a.contact_id);
+    if (!contact) return null;
+    const roles = resolveContactRoles(contact, { deals, enablers, organizations, dealContacts: dealContacts || [], enablerContacts: enablerContacts || [], networkEdges: networkEdges || [], contactRoles });
+    const primary = roles.find((r) => r.is_primary) || roles[0];
+    if (primary?.entity_type === "deal") { const d = deals.find((x) => x.id === primary.entity_id); return d ? { kind: "deal", name: d.company } : null; }
+    if (primary?.entity_type === "enabler") { const e = enablers.find((x) => x.id === primary.entity_id); return e ? { kind: "enabler", name: e.name } : null; }
+    if (primary?.entity_type === "organization") { const o = organizations.find((x) => x.id === primary.entity_id); return o ? { kind: "organization", name: o.name } : null; }
+  }
+  return null;
+}
+// Resolves an activity's linked person to { id, name } for a neutral pill, or
+// null if there is no contact_id or the contact no longer exists.
+function activityPersonInfo(a, contacts) {
+  if (!a.contact_id) return null;
+  const c = contacts.find((x) => x.id === a.contact_id);
+  return c ? { id: c.id, name: c.name } : null;
+}
+
+// Small clickable pills shown on every activity row: the linked person AND the
+// linked institution, when present (Section 1). Either can be suppressed when
+// the surrounding timeline already IS that entity, e.g. a person's own timeline
+// hides their own name pill but keeps the institution pill, and vice versa.
+function ActivityEntityPills({ activity, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, hidePerson = false, hideInstitution = false }) {
+  const inst = hideInstitution ? null : activityInstitutionInfo(activity, { deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles });
+  const person = hidePerson ? null : activityPersonInfo(activity, contacts);
+  if (!inst && !person) return null;
+  return (
+    <div className="act-pills">
+      {person && <button type="button" className="act-pill act-pill-person" onClick={() => onOpenPerson(person.id)} title={`Open ${person.name}`}>{person.name}</button>}
+      {inst && <button type="button" className={`act-pill act-pill-${inst.kind}`} onClick={() => onOpenInstitution(inst.name)} title={`Open ${inst.name}`}>{inst.name}</button>}
     </div>
   );
 }
@@ -2332,15 +2379,40 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const addActivity = async (dealId, contactId, activity, enablerId = null, organizationId = null) => {
     const now = new Date().toISOString();
     try {
-      const rows = await api("activities", "POST", { deal_id: dealId, contact_id: contactId, enabler_id: enablerId, organization_id: organizationId, ...activity });
-      if (dealId) await api("deals", "PATCH", { last_activity_at: now }, `?id=eq.${dealId}`);
+      // Section 2: an activity saved with only a contact_id still belongs to
+      // that person's institution. Resolve it from their primary role (via
+      // contact_roles) and store it on the row, rather than leaving it to be
+      // derived (or not) at display time.
+      let fkDeal = dealId, fkEnabler = enablerId, fkOrg = organizationId;
+      if (contactId && !fkDeal && !fkEnabler && !fkOrg) {
+        const contact = contacts.find((c) => c.id === contactId);
+        const roles = contact ? resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles }) : [];
+        const primary = roles.find((r) => r.is_primary) || roles[0];
+        if (primary?.entity_type === "deal") fkDeal = primary.entity_id;
+        else if (primary?.entity_type === "enabler") fkEnabler = primary.entity_id;
+        else if (primary?.entity_type === "organization") fkOrg = primary.entity_id;
+      }
+
+      // Section 5: guard against accidental double-taps / double-submits. Skip
+      // creating a new row if an identical one (same type, description, and
+      // contact) was logged in the last 2 minutes.
+      const twoMinAgo = Date.now() - 2 * 60 * 1000;
+      const isDuplicate = activities.some((a) =>
+        a.type === activity.type &&
+        (a.description || "") === (activity.description || "") &&
+        (a.contact_id || null) === (contactId || null) &&
+        new Date(a.created_at).getTime() > twoMinAgo);
+      if (isDuplicate) { showToast("Similar activity just logged"); return; }
+
+      const rows = await api("activities", "POST", { deal_id: fkDeal, contact_id: contactId, enabler_id: fkEnabler, organization_id: fkOrg, ...activity });
+      if (fkDeal) await api("deals", "PATCH", { last_activity_at: now }, `?id=eq.${fkDeal}`);
       if (contactId) await api("contacts", "PATCH", { last_contacted_at: now }, `?id=eq.${contactId}`);
-      if (enablerId) await api("enablers", "PATCH", { last_activity_at: now }, `?id=eq.${enablerId}`);
+      if (fkEnabler) await api("enablers", "PATCH", { last_activity_at: now }, `?id=eq.${fkEnabler}`);
       const row = Array.isArray(rows) ? rows[0] : rows;
       if (row) setActivities((prev) => [row, ...prev]);
-      if (dealId) setDeals((prev) => prev.map((d) => (d.id === dealId ? { ...d, last_activity_at: now } : d)));
+      if (fkDeal) setDeals((prev) => prev.map((d) => (d.id === fkDeal ? { ...d, last_activity_at: now } : d)));
       if (contactId) setContacts((prev) => prev.map((c) => (c.id === contactId ? { ...c, last_contacted_at: now } : c)));
-      if (enablerId) setEnablers((prev) => prev.map((e) => (e.id === enablerId ? { ...e, last_activity_at: now } : e)));
+      if (fkEnabler) setEnablers((prev) => prev.map((e) => (e.id === fkEnabler ? { ...e, last_activity_at: now } : e)));
       setModal(null); showToast("Activity logged");
     } catch { showToast("Error logging activity"); }
   };
@@ -2360,8 +2432,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     if (todayActs.length > 0) {
       r += `TODAY'S ACTIVITY:\n`;
       todayActs.forEach((a) => {
-        const deal = deals.find((d) => d.id === a.deal_id);
-        r += `${ACT_TYPES.find((t) => t.id === a.type)?.icon || "."} ${deal?.company || "General"}: ${firstLine(stripFathomMarker(a.description))}\n`;
+        // Section 1: show both the linked person and institution, when present.
+        const inst = activityInstitutionInfo(a, { deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles });
+        const person = activityPersonInfo(a, contacts);
+        const label = inst && person ? `${inst.name} (${person.name})` : (inst || person)?.name || "General";
+        r += `${ACT_TYPES.find((t) => t.id === a.type)?.icon || "."} ${label}: ${firstLine(stripFathomMarker(a.description))}\n`;
       });
       r += "\n";
     }
@@ -2715,6 +2790,16 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           urgentTasks={urgentTasks}
           onToggleTodo={toggleTodo}
           recentActivities={recentActivities}
+          deals={deals}
+          enablers={enablers}
+          organizations={organizations}
+          contacts={contacts}
+          dealContacts={dealContacts}
+          enablerContacts={enablerContacts}
+          networkEdges={networkEdges}
+          contactRoles={contactRoles}
+          onOpenInstitution={openInstitution}
+          onOpenPerson={openPerson}
           staleDeals={staleDeals}
           entityName={entityName}
           onOpenEntity={openEntity}
@@ -3113,7 +3198,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, onPrepBriefEvent, onOpenCalendar, urgentTasks, onToggleTodo, recentActivities, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, onPrepBriefEvent, onOpenCalendar, urgentTasks, onToggleTodo, recentActivities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
@@ -3272,7 +3357,12 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
                     {isFathomActivity(a) && <span className="fathom-badge sm" title="Auto-imported from Fathom">Fathom</span>}
                     {isFathomActivity(a) ? firstLine(stripFathomMarker(a.description)) : a.description}
                   </div>
-                  <div className="home-act-meta">{entityName(a) || "General"} . {formatDateTime(a.created_at)}</div>
+                  <div className="home-act-meta" onClick={(e) => e.stopPropagation()}>
+                    {entityName(a) ? (
+                      <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} dealContacts={dealContacts} enablerContacts={enablerContacts} networkEdges={networkEdges} contactRoles={contactRoles} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} />
+                    ) : <span>General</span>}
+                    <span>{formatDateTime(a.created_at)}</span>
+                  </div>
                 </div>
               </div>
             ))}
@@ -4994,7 +5084,10 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
               <ActivityGlyph type={a.type} />
               <div>
                 <ActivityDescription description={a.description} />
-                <div className="act-date">{formatDate(a.created_at)}</div>
+                <div className="act-date">
+                  <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} dealContacts={dealContacts} enablerContacts={enablerContacts} networkEdges={networkEdges} contactRoles={contactRoles} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} hidePerson />
+                  {formatDate(a.created_at)}
+                </div>
               </div>
             </div>
           ))}
@@ -6188,7 +6281,13 @@ function InstitutionSheet({
           {filtered.map(a => (
             <div key={a.id} className="timeline-item">
               <ActivityGlyph type={a.type} />
-              <div><ActivityDescription description={a.description} /><div className="act-date">{formatDate(a.created_at)}</div></div>
+              <div>
+                <ActivityDescription description={a.description} />
+                <div className="act-date">
+                  <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} hideInstitution />
+                  {formatDate(a.created_at)}
+                </div>
+              </div>
             </div>
           ))}
         </div>
