@@ -39,6 +39,8 @@ const ACTIVITY_GLYPHS = {
   email: { glyph: "✉", bg: "#E4EDFB", fg: "#2A6FDB" },
   call: { glyph: "☎", bg: "#E6F4EC", fg: "#1F8A5B" },
   meeting: { glyph: "◎", bg: "#E6F4EC", fg: "#1F8A5B" },
+  whatsapp: { glyph: "💬", bg: "#25D36622", fg: "#25D366" },
+  linkedin: { glyph: "in", bg: "#0A66C222", fg: "#0A66C2" },
   demo: { glyph: "◎", bg: "#EFEAFB", fg: "#8B5CF6" },
   note: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
   proposal_sent: { glyph: "✎", bg: "#FDF0DA", fg: "#B5791A" },
@@ -2675,7 +2677,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onDelete={deleteContact}
             onCompose={() => setCompose({ contactId: sheetContact.id })}
             onAddActivity={addActivity}
-            onAddTodo={(form) => saveTodo({ contact_id: sheetContact.id, ...form })}
+            onAddTodo={(form) => saveTodo({ ...form, contact_id: sheetContact.id })}
             todos={todos.filter((t) => t.contact_id === sheetContact.id)}
             taskInitial={{ contact_id: sheetContact.id }}
             onToggleTodo={toggleTodo}
@@ -4670,6 +4672,8 @@ const TIMELINE_TABS = [
   { id: "call", label: "Calls" },
   { id: "email", label: "Emails" },
   { id: "meeting", label: "Meetings" },
+  { id: "whatsapp", label: "WhatsApp" },
+  { id: "linkedin", label: "LinkedIn" },
   { id: "note", label: "Notes" },
 ];
 
@@ -4738,6 +4742,23 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
   };
 
   const roles = resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles });
+  // The person's primary role's institution FKs: Quick Add activities and + Task
+  // both auto-cross-link to this so they show on the person's timeline AND their
+  // institution's, without the user manually linking anything.
+  const primaryRole = roles.find((r) => r.is_primary) || roles[0];
+  const primaryInstitution = primaryRole ? {
+    dealId: primaryRole.entity_type === "deal" ? primaryRole.entity_id : null,
+    enablerId: primaryRole.entity_type === "enabler" ? primaryRole.entity_id : null,
+    organizationId: primaryRole.entity_type === "organization" ? primaryRole.entity_id : null,
+  } : null;
+  const taskInitialWithInstitution = {
+    ...(primaryRole ? {
+      deal_id: primaryRole.entity_type === "deal" ? primaryRole.entity_id : undefined,
+      enabler_id: primaryRole.entity_type === "enabler" ? primaryRole.entity_id : undefined,
+      organization_id: primaryRole.entity_type === "organization" ? primaryRole.entity_id : undefined,
+    } : {}),
+    ...taskInitial,
+  };
 
   const instOptions = institutions.map(i => {
     const pe = institutionPrimaryEntity(i);
@@ -4947,7 +4968,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
           organizations={organizations}
           customOptions={customOptions}
           onAddCustomOption={onAddCustomOption}
-          initial={taskInitial}
+          initial={taskInitialWithInstitution}
           onAdd={onAddTodo}
           onToggle={onToggleTodo}
           onUpdate={onUpdateTodo}
@@ -4957,7 +4978,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
 
       <LinkedNotesSection notes={linkedNotes} onOpenNote={onOpenNote} />
 
-      <QuickAdd contactId={contact.id} linkInstitutions={(() => { const seen = new Set(); return roles.map((r) => ({ key: `${r.entity_type}:${r.entity_id}`, label: r.institutionName, dealId: r.entity_type === "deal" ? r.entity_id : null, enablerId: r.entity_type === "enabler" ? r.entity_id : null, organizationId: r.entity_type === "organization" ? r.entity_id : null })).filter((li) => { const k = (li.label || "").trim().toLowerCase(); if (!k || seen.has(k)) return false; seen.add(k); return true; }); })()} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
+      <QuickAdd contactId={contact.id} linkInstitutions={(() => { const seen = new Set(); return roles.map((r) => ({ key: `${r.entity_type}:${r.entity_id}`, label: r.institutionName, dealId: r.entity_type === "deal" ? r.entity_id : null, enablerId: r.entity_type === "enabler" ? r.entity_id : null, organizationId: r.entity_type === "organization" ? r.entity_id : null })).filter((li) => { const k = (li.label || "").trim().toLowerCase(); if (!k || seen.has(k)) return false; seen.add(k); return true; }); })()} primaryInstitution={primaryInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
 
       <div className="timeline">
         <div className="section-label">Activity Timeline</div>
@@ -5038,19 +5059,32 @@ function PeopleSection({ people, activities, contacts, institutionName, customOp
 // linkPeople (institution sheets) and linkInstitutions (person sheets) power the
 // optional cross-link pickers: an activity logged here can carry BOTH the
 // institution FKs and a contact_id, so it appears on both timelines (audit H1).
-function QuickAdd({ dealId = null, enablerId = null, organizationId = null, contactId, linkPeople = [], linkInstitutions = [], customOptions = [], onAddCustomOption = () => {}, onAddActivity, onCreateTasks, showToast }) {
+function QuickAdd({ dealId = null, enablerId = null, organizationId = null, contactId, linkPeople = [], linkInstitutions = [], primaryInstitution = null, customOptions = [], onAddCustomOption = () => {}, onAddActivity, onCreateTasks, showToast }) {
   const readOnly = useReadOnly();
   const [qType, setQType] = useState("call");
   const [qDesc, setQDesc] = useState("");
   const [qWith, setQWith] = useState("");
-  const [qAt, setQAt] = useState("");
-  // Effective FK set for this log: the sheet's own entity plus the optional
-  // cross-link selection.
+  // On a Person Sheet, default the "At institution..." picker to the person's
+  // primary role so a Quick Add activity cross-links to their institution without
+  // the user having to pick anything (audit-style fix: activities logged on a
+  // contact card now always reach the institution timeline too).
+  const [qAt, setQAt] = useState(() => {
+    if (!primaryInstitution) return "";
+    const match = linkInstitutions.find((li) =>
+      (primaryInstitution.dealId && li.dealId === primaryInstitution.dealId) ||
+      (primaryInstitution.enablerId && li.enablerId === primaryInstitution.enablerId) ||
+      (primaryInstitution.organizationId && li.organizationId === primaryInstitution.organizationId));
+    return match ? match.key : "";
+  });
+  // Effective FK set for this log: the sheet's own entity, then an explicit
+  // cross-link pick, then (for a Person Sheet) the person's primary institution
+  // as an automatic fallback so the activity always reaches it.
   const linkedInst = linkInstitutions.find((li) => li.key === qAt) || null;
+  const instFallback = linkedInst || primaryInstitution;
   const fkArgs = () => ({
-    dealId: dealId || (linkedInst ? linkedInst.dealId : null),
-    enablerId: enablerId || (linkedInst ? linkedInst.enablerId : null),
-    organizationId: organizationId || (linkedInst ? linkedInst.organizationId : null),
+    dealId: dealId || (instFallback ? instFallback.dealId : null),
+    enablerId: enablerId || (instFallback ? instFallback.enablerId : null),
+    organizationId: organizationId || (instFallback ? instFallback.organizationId : null),
     contactId: contactId || qWith || null,
   });
   const [posting, setPosting] = useState(false);
