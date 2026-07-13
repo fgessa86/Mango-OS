@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
 import { api } from "./supabase";
-import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
+import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, FATHOM_MARKER, isFathomActivity, stripFathomMarker } from "./utils";
 import MapTab from "./MapTab";
@@ -62,6 +62,31 @@ const firstLine = (s) => { const t = (s || "").trim(); const nl = t.indexOf("\n"
 // Loose email sanity check (a typo'd address otherwise produces a broken Gmail
 // compose link with no feedback, L5). Not RFC-exhaustive; just catches obvious mistakes.
 const isValidEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((s || "").trim());
+
+// An @mangosciences.com address is our own team regardless of whether the
+// sender has a contacts row yet.
+const isInternalEmail = (email) => (email || "").trim().toLowerCase().endsWith("@mangosciences.com");
+
+// True when a calendar event's attendees are ALL internal team: each attendee
+// (paired by index across attendee_emails and attendees) is internal either by
+// an @mangosciences.com email or by matching a contacts row flagged
+// is_internal. Requires at least one attendee to avoid false-positiving a bare
+// event with no attendee data at all.
+function isInternalMeeting(ev, contacts) {
+  const emails = Array.isArray(ev?.attendee_emails) ? ev.attendee_emails.filter(Boolean) : [];
+  const names = Array.isArray(ev?.attendees) ? ev.attendees.filter(Boolean) : [];
+  const total = Math.max(emails.length, names.length);
+  if (total === 0) return false;
+  for (let i = 0; i < total; i++) {
+    const email = (emails[i] || "").trim().toLowerCase();
+    if (isInternalEmail(email)) continue;
+    const name = (names[i] || "").trim().toLowerCase();
+    const contact = (email && contacts.find((c) => (c.email || "").trim().toLowerCase() === email)) ||
+      (name && contacts.find((c) => (c.name || "").trim().toLowerCase() === name));
+    if (!contact?.is_internal) return false;
+  }
+  return true;
+}
 
 // Renders an activity description. Fathom notes (and any description that looks
 // structured: "Heading:" lines and "- " bullets) get light formatting; a Fathom
@@ -2190,7 +2215,63 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     return lines.join("\n\n") || "No history on file yet.";
   };
 
-  const generateBrief = async ({ meeting_title, meeting_date, contact_id, deal_id, enabler_id, organization_id, existingId = null }) => {
+  // Status roll-up context for an INTERNAL team brief (a sync with our own
+  // team, not an external prospect): pipeline movement, key activities, tasks,
+  // unresolved comments from Andy, and deals awaiting a decision.
+  const gatherInternalBriefContext = () => {
+    const now = new Date();
+    const weekAgo = new Date(now); weekAgo.setDate(now.getDate() - 7);
+    const twoWeeksAgo = new Date(now); twoWeeksAgo.setDate(now.getDate() - 14);
+    const lines = [];
+
+    const movedDeals = deals.filter((d) => d.last_activity_at && new Date(d.last_activity_at) >= weekAgo);
+    if (movedDeals.length) lines.push(`DEALS WITH RECENT MOVEMENT (last 7 days):\n${movedDeals.map((d) => `- ${d.company}: ${STAGES.find((s) => s.id === d.stage)?.label || d.stage}${d.value ? `, $${Number(d.value).toLocaleString()}` : ""}`).join("\n")}`);
+
+    const newDeals = deals.filter((d) => d.created_at && new Date(d.created_at) >= weekAgo);
+    if (newDeals.length) lines.push(`NEW DEALS ADDED (last 7 days):\n${newDeals.map((d) => `- ${d.company} (${STAGES.find((s) => s.id === d.stage)?.label || d.stage})`).join("\n")}`);
+
+    const staleDealsList = deals.filter((d) => !["won", "lost"].includes(d.stage) && (!d.last_activity_at || new Date(d.last_activity_at) < twoWeeksAgo));
+    if (staleDealsList.length) lines.push(`STALE DEALS (no activity 14+ days):\n${staleDealsList.map((d) => `- ${d.company}, last activity ${d.last_activity_at ? formatDate(d.last_activity_at) : "never"}`).join("\n")}`);
+
+    const recentActs = activities.filter((a) => (a.deal_id || a.enabler_id) && new Date(a.created_at) >= weekAgo).slice(0, 20);
+    if (recentActs.length) {
+      lines.push(`KEY ACTIVITIES (last 7 days):\n${recentActs.map((a) => {
+        const d = a.deal_id ? deals.find((x) => x.id === a.deal_id) : null;
+        const e = a.enabler_id ? enablers.find((x) => x.id === a.enabler_id) : null;
+        const who = d?.company || e?.name || "General";
+        return `- [${formatDate(a.created_at)}] ${who}: ${firstLine(stripFathomMarker(a.description))}`;
+      }).join("\n")}`);
+    }
+
+    const highPrio = todos.filter((t) => t.status === "open" && t.priority === "high");
+    if (highPrio.length) lines.push(`OPEN HIGH PRIORITY TASKS:\n${highPrio.map((t) => `- ${t.title}${t.due_date ? ` (due ${formatDate(t.due_date)})` : ""}`).join("\n")}`);
+
+    const overdue = todos.filter((t) => t.status === "open" && isOverdue(t.due_date));
+    if (overdue.length) lines.push(`OVERDUE TASKS:\n${overdue.map((t) => `- ${t.title} (was due ${formatDate(t.due_date)})`).join("\n")}`);
+
+    const andyComments = bossComments.filter((c) => c.author === "Andy Liu" && !c.is_read);
+    if (andyComments.length) lines.push(`UNRESOLVED COMMENTS FROM ANDY:\n${andyComments.map((c) => `- ${c.content}`).join("\n")}`);
+
+    const awaitingDecision = deals.filter((d) => ["negotiation", "proposal"].includes(d.stage));
+    if (awaitingDecision.length) lines.push(`DEALS AWAITING A DECISION:\n${awaitingDecision.map((d) => `- ${d.company} (${STAGES.find((s) => s.id === d.stage)?.label || d.stage}${d.value ? `, $${Number(d.value).toLocaleString()}` : ""})`).join("\n")}`);
+
+    return lines.join("\n\n") || "No notable pipeline activity this week.";
+  };
+
+  // Auto-detects which brief to generate for a calendar event (Section 3): a
+  // match to an external deal/enabler/organization, or to a contact who is not
+  // internal, always wins as External; otherwise, if every attendee is internal
+  // team, it is an Internal brief. The user can still toggle manually afterward.
+  const detectBriefType = (ev) => {
+    const contact = ev.matched_contact_id ? contacts.find((c) => c.id === ev.matched_contact_id) : null;
+    const org = ev.matched_organization_id ? organizations.find((o) => o.id === ev.matched_organization_id) : null;
+    const matchedExternal = !!ev.matched_deal_id || !!ev.matched_enabler_id || (!!org && !org.is_internal) || (!!contact && !contact.is_internal);
+    if (matchedExternal) return "external";
+    if (isInternalMeeting(ev, contacts)) return "internal";
+    return "external";
+  };
+
+  const generateBrief = async ({ meeting_title, meeting_date, contact_id, deal_id, enabler_id, organization_id, existingId = null, brief_type = "external" }) => {
     if (briefGenerating) return;
     const contact = contact_id ? contacts.find((c) => c.id === contact_id) : null;
     const deal = deal_id ? deals.find((d) => d.id === deal_id) : null;
@@ -2198,13 +2279,15 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     const org = organization_id ? organizations.find((o) => o.id === organization_id) : null;
     setBriefGenerating(meeting_title || "meeting");
     try {
-      const content = await generateMeetingBrief(gatherBriefContext({ contact, deal, enabler, org }));
+      const content = brief_type === "internal"
+        ? await generateInternalBrief(meeting_title || "Meeting", gatherInternalBriefContext())
+        : await generateMeetingBrief(gatherBriefContext({ contact, deal, enabler, org }));
       if (existingId) {
-        await api("meeting_briefs", "PATCH", { brief_content: content }, `?id=eq.${existingId}`);
-        setMeetingBriefs((prev) => prev.map((b) => (b.id === existingId ? { ...b, brief_content: content } : b)));
+        await api("meeting_briefs", "PATCH", { brief_content: content, brief_type }, `?id=eq.${existingId}`);
+        setMeetingBriefs((prev) => prev.map((b) => (b.id === existingId ? { ...b, brief_content: content, brief_type } : b)));
         setBriefViewId(existingId);
       } else {
-        const clean = { meeting_title: meeting_title || "Meeting", brief_content: content };
+        const clean = { meeting_title: meeting_title || "Meeting", brief_content: content, brief_type };
         if (meeting_date) clean.meeting_date = meeting_date;
         if (contact_id) clean.contact_id = contact_id;
         if (deal_id) clean.deal_id = deal_id;
@@ -2218,6 +2301,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setBriefGenerating(null);
   };
 
+  // Manual override (Section 3): regenerate the currently-viewed brief as the
+  // other type, in case auto-detection guessed wrong.
+  const switchBriefType = (brief) => {
+    generateBrief({ meeting_title: brief.meeting_title, meeting_date: brief.meeting_date, contact_id: brief.contact_id, deal_id: brief.deal_id, enabler_id: brief.enabler_id, organization_id: brief.organization_id, existingId: brief.id, brief_type: brief.brief_type === "internal" ? "external" : "internal" });
+  };
+
   // "Prep Brief" from a Today's Agenda meeting: reuse an existing brief for the
   // same title on the same day instead of regenerating.
   const prepBriefForMeeting = (a) => {
@@ -2228,13 +2317,14 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   };
 
   // "Prep Brief" from a calendar event: reuse an existing brief with the same
-  // title on the same day, else generate one from the event's matched entity.
+  // title on the same day, else generate one from the event's matched entity
+  // (or a status roll-up if detectBriefType decides this is an internal sync).
   const prepBriefForEvent = (ev) => {
     const title = ev.title || "Meeting";
     const day = ev.start_time ? new Date(ev.start_time).toDateString() : null;
     const existing = meetingBriefs.find((b) => b.meeting_title === title && b.meeting_date && new Date(b.meeting_date).toDateString() === day);
     if (existing) { setBriefViewId(existing.id); return; }
-    generateBrief({ meeting_title: title, meeting_date: ev.start_time, contact_id: ev.matched_contact_id, deal_id: ev.matched_deal_id, enabler_id: ev.matched_enabler_id, organization_id: ev.matched_organization_id });
+    generateBrief({ meeting_title: title, meeting_date: ev.start_time, contact_id: ev.matched_contact_id, deal_id: ev.matched_deal_id, enabler_id: ev.matched_enabler_id, organization_id: ev.matched_organization_id, brief_type: detectBriefType(ev) });
   };
 
   // Manually associate an unmatched calendar event with a contact or institution.
@@ -2827,6 +2917,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       {view === "calendar" && (
         <CalendarTab
           events={calendarEvents}
+          contacts={contacts}
           entityName={entityName}
           eventEntityRow={eventEntityRow}
           onOpenEntity={openEntity}
@@ -3155,6 +3246,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onDownloadMaterial={downloadMaterial}
             onSaveGoal={(goal) => updateBriefGoal(brief.id, goal)}
             onRegenerate={bossMode ? null : () => generateBrief({ ...brief, existingId: brief.id })}
+            onSwitchType={bossMode ? null : () => switchBriefType(brief)}
             onDelete={bossMode ? null : () => { if (confirm("Delete this brief?")) deleteBrief(brief.id); }}
             onOpenEntity={(row) => { setBriefViewId(null); openEntity(row); }}
             readOnly={bossMode}
@@ -3255,6 +3347,9 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
             {meetings.map((ev) => {
               const entRow = eventEntityRow ? eventEntityRow(ev) : null;
               const ent = entRow ? entityName(entRow) : "";
+              // Show Prep Brief for any match (including an internal team
+              // contact) or a detected internal-only meeting with no match.
+              const canPrepBrief = !!ent || isInternalMeeting(ev, contacts);
               return (
                 <div key={ev.id} className={`home-card home-meeting ${ent ? "home-task-clickable" : ""}`} onClick={ent ? () => onOpenEntity(entRow) : undefined}>
                   <div className="home-meeting-time">{formatTime(ev.start_time)}</div>
@@ -3265,7 +3360,7 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
                       {ent && <span className="home-meeting-entity">{ent}</span>}
                     </div>
                   </div>
-                  {!bossMode && onPrepBriefEvent && ent && (
+                  {!bossMode && onPrepBriefEvent && canPrepBrief && (
                     <button className="home-prep-btn" disabled={!!briefGenerating} onClick={(e) => { e.stopPropagation(); onPrepBriefEvent(ev); }}>Prep Brief</button>
                   )}
                 </div>
@@ -3589,11 +3684,16 @@ const startOfWeek = (d) => { const x = startOfDay(d); const day = (x.getDay() + 
 
 // One event row shared by Agenda and the Week popover: time, title, location,
 // attendees, matched-entity pill, and a Prep Brief / Link action.
-function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, briefGenerating, readOnly, compact = false }) {
+function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, briefGenerating, readOnly, contacts = [], compact = false }) {
   const [linking, setLinking] = useState(false);
   const entRow = eventEntityRow(ev);
   const ent = entityName(entRow);
   const matched = eventMatchPickType(ev);
+  const internalMeeting = isInternalMeeting(ev, contacts);
+  // Show Prep Brief for ANY match (including an internal team contact) or for
+  // a detected internal-only meeting with no match at all; only fall back to
+  // "Link to entity" when there is truly no match and no internal signal.
+  const canPrepBrief = (matched && ent) || internalMeeting;
   const attendees = Array.isArray(ev.attendees) ? ev.attendees.filter(Boolean) : [];
   return (
     <div className={`cal-event ${compact ? "cal-event-compact" : ""}`}>
@@ -3606,10 +3706,11 @@ function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onPrep
           {matched && ent && (
             <button className={`task-pill ${eventMatchClass(ev)}`} onClick={() => onOpenEntity(entRow)} title={`Open ${ent}`}>{ent}</button>
           )}
-          {!readOnly && matched && ent && (
+          {!matched && internalMeeting && <span className="badge brief-type-internal cal-internal-tag">Internal meeting</span>}
+          {!readOnly && canPrepBrief && (
             <button className="cal-prep-btn" disabled={!!briefGenerating} onClick={() => onPrepBrief(ev)}>Prep Brief</button>
           )}
-          {!readOnly && !matched && (
+          {!readOnly && !canPrepBrief && (
             linking ? (
               <EntityPicker placeholder="Link to contact or institution..." options={linkOptions} value="" onChange={(val) => { const i = val.indexOf(":"); onLink(ev.id, { type: val.slice(0, i), id: val.slice(i + 1) }); setLinking(false); }} />
             ) : (
@@ -3623,7 +3724,7 @@ function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onPrep
 }
 
 // Full-screen Calendar view: Agenda (default) or Week, plus a refresh + last-synced.
-function CalendarTab({ events, entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, onRefresh, lastSynced, briefGenerating }) {
+function CalendarTab({ events, contacts = [], entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, onRefresh, lastSynced, briefGenerating }) {
   const readOnly = useReadOnly();
   const [mode, setMode] = useState("agenda");
   const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
@@ -3645,7 +3746,7 @@ function CalendarTab({ events, entityName, eventEntityRow, onOpenEntity, onPrepB
   });
 
   const [recentOpen, setRecentOpen] = useState(false);
-  const rowProps = { entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, briefGenerating, readOnly };
+  const rowProps = { entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, briefGenerating, readOnly, contacts };
 
   // Week grid days and their events.
   const weekDays = Array.from({ length: 7 }, (_, i) => { const d = new Date(weekStart); d.setDate(weekStart.getDate() + i); return d; });
@@ -3943,15 +4044,20 @@ function MaterialsSection({ materials = [], links = [], onAttach, onRemoveLink, 
 
 // Full brief viewer: AI sections rendered with the structured formatter, an
 // editable "My Goal" field, related materials, and a Regenerate link.
-function BriefModal({ brief, entityName, relatedMaterials = [], onDownloadMaterial, onSaveGoal, onRegenerate, onDelete, onOpenEntity, readOnly, onClose }) {
+function BriefModal({ brief, entityName, relatedMaterials = [], onDownloadMaterial, onSaveGoal, onRegenerate, onSwitchType, onDelete, onOpenEntity, readOnly, onClose }) {
   const [goal, setGoal] = useState(brief.my_goal || "");
   useEffect(() => { setGoal(brief.my_goal || ""); }, [brief.id]);
   const linkedName = entityName(brief);
+  const isInternal = brief.brief_type === "internal";
   return (
     <div className="overlay" onClick={onClose}>
       <div className="modal brief-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <div>
+            <div className="brief-type-row">
+              <span className={`badge brief-type-badge ${isInternal ? "brief-type-internal" : "brief-type-external"}`}>{isInternal ? "Internal Team Brief" : "External Meeting Brief"}</span>
+              {onSwitchType && <button type="button" className="link-btn brief-switch-type" onClick={onSwitchType}>Switch to {isInternal ? "External" : "Internal"}</button>}
+            </div>
             <div className="modal-title">{brief.meeting_title || "Meeting brief"}</div>
             <div className="brief-sub">
               {brief.meeting_date && <span>{formatDateTime(brief.meeting_date)}</span>}

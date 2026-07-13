@@ -257,6 +257,21 @@ ${context}`;
   return text;
 };
 
+// Internal team meeting brief: a status roll-up instead of a relationship prep
+// (auto-selected when a calendar event's attendees are all internal team). The
+// four headings are a contract with the React renderer, same as the external brief.
+export const generateInternalBrief = async (meetingTitle, context) => {
+  const prompt = `Generate an internal team meeting brief for ${meetingTitle}. This is a sync with my own team, not an external prospect. Summarize: 1) PIPELINE MOVEMENT: what progressed, what's new, what stalled this week. 2) DECISIONS NEEDED: deals or issues that need team input or a decision. 3) BLOCKERS: anything I'm stuck on or need help with. 4) HIGHLIGHTS: wins or notable developments worth raising. Keep it crisp and scannable, suitable for a status update.
+
+Format the response as plain text with exactly these four heading lines: "PIPELINE MOVEMENT:", "DECISIONS NEEDED:", "BLOCKERS:", "HIGHLIGHTS:". Under each heading use short plain sentences or "- " bullet lines. No markdown, no asterisks, no backticks. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.
+
+Here is the data:
+${context}`;
+  const text = await plainText(prompt, 600);
+  if (!text) throw new Error("empty brief response");
+  return text;
+};
+
 // Pulls a JSON ARRAY out of a model response (news briefing): strips markdown
 // fences, keeps the substring from the first [ to the last ]. Returns null so
 // callers can decide whether to surface a retry.
