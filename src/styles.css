@@ -344,6 +344,14 @@ select.tier-select { width: auto; max-width: 160px; padding: 6px 10px; font-size
 .entity-picker-option { display: block; width: 100%; text-align: left; border: none; background: transparent; border-radius: 8px; padding: 9px 10px; font-size: 13.5px; font-weight: 600; color: var(--text-2); cursor: pointer; font-family: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .entity-picker-option:hover { background: var(--card-tint); color: var(--text); }
 .entity-picker-empty { padding: 8px 10px; }
+.entity-picker-create, .note-link-create { color: var(--accent-strong); border-top: 1px solid var(--divider); margin-top: 4px; padding-top: 10px; }
+
+/* Inline "+ Add new institution" mini-form, embedded inside any institution
+   picker (select, EntityPicker, or the Notes link picker). */
+.inst-create-inline { display: flex; flex-direction: column; gap: 8px; background: var(--card-tint); border: 1px solid var(--divider); border-radius: 12px; padding: 10px; min-width: 220px; }
+.inst-create-inline-flags { display: flex; gap: 14px; }
+.inst-create-inline-flags .checkbox-label { font-size: 13px; }
+.inst-create-inline-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* Linked-entity pills below a task title */
 .task-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
@@ -450,6 +458,7 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .quickadd-input { flex: 1 1 240px; }
 .quickadd-textarea { flex: 1 1 240px; height: 90px; resize: vertical; }
 .quickadd-type { flex: 0 0 auto; width: auto; }
+.quickadd-linkedin-url { margin-top: 8px; max-width: 320px; }
 .quickadd-transcript-actions { margin-top: 8px; display: flex; justify-content: flex-end; }
 .photo-input-hidden { display: none; }
 .photo-btn { flex: 0 0 auto; font-size: 15px; padding: 8px 12px; }

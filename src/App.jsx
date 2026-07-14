@@ -1578,8 +1578,8 @@ export default function App() {
 
   // Creates a contact plus one or more contact_roles in one go, for the Ecosystem
   // tab's "+ Person" form (a primary role plus any "Add another role" rows).
-  // Each role's institutionKey is "type:id" for an existing institution, or a
-  // { newName, newType } object to create a fresh organization inline. Also
+  // Each role's institutionKey is "type:id" (an institution created inline via
+  // InstitutionSelect is already a real row by the time this saves). Also
   // writes the optional "connected through" and "can help us reach" edges.
   const addPersonWithRoles = async ({ name, company, role, email, phone, linkedin, warmth, notes, roles, connectedThrough, canReach, relationship }) => {
     try {
@@ -1587,19 +1587,12 @@ export default function App() {
       // sheet), populate the contact's own company/role fields in the same save.
       const created = await persistContact({ name, company, role, email, phone, linkedin, warmth, notes });
       if (!created) throw new Error("Could not create contact");
-      const validRoles = (roles || []).filter((r) => r.institutionKey || (r.newName || "").trim());
+      const validRoles = (roles || []).filter((r) => r.institutionKey);
       let primaryAssigned = false;
       for (const r of validRoles) {
-        let entityType, entityId;
-        if (r.newName && r.newName.trim()) {
-          const org = await persistOrganization({ name: r.newName.trim(), type: r.newType || "hospital" });
-          if (!org) continue;
-          entityType = "organization"; entityId = org.id;
-        } else {
-          const idx = r.institutionKey.indexOf(":");
-          entityType = r.institutionKey.slice(0, idx);
-          entityId = r.institutionKey.slice(idx + 1);
-        }
+        const idx = r.institutionKey.indexOf(":");
+        const entityType = r.institutionKey.slice(0, idx);
+        const entityId = r.institutionKey.slice(idx + 1);
         await persistPersonRole({ contactId: created.id, entityType, entityId, roleTitle: r.role, isPrimary: !primaryAssigned });
         primaryAssigned = true;
       }
@@ -1704,6 +1697,25 @@ export default function App() {
         autoFillInstitution({ key: name.toLowerCase(), name, city: form.city, orgId: org.id });
       }
     } catch { showToast("Error adding institution"); }
+  };
+
+  // Same creation logic as addInstitution, but for the "+ Add new institution"
+  // option inside any institution picker: no navigation, no auto-research, and
+  // it returns the created ids (plus a "preferred" type:id ref, following the
+  // same deal > enabler > organization precedence as institutionPrimaryEntity)
+  // so the picker can select the new institution immediately and continue.
+  const createInstitutionInline = async ({ name, type, isTarget, isEnabler }) => {
+    const cleanName = (name || "").trim();
+    if (!cleanName) { showToast("Name is required"); return null; }
+    try {
+      const org = await persistOrganization({ name: cleanName, type });
+      const deal = isTarget ? await createDealForInstitution({ name: cleanName }) : null;
+      const enabler = isEnabler ? await createEnablerForInstitution({ name: cleanName }) : null;
+      await loadData();
+      showToast("Institution created and selected.");
+      const preferred = deal ? { type: "deal", id: deal.id } : enabler ? { type: "enabler", id: enabler.id } : { type: "organization", id: org.id };
+      return { orgId: org?.id || null, dealId: deal?.id || null, enablerId: enabler?.id || null, name: cleanName, preferred };
+    } catch { showToast("Error creating institution"); return null; }
   };
 
   // Toggles an institution's Target or Enabler flag directly from the sheet:
@@ -2709,6 +2721,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             contactRoles={contactRoles}
             customOptions={customOptions}
             onAddCustomOption={addCustomOption}
+            onCreateInstitution={createInstitutionInline}
             onUpdate={(patch) => updateInstitution(inst, patch)}
             onUpdateCity={(city) => updateInstitutionCity(inst, city)}
             onRename={(name) => renameInstitution(inst, name)}
@@ -2781,6 +2794,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             institutions={institutions}
             customOptions={customOptions}
             onAddCustomOption={addCustomOption}
+            onCreateInstitution={createInstitutionInline}
             onUpdate={(patch) => updateContact(sheetContact.id, patch)}
             onDelete={deleteContact}
             onCompose={() => setCompose({ contactId: sheetContact.id })}
@@ -2867,6 +2881,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onPrepBrief={prepBriefForEvent}
           onLink={linkCalendarEvent}
           linkOptions={calendarLinkOptions}
+          onCreateInstitution={createInstitutionInline}
+          customOptions={customOptions}
+          onAddCustomOption={addCustomOption}
           onRefresh={refreshCalendar}
           lastSynced={calendarLastSynced}
           briefGenerating={briefGenerating}
@@ -2952,6 +2969,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             customOptions={customOptions}
             onAddCustomOption={addCustomOption}
             onAddInstitution={addInstitution}
+            onCreateInstitution={createInstitutionInline}
             onAddPersonWithRoles={addPersonWithRoles}
             onUpdateInstitution={updateInstitution}
             onUpdateInstitutionCity={updateInstitutionCity}
@@ -3000,7 +3018,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           </div>
           {!bossMode && (
             <div className="tasks-quickadd">
-              <TaskForm deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveTodo} submitLabel="Add Task" />
+              <TaskForm deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onCreateInstitution={createInstitutionInline} onSave={saveTodo} submitLabel="Add Task" />
             </div>
           )}
           <div className="timeline-tabs mb">
@@ -3067,6 +3085,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onDelete={deleteNote}
           onTogglePin={(n) => updateNote(n.id, { is_pinned: !n.is_pinned })}
           onLink={linkNote}
+          onCreateInstitution={createInstitutionInline}
+          customOptions={customOptions}
+          onAddCustomOption={addCustomOption}
           folders={noteFolders}
           onCreateFolder={createFolder}
           onRenameFolder={(id, name) => updateFolder(id, { name })}
@@ -3629,7 +3650,7 @@ const startOfWeek = (d) => { const x = startOfDay(d); const day = (x.getDay() + 
 
 // One event row shared by Agenda and the Week popover: time, title, location,
 // attendees, matched-entity pill, and a Prep Brief / Link action.
-function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, briefGenerating, readOnly, contacts = [], compact = false }) {
+function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, briefGenerating, readOnly, contacts = [], compact = false }) {
   const [linking, setLinking] = useState(false);
   const entRow = eventEntityRow(ev);
   const ent = entityName(entRow);
@@ -3657,7 +3678,11 @@ function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onPrep
           )}
           {!readOnly && !canPrepBrief && (
             linking ? (
-              <EntityPicker placeholder="Link to contact or institution..." options={linkOptions} value="" onChange={(val) => { const i = val.indexOf(":"); onLink(ev.id, { type: val.slice(0, i), id: val.slice(i + 1) }); setLinking(false); }} />
+              <EntityPicker
+                placeholder="Link to contact or institution..." options={linkOptions} value=""
+                onChange={(val) => { const i = val.indexOf(":"); onLink(ev.id, { type: val.slice(0, i), id: val.slice(i + 1) }); setLinking(false); }}
+                onCreateInstitution={onCreateInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+              />
             ) : (
               <button className="cal-link-btn" onClick={() => setLinking(true)}>Link to entity</button>
             )
@@ -3669,7 +3694,7 @@ function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onPrep
 }
 
 // Full-screen Calendar view: Agenda (default) or Week, plus a refresh + last-synced.
-function CalendarTab({ events, contacts = [], entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, onRefresh, lastSynced, briefGenerating }) {
+function CalendarTab({ events, contacts = [], entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, onRefresh, lastSynced, briefGenerating }) {
   const readOnly = useReadOnly();
   const [mode, setMode] = useState("agenda");
   const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
@@ -3691,7 +3716,7 @@ function CalendarTab({ events, contacts = [], entityName, eventEntityRow, onOpen
   });
 
   const [recentOpen, setRecentOpen] = useState(false);
-  const rowProps = { entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, briefGenerating, readOnly, contacts };
+  const rowProps = { entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, onCreateInstitution, customOptions, onAddCustomOption, briefGenerating, readOnly, contacts };
 
   // Week grid days and their events.
   const weekDays = Array.from({ length: 7 }, (_, i) => { const d = new Date(weekStart); d.setDate(weekStart.getDate() + i); return d; });
@@ -4969,7 +4994,7 @@ function flattenFolders(folders, parentId = null, depth = 0) {
 // Notes tab: a folder-tree list panel (pinned at top, then folders, then an
 // Unfiled section) beside a distraction-free editor. On mobile the two are
 // separate full-screen views (list, then editor).
-function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, onTogglePin, onLink, folders = [], onCreateFolder, onRenameFolder, onDeleteFolder, onMoveNote, deals, enablers, organizations, contacts, isMobile, bossMode }) {
+function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, onTogglePin, onLink, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, folders = [], onCreateFolder, onRenameFolder, onDeleteFolder, onMoveNote, deals, enablers, organizations, contacts, isMobile, bossMode }) {
   const readOnly = useReadOnly();
   const [search, setSearch] = useState("");
   const [focusNew, setFocusNew] = useState(null);
@@ -5126,6 +5151,9 @@ function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, o
             onDelete={onDelete}
             onTogglePin={onTogglePin}
             onLink={onLink}
+            onCreateInstitution={onCreateInstitution}
+            customOptions={customOptions}
+            onAddCustomOption={onAddCustomOption}
             onBack={() => onSelect(null)}
             entityCtx={entityCtx}
             folders={folders}
@@ -5169,11 +5197,12 @@ function NoteListItem({ note, active, onSelect, entityCtx, indent = 0, draggable
   );
 }
 
-function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate, onDelete, onTogglePin, onLink, onBack, entityCtx, folders = [], onMoveNote, isMobile }) {
+function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate, onDelete, onTogglePin, onLink, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, onBack, entityCtx, folders = [], onMoveNote, isMobile }) {
   const [title, setTitle] = useState(note.title || "");
   const [content, setContent] = useState(note.content || "");
   const [saved, setSaved] = useState(false);
   const [linking, setLinking] = useState(false);
+  const [creatingInst, setCreatingInst] = useState(false);
   const [linkQuery, setLinkQuery] = useState("");
   const [folderPicking, setFolderPicking] = useState(false);
   const titleRef = useRef(null);
@@ -5258,19 +5287,35 @@ function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate
                 <button className="note-link-remove" onClick={() => onLink(note.id, null)} title="Unlink">✕</button>
               </span>
             ) : linking ? (
-              <div className="note-link-picker">
-                <input autoFocus className="input note-link-search" placeholder="Search deals, people..." value={linkQuery} onChange={(e) => setLinkQuery(e.target.value)} onBlur={() => setTimeout(() => setLinking(false), 150)} />
-                {linkQuery.trim() && (
-                  <div className="note-link-options">
-                    {options.length === 0 ? <div className="empty-small">No matches.</div> : options.map((o) => (
-                      <button key={`${o.type}-${o.entityId}`} className="note-link-option" onMouseDown={() => { onLink(note.id, o); setLinking(false); setLinkQuery(""); }}>
-                        <span className="note-link-option-name">{o.name}</span>
-                        <span className="note-link-option-kind">{o.kind}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+              creatingInst ? (
+                <InstitutionCreateForm
+                  customOptions={customOptions}
+                  onAddCustomOption={onAddCustomOption}
+                  onCancel={() => setCreatingInst(false)}
+                  onCreate={async (form) => {
+                    const created = await onCreateInstitution(form);
+                    if (created?.preferred) { onLink(note.id, { type: created.preferred.type, entityId: created.preferred.id }); setCreatingInst(false); setLinking(false); return true; }
+                    return false;
+                  }}
+                />
+              ) : (
+                <div className="note-link-picker">
+                  <input autoFocus className="input note-link-search" placeholder="Search deals, people..." value={linkQuery} onChange={(e) => setLinkQuery(e.target.value)} onBlur={() => setTimeout(() => setLinking(false), 150)} />
+                  {linkQuery.trim() && (
+                    <div className="note-link-options">
+                      {options.length === 0 ? <div className="empty-small">No matches.</div> : options.map((o) => (
+                        <button key={`${o.type}-${o.entityId}`} className="note-link-option" onMouseDown={() => { onLink(note.id, o); setLinking(false); setLinkQuery(""); }}>
+                          <span className="note-link-option-name">{o.name}</span>
+                          <span className="note-link-option-kind">{o.kind}</span>
+                        </button>
+                      ))}
+                      {onCreateInstitution && (
+                        <button className="note-link-option note-link-create" onMouseDown={() => setCreatingInst(true)}>+ Add new institution</button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
             ) : (
               <button className="note-tool-btn" onClick={() => { setLinking(true); setLinkQuery(""); }}>Link to...</button>
             )}
@@ -5394,7 +5439,7 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onUpdate, onDelete, onCompose, onAddActivity, onAddTodo, todos = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onAddTodo, todos = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -5453,6 +5498,15 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
     await onAddRole({ contactId: contact.id, entityType: roleInst.slice(0, idx), entityId: roleInst.slice(idx + 1), roleTitle });
     setAddingRole(false); setRoleInst(""); setRoleTitle("");
   };
+
+  // Quick Add's "At institution..." picker only offers this person's own roles
+  // (it cross-links an activity to an institution they already belong to), so
+  // creating one inline from there also links this person to it right away.
+  const createInstitutionAndLinkContact = onCreateInstitution ? async (form) => {
+    const created = await onCreateInstitution(form);
+    if (created?.preferred) await onAddRole({ contactId: contact.id, entityType: created.preferred.type, entityId: created.preferred.id, roleTitle: "" });
+    return created;
+  } : undefined;
 
   const relLabel = (id) => PERSON_CONNECTION_RELATIONSHIPS.find(r => r.id === id)?.label || NETWORK_EDGE_RELATIONSHIPS.find(r => r.id === id)?.label || id;
   // Resolves a "(role, institution)" hint for a person, using their primary role.
@@ -5574,10 +5628,10 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
         </div>
         {addingRole && (
           <div className="quickadd-inline-row mb-sm">
-            <select className="input" value={roleInst} onChange={e => setRoleInst(e.target.value)}>
-              <option value="">Select institution...</option>
-              {instOptions.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
-            </select>
+            <InstitutionSelect
+              options={instOptions} value={roleInst} onChange={setRoleInst} optKey="key"
+              onCreateInstitution={onCreateInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+            />
             <input className="input" placeholder="Role title (e.g. CEO)" value={roleTitle} onChange={e => setRoleTitle(e.target.value)} />
             <button onClick={submitRole} className="btn-primary" disabled={!roleInst}>Add</button>
           </div>
@@ -5650,6 +5704,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
           organizations={organizations}
           customOptions={customOptions}
           onAddCustomOption={onAddCustomOption}
+          onCreateInstitution={onCreateInstitution}
           initial={taskInitialWithInstitution}
           onAdd={onAddTodo}
           onToggle={onToggleTodo}
@@ -5660,7 +5715,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
 
       <LinkedNotesSection notes={linkedNotes} onOpenNote={onOpenNote} />
 
-      <QuickAdd contactId={contact.id} linkInstitutions={(() => { const seen = new Set(); return roles.map((r) => ({ key: `${r.entity_type}:${r.entity_id}`, label: r.institutionName, dealId: r.entity_type === "deal" ? r.entity_id : null, enablerId: r.entity_type === "enabler" ? r.entity_id : null, organizationId: r.entity_type === "organization" ? r.entity_id : null })).filter((li) => { const k = (li.label || "").trim().toLowerCase(); if (!k || seen.has(k)) return false; seen.add(k); return true; }); })()} primaryInstitution={primaryInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
+      <QuickAdd contactId={contact.id} contactLinkedin={contact.linkedin} onSaveContactLinkedin={(url) => onUpdate({ linkedin: url })} linkInstitutions={(() => { const seen = new Set(); return roles.map((r) => ({ key: `${r.entity_type}:${r.entity_id}`, label: r.institutionName, dealId: r.entity_type === "deal" ? r.entity_id : null, enablerId: r.entity_type === "enabler" ? r.entity_id : null, organizationId: r.entity_type === "organization" ? r.entity_id : null })).filter((li) => { const k = (li.label || "").trim().toLowerCase(); if (!k || seen.has(k)) return false; seen.add(k); return true; }); })()} primaryInstitution={primaryInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCreateInstitution={createInstitutionAndLinkContact} onAddActivity={onAddActivity} onCreateTasks={onAddTodo ? (tasks) => Promise.all(tasks.map((t) => onAddTodo(t))) : undefined} showToast={showToast} />
 
       <div className="timeline">
         <div className="section-label">Activity Timeline</div>
@@ -5744,10 +5799,11 @@ function PeopleSection({ people, activities, contacts, institutionName, customOp
 // linkPeople (institution sheets) and linkInstitutions (person sheets) power the
 // optional cross-link pickers: an activity logged here can carry BOTH the
 // institution FKs and a contact_id, so it appears on both timelines (audit H1).
-function QuickAdd({ dealId = null, enablerId = null, organizationId = null, contactId, linkPeople = [], linkInstitutions = [], primaryInstitution = null, customOptions = [], onAddCustomOption = () => {}, onAddActivity, onCreateTasks, showToast }) {
+function QuickAdd({ dealId = null, enablerId = null, organizationId = null, contactId, contactLinkedin = null, onSaveContactLinkedin, linkPeople = [], linkInstitutions = [], primaryInstitution = null, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onAddActivity, onCreateTasks, showToast }) {
   const readOnly = useReadOnly();
   const [qType, setQType] = useState("call");
   const [qDesc, setQDesc] = useState("");
+  const [linkedinUrl, setLinkedinUrl] = useState("");
   const [qWith, setQWith] = useState("");
   // On a Person Sheet, default the "At institution..." picker to the person's
   // primary role so a Quick Add activity cross-links to their institution without
@@ -5761,10 +5817,19 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
       (primaryInstitution.organizationId && li.organizationId === primaryInstitution.organizationId));
     return match ? match.key : "";
   });
+  // Holds the FK set for an institution created inline via "+ Add new
+  // institution" here, so it resolves immediately even before linkInstitutions
+  // (a prop derived from already-loaded state) has caught up with a reload.
+  const [qAtOverride, setQAtOverride] = useState(null);
+  const handleCreateInstitution = onCreateInstitution ? async (form) => {
+    const created = await onCreateInstitution(form);
+    if (created?.preferred) setQAtOverride({ key: `${created.preferred.type}:${created.preferred.id}`, dealId: created.dealId, enablerId: created.enablerId, organizationId: created.orgId });
+    return created;
+  } : undefined;
   // Effective FK set for this log: the sheet's own entity, then an explicit
   // cross-link pick, then (for a Person Sheet) the person's primary institution
   // as an automatic fallback so the activity always reaches it.
-  const linkedInst = linkInstitutions.find((li) => li.key === qAt) || null;
+  const linkedInst = linkInstitutions.find((li) => li.key === qAt) || (qAtOverride && qAtOverride.key === qAt ? qAtOverride : null);
   const instFallback = linkedInst || primaryInstitution;
   const fkArgs = () => ({
     dealId: dealId || (instFallback ? instFallback.dealId : null),
@@ -5879,7 +5944,9 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
     try {
       const fk = fkArgs();
       await onAddActivity(fk.dealId, fk.contactId, { type: qType, description: text }, fk.enablerId, fk.organizationId);
-      setQDesc(""); setQWith(""); setQAt("");
+      const linkedinToSave = linkedinUrl.trim();
+      if (qType === "linkedin" && linkedinToSave && onSaveContactLinkedin) await onSaveContactLinkedin(linkedinToSave);
+      setQDesc(""); setQWith(""); setQAt(""); setLinkedinUrl("");
     } finally { setPosting(false); }
   };
 
@@ -5953,17 +6020,27 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
             {linkPeople.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
         )}
-        {linkInstitutions.length > 0 && (
-          <select className="input quickadd-link" value={qAt} onChange={(e) => setQAt(e.target.value)} title="Also log this on an institution's timeline">
-            <option value="">At institution...</option>
-            {linkInstitutions.map((li) => <option key={li.key} value={li.key}>{li.label}</option>)}
-          </select>
+        {(linkInstitutions.length > 0 || onCreateInstitution) && (
+          <InstitutionSelect
+            options={linkInstitutions} value={qAt} onChange={setQAt} optKey="key" placeholder="At institution..."
+            className="input quickadd-link" title="Also log this on an institution's timeline"
+            onCreateInstitution={handleCreateInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+          />
         )}
         <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" className="photo-input-hidden" onChange={pickPhoto} />
         <button type="button" onClick={() => fileInputRef.current?.click()} className="btn-sec photo-btn" title="Upload photo of notes">📷</button>
         <button type="button" onClick={micTap} className={`btn-sec voice-mic-btn ${recording ? "recording" : ""}`} title="Record a voice note" disabled={voiceProcessing}>{recording ? "⏹" : "🎤"}</button>
         <button onClick={submit} className="btn-primary" disabled={!qDesc.trim() || posting}>Add</button>
       </div>
+
+      {qType === "linkedin" && onSaveContactLinkedin && !contactLinkedin && (
+        <input
+          className="input quickadd-linkedin-url"
+          placeholder="LinkedIn profile URL (optional)"
+          value={linkedinUrl}
+          onChange={(e) => setLinkedinUrl(e.target.value)}
+        />
+      )}
 
       {recording && (
         <div className="voice-recording-bar">
@@ -6081,11 +6158,84 @@ function SummaryCard({ entity, activities, onGenerateSummary, onSaveSummary, sum
   );
 }
 
+// The compact inline "+ Add new institution" mini-form embedded directly inside
+// any institution picker (never navigates away): name, type, Target/Enabler.
+// `onCreate` is expected to create the institution and resolve to a truthy
+// value on success (falsy leaves the form open so the user can retry).
+function InstitutionCreateForm({ customOptions = [], onAddCustomOption = () => {}, onCreate, onCancel }) {
+  const [name, setName] = useState("");
+  const [type, setType] = useState("hospital");
+  const [isTarget, setIsTarget] = useState(false);
+  const [isEnabler, setIsEnabler] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const typeOpts = optionsWithCustom(INSTITUTION_TYPES, customOptions, "institution_type");
+
+  const submit = async () => {
+    if (!name.trim() || saving) return;
+    setSaving(true);
+    try {
+      const ok = await onCreate({ name: name.trim(), type, isTarget, isEnabler });
+      if (!ok) setSaving(false);
+    } catch { setSaving(false); }
+  };
+
+  return (
+    <div className="inst-create-inline" onClick={(e) => e.stopPropagation()}>
+      <input
+        className="input" placeholder="Institution name" autoFocus value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") onCancel(); }}
+      />
+      <SelectWithCustom options={typeOpts} value={type} onChange={(v) => { setType(v); trackCustom("institution_type", typeOpts, onAddCustomOption)(v); }} />
+      <div className="inst-create-inline-flags">
+        <label className="checkbox-label"><input type="checkbox" checked={isTarget} onChange={(e) => setIsTarget(e.target.checked)} /> Target</label>
+        <label className="checkbox-label"><input type="checkbox" checked={isEnabler} onChange={(e) => setIsEnabler(e.target.checked)} /> Enabler</label>
+      </div>
+      <div className="inst-create-inline-actions">
+        <button type="button" className="btn-sec" onMouseDown={onCancel}>Cancel</button>
+        <button type="button" className="btn-primary" onMouseDown={submit} disabled={!name.trim() || saving}>{saving ? "Creating..." : "Create"}</button>
+      </div>
+    </div>
+  );
+}
+
+// Plain-<select>-based institution picker (the app's usual pattern for a single
+// institution field). Adds a "+ Add new institution" option at the bottom;
+// picking it swaps the select for InstitutionCreateForm, and on success selects
+// the new institution and returns to the normal dropdown.
+function InstitutionSelect({ options, value, onChange, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, placeholder = "Select institution...", className = "input", optKey = "value", rawId = false, title }) {
+  const [creating, setCreating] = useState(false);
+  if (creating) {
+    return (
+      <InstitutionCreateForm
+        customOptions={customOptions}
+        onAddCustomOption={onAddCustomOption}
+        onCancel={() => setCreating(false)}
+        onCreate={async (form) => {
+          const created = await onCreateInstitution(form);
+          if (created?.preferred) { onChange(rawId ? String(created.preferred.id) : `${created.preferred.type}:${created.preferred.id}`); setCreating(false); return true; }
+          return false;
+        }}
+      />
+    );
+  }
+  return (
+    <select className={className} title={title} value={value} onChange={(e) => { if (e.target.value === "__create__") setCreating(true); else onChange(e.target.value); }}>
+      <option value="">{placeholder}</option>
+      {options.map((o) => <option key={o[optKey]} value={o[optKey]}>{o.label}</option>)}
+      {onCreateInstitution && <option value="__create__">+ Add new institution</option>}
+    </select>
+  );
+}
+
 // Searchable single-select for linking a task to one entity. Shows the picked
-// item as a removable chip; otherwise a filter input over the options.
-function EntityPicker({ placeholder, options, value, onChange }) {
+// item as a removable chip; otherwise a filter input over the options. When
+// `onCreateInstitution` is supplied, an extra "+ Add new institution" entry at
+// the bottom of the results swaps the dropdown for an inline creation form.
+function EntityPicker({ placeholder, options, value, onChange, onCreateInstitution, customOptions = [], onAddCustomOption = () => {} }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
+  const [creating, setCreating] = useState(false);
   const selected = options.find((o) => o.value === value);
   const query = q.trim().toLowerCase();
   const filtered = (query ? options.filter((o) => o.label.toLowerCase().includes(query)) : options).slice(0, 8);
@@ -6096,6 +6246,22 @@ function EntityPicker({ placeholder, options, value, onChange }) {
           {selected.label}
           <button type="button" className="entity-picker-clear" onClick={() => onChange("")} title="Unlink">✕</button>
         </span>
+      </div>
+    );
+  }
+  if (creating) {
+    return (
+      <div className="entity-picker">
+        <InstitutionCreateForm
+          customOptions={customOptions}
+          onAddCustomOption={onAddCustomOption}
+          onCancel={() => setCreating(false)}
+          onCreate={async (form) => {
+            const created = await onCreateInstitution(form);
+            if (created?.preferred) { onChange(`${created.preferred.type}:${created.preferred.id}`); setCreating(false); setOpen(false); return true; }
+            return false;
+          }}
+        />
       </div>
     );
   }
@@ -6114,6 +6280,9 @@ function EntityPicker({ placeholder, options, value, onChange }) {
           {filtered.length === 0 ? <div className="empty-small entity-picker-empty">No matches.</div> : filtered.map((o) => (
             <button type="button" key={o.value} className="entity-picker-option" onMouseDown={() => { onChange(o.value); setQ(""); setOpen(false); }}>{o.label}</button>
           ))}
+          {onCreateInstitution && (
+            <button type="button" className="entity-picker-option entity-picker-create" onMouseDown={() => setCreating(true)}>+ Add new institution</button>
+          )}
         </div>
       )}
     </div>
@@ -6125,7 +6294,7 @@ function EntityPicker({ placeholder, options, value, onChange }) {
 // institution (enabler or organization), and contact. `initial` pre-fills from
 // context; when there is no onCancel it behaves as a persistent quick-add and
 // resets after each save.
-function TaskForm({ deals = [], enablers = [], organizations = [], contacts = [], customOptions = [], onAddCustomOption = () => {}, initial = {}, onSave, onCancel, submitLabel = "Add Task" }) {
+function TaskForm({ deals = [], enablers = [], organizations = [], contacts = [], customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, initial = {}, onSave, onCancel, submitLabel = "Add Task" }) {
   const [title, setTitle] = useState(initial.title || "");
   const [priority, setPriority] = useState(initial.priority || "medium");
   const [dueDate, setDueDate] = useState(initial.due_date || "");
@@ -6140,6 +6309,10 @@ function TaskForm({ deals = [], enablers = [], organizations = [], contacts = []
   // enablers and organizations (prefer enabler so its gold pill is kept).
   const instOpts = dedupeInstitutionOptions({ enablers, organizations, prefer: ["enabler", "organization"] });
   const contactOpts = contacts.map((c) => ({ value: c.id, label: c.name })).filter((o) => o.label);
+  // A freshly created institution flagged as a Target resolves to "deal:id"
+  // (there is no separate deal picker to fall back to here), so route it to
+  // the Deal picker instead of the Institution one.
+  const handleInstChange = (v) => { if (v.startsWith("deal:")) { setDealId(v.slice(5)); setInst(""); } else setInst(v); };
 
   const submit = async () => {
     if (!title.trim() || saving) return;
@@ -6162,7 +6335,7 @@ function TaskForm({ deals = [], enablers = [], organizations = [], contacts = []
       </div>
       <div className="task-form-links">
         <div className="task-form-link"><span className="task-form-link-label">Deal</span><EntityPicker placeholder="Search deals..." options={dealOpts} value={dealId} onChange={setDealId} /></div>
-        <div className="task-form-link"><span className="task-form-link-label">Institution</span><EntityPicker placeholder="Search enablers and orgs..." options={instOpts} value={inst} onChange={setInst} /></div>
+        <div className="task-form-link"><span className="task-form-link-label">Institution</span><EntityPicker placeholder="Search enablers and orgs..." options={instOpts} value={inst} onChange={handleInstChange} onCreateInstitution={onCreateInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption} /></div>
         <div className="task-form-link"><span className="task-form-link-label">Contact</span><EntityPicker placeholder="Search contacts..." options={contactOpts} value={contactId} onChange={setContactId} /></div>
       </div>
       <div className="task-form-actions">
@@ -6191,7 +6364,7 @@ function TaskPills({ todo, deals = [], enablers = [], organizations = [], contac
   );
 }
 
-function TodoRow({ todo, contacts = [], deals = [], enablers = [], organizations = [], customOptions = [], onAddCustomOption = () => {}, onToggle, onUpdate, onNavigate }) {
+function TodoRow({ todo, contacts = [], deals = [], enablers = [], organizations = [], customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onToggle, onUpdate, onNavigate }) {
   const readOnly = useReadOnly();
   const [editing, setEditing] = useState(false);
   const overdue = todo.status !== "completed" && isOverdue(todo.due_date);
@@ -6204,7 +6377,7 @@ function TodoRow({ todo, contacts = [], deals = [], enablers = [], organizations
         <div className="todo-main">
           <TaskForm
             deals={deals} enablers={enablers} organizations={organizations} contacts={contacts}
-            customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+            customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCreateInstitution={onCreateInstitution}
             initial={todo} submitLabel="Save"
             onSave={(form) => { onUpdate(todo.id, form); setEditing(false); }}
             onCancel={() => setEditing(false)}
@@ -6239,13 +6412,13 @@ function TodoRow({ todo, contacts = [], deals = [], enablers = [], organizations
 
 // A tasks section for a sheet (institution "To-Dos" or person "Tasks"). The
 // "+ Task" button expands the shared TaskForm, pre-filled from `initial`.
-function TodoSection({ label = "To-Dos", todos, contacts = [], deals = [], enablers = [], organizations = [], customOptions = [], onAddCustomOption = () => {}, initial = {}, onAdd, onToggle, onUpdate, onNavigate }) {
+function TodoSection({ label = "To-Dos", todos, contacts = [], deals = [], enablers = [], organizations = [], customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, initial = {}, onAdd, onToggle, onUpdate, onNavigate }) {
   const readOnly = useReadOnly();
   const [showForm, setShowForm] = useState(false);
   const [showCompleted, setShowCompleted] = useState(false);
   const open = sortTodos(todos.filter(t => t.status !== "completed"));
   const completed = todos.filter(t => t.status === "completed").slice().sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at));
-  const rowProps = { contacts, deals, enablers, organizations, customOptions, onAddCustomOption, onToggle, onUpdate, onNavigate };
+  const rowProps = { contacts, deals, enablers, organizations, customOptions, onAddCustomOption, onCreateInstitution, onToggle, onUpdate, onNavigate };
 
   return (
     <div className="todo-section">
@@ -6256,7 +6429,7 @@ function TodoSection({ label = "To-Dos", todos, contacts = [], deals = [], enabl
       {showForm && (
         <TaskForm
           deals={deals} enablers={enablers} organizations={organizations} contacts={contacts}
-          customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+          customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCreateInstitution={onCreateInstitution}
           initial={initial} submitLabel="Add Task"
           onCancel={() => setShowForm(false)}
           onSave={async (form) => { await onAdd(form); setShowForm(false); }}
@@ -6350,7 +6523,7 @@ function findNetworkPaths(deal, rootOrg, networkEdges, organizations, enablers, 
 }
 
 
-function AddOrgLinkModal({ title, pickLabel, entityOptions, showRole, customOptions = [], onAddCustomOption = () => {}, onSave, onClose }) {
+function AddOrgLinkModal({ title, pickLabel, entityOptions, showRole, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onSave, onClose }) {
   const [entityId, setEntityId] = useState("");
   const [relationship, setRelationship] = useState("knows");
   const [role, setRole] = useState("");
@@ -6361,15 +6534,16 @@ function AddOrgLinkModal({ title, pickLabel, entityOptions, showRole, customOpti
   return (
     <div className="overlay" onClick={onClose}><div className="modal modal-sm" onClick={e => e.stopPropagation()}>
       <div className="modal-header"><div className="modal-title">{title}</div><button onClick={onClose} className="close-btn">✕</button></div>
-      {entityOptions.length === 0 ? (
+      {entityOptions.length === 0 && !onCreateInstitution ? (
         <div className="empty-small">Nothing available to link.</div>
       ) : (
         <div className="mb-sm">
           <label className="label">{pickLabel}</label>
-          <select className="input" value={entityId} onChange={e => setEntityId(e.target.value)}>
-            <option value="">Select...</option>
-            {entityOptions.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
-          </select>
+          <InstitutionSelect
+            options={entityOptions} value={entityId} onChange={setEntityId} optKey="id" placeholder="Select..." rawId
+            onCreateInstitution={onCreateInstitution ? async (form) => { const created = await onCreateInstitution(form); return created ? { preferred: { id: created.orgId } } : null; } : undefined}
+            customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+          />
         </div>
       )}
       <div className="mb-sm"><label className="label">Relationship</label><SelectWithCustom options={relOpts} value={relationship} onChange={(v)=>{setRelationship(v); trackCustom("relationship_type", relOpts, onAddCustomOption)(v);}} /></div>
@@ -6443,7 +6617,7 @@ function institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, 
 
 function InstitutionSheet({
   institution: inst, summaryEntity, activities, contacts, deals, enablers, organizations,
-  dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {},
+  dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution,
   onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, linkedNotes = [], onOpenNote, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
   onChangeStage, onChangeTier, onUpdateDeal, todos = [], taskInitial = {}, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
@@ -6799,7 +6973,7 @@ function InstitutionSheet({
       )}
 
       {onAddTodo && (
-        <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} organizations={organizations} customOptions={customOptions} onAddCustomOption={onAddCustomOption} initial={taskInitial} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
+        <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} organizations={organizations} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCreateInstitution={onCreateInstitution} initial={taskInitial} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
       )}
 
       <div className="people-section">
@@ -6834,6 +7008,7 @@ function InstitutionSheet({
             entityOptions={organizations.filter(o => o.id !== inst.orgId).map(o => ({ id: o.id, label: o.name }))}
             customOptions={customOptions}
             onAddCustomOption={onAddCustomOption}
+            onCreateInstitution={onCreateInstitution}
             onSave={async (f) => { await onAddConnection({ aType: "organization", aId: inst.orgId, bType: "organization", bId: f.entityId, relationship: f.relationship, strength: f.strength, notes: f.notes }); setConnectOpen(false); }}
             onClose={() => setConnectOpen(false)}
           />
@@ -6968,9 +7143,8 @@ function InstitutionForm({ customOptions = [], onAddCustomOption = () => {}, onS
   );
 }
 
-function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOption = () => {}, onSave, onCancel }) {
+function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onSave, onCancel }) {
   const instOptions = institutionPickerOptions(institutions, customOptions);
-  const typeOpts = optionsWithCustom(INSTITUTION_TYPES, customOptions, "institution_type");
   const warmthOpts = optionsWithCustom(WARMTH_LEVELS, customOptions, "warmth");
   const relOpts = optionsWithCustom(CONNECTION_RELATIONSHIPS, customOptions, "relationship");
   const [name, setName] = useState("");
@@ -6978,7 +7152,7 @@ function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOpt
   const [phone, setPhone] = useState("");
   const [warmth, setWarmth] = useState("unknown");
   const [notes, setNotes] = useState("");
-  const [roles, setRoles] = useState([{ institutionKey: "", role: "", primary: true, newName: "", newType: "hospital" }]);
+  const [roles, setRoles] = useState([{ institutionKey: "", role: "", primary: true }]);
   const [showConn, setShowConn] = useState(false);
   const [connectedThrough, setConnectedThrough] = useState("");
   const [canReach, setCanReach] = useState("");
@@ -6986,7 +7160,7 @@ function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOpt
   const [saving, setSaving] = useState(false);
 
   const updateRole = (i, patch) => setRoles(prev => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
-  const addRole = () => setRoles(prev => [...prev, { institutionKey: "", role: "", primary: false, newName: "", newType: "hospital" }]);
+  const addRole = () => setRoles(prev => [...prev, { institutionKey: "", role: "", primary: false }]);
   const removeRole = (i) => setRoles(prev => prev.filter((_, idx) => idx !== i));
   const setPrimary = (i) => setRoles(prev => prev.map((r, idx) => ({ ...r, primary: idx === i })));
 
@@ -6995,9 +7169,7 @@ function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOpt
     setSaving(true);
     try {
       const ordered = [...roles].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0));
-      const payload = ordered.map(r => r.institutionKey === "__create__"
-        ? { newName: r.newName, newType: r.newType, role: r.role }
-        : { institutionKey: r.institutionKey, role: r.role });
+      const payload = ordered.map(r => ({ institutionKey: r.institutionKey, role: r.role }));
       await onSave({ name, email, phone, warmth, notes, roles: payload, connectedThrough: connectedThrough || null, canReach: canReach || null, relationship });
     } finally { setSaving(false); }
   };
@@ -7010,23 +7182,14 @@ function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOpt
 
       <label className="label">Roles</label>
       {roles.map((r, i) => (
-        <div key={i}>
-          <div className="quickadd-inline-row">
-            <select className="input" value={r.institutionKey} onChange={e => updateRole(i, { institutionKey: e.target.value })}>
-              <option value="">Select institution...</option>
-              {instOptions.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
-              <option value="__create__">+ Create new institution</option>
-            </select>
-            <input className="input" placeholder="Role title" value={r.role} onChange={e => updateRole(i, { role: e.target.value })} />
-            <label className="checkbox-label primary-check"><input type="checkbox" checked={r.primary} onChange={() => setPrimary(i)} /> Primary</label>
-            {roles.length > 1 && <button onClick={() => removeRole(i)} className="person-remove" title="Remove role">✕</button>}
-          </div>
-          {r.institutionKey === "__create__" && (
-            <div className="quickadd-inline-row inline-create">
-              <input className="input" placeholder="New institution name" value={r.newName} onChange={e => updateRole(i, { newName: e.target.value })} />
-              <SelectWithCustom options={typeOpts} value={r.newType} onChange={(v) => { updateRole(i, { newType: v }); trackCustom("institution_type", typeOpts, onAddCustomOption)(v); }} />
-            </div>
-          )}
+        <div key={i} className="quickadd-inline-row">
+          <InstitutionSelect
+            options={instOptions} value={r.institutionKey} onChange={(v) => updateRole(i, { institutionKey: v })} optKey="key"
+            onCreateInstitution={onCreateInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+          />
+          <input className="input" placeholder="Role title" value={r.role} onChange={e => updateRole(i, { role: e.target.value })} />
+          <label className="checkbox-label primary-check"><input type="checkbox" checked={r.primary} onChange={() => setPrimary(i)} /> Primary</label>
+          {roles.length > 1 && <button onClick={() => removeRole(i)} className="person-remove" title="Remove role">✕</button>}
         </div>
       ))}
       <button type="button" onClick={addRole} className="link-btn">+ Add another role</button>
@@ -7043,10 +7206,10 @@ function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOpt
             </select>
           </div>
           <div className="field"><label className="label">Can help us reach</label>
-            <select className="input" value={canReach} onChange={e => setCanReach(e.target.value)}>
-              <option value="">Nothing specific</option>
-              {instOptions.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
-            </select>
+            <InstitutionSelect
+              options={instOptions} value={canReach} onChange={setCanReach} optKey="key" placeholder="Nothing specific"
+              onCreateInstitution={onCreateInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+            />
           </div>
           <div className="field-full"><label className="label">Relationship</label><SelectWithCustom options={relOpts} value={relationship} onChange={(v) => { setRelationship(v); trackCustom("relationship", relOpts, onAddCustomOption)(v); }} /></div>
         </div>
@@ -7074,7 +7237,7 @@ const NETWORK_SUBTABS = [{ id: "institutions", label: "Institutions" }, { id: "p
 // name-keyed union of deals/enablers/organizations; people are contacts.
 function NetworkTab({
   institutions, contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles,
-  customOptions, onAddCustomOption, onAddInstitution, onAddPersonWithRoles, onUpdateInstitution, onUpdateInstitutionCity, onUpdateContact, onUpdateRoleTitle, onSetOutreach, onLinkPersonToInstitution, onOpenInstitution, onOpenPerson,
+  customOptions, onAddCustomOption, onAddInstitution, onCreateInstitution, onAddPersonWithRoles, onUpdateInstitution, onUpdateInstitutionCity, onUpdateContact, onUpdateRoleTitle, onSetOutreach, onLinkPersonToInstitution, onOpenInstitution, onOpenPerson,
 }) {
   const [subtab, setSubtab] = useState("institutions");
   const [search, setSearch] = useState("");
@@ -7152,7 +7315,7 @@ function NetworkTab({
         <InstitutionForm customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCancel={() => setActiveForm(null)} onSave={async (f) => { await onAddInstitution(f); setActiveForm(null); }} />
       )}
       {activeForm === "person" && (
-        <PersonForm institutions={institutions} contacts={contacts} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCancel={() => setActiveForm(null)} onSave={async (f) => { await onAddPersonWithRoles(f); setActiveForm(null); }} />
+        <PersonForm institutions={institutions} contacts={contacts} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCreateInstitution={onCreateInstitution} onCancel={() => setActiveForm(null)} onSave={async (f) => { await onAddPersonWithRoles(f); setActiveForm(null); }} />
       )}
 
       <div className="network-subtabs">
