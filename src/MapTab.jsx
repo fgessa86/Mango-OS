@@ -1,7 +1,7 @@
 import { useRef, useEffect, useMemo, useState, useCallback } from "react";
 import * as d3 from "d3";
 import { formatDate, stripFathomMarker } from "./utils";
-import { ACT_TYPES } from "./constants";
+import { ACT_TYPES, NETWORK_EDGE_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS } from "./constants";
 
 // Network Map node styling (independent of the app badge colors).
 const MAP_NODE_STYLES = {
@@ -121,13 +121,38 @@ function buildGraph({ institutions, contacts, contactRoles, dealEnablers, enable
   return { nodes, links, nodeById, adjacency };
 }
 
+// Whether a node is one of the virtual "You" node's direct, first-degree
+// relationships: an active contact (an ongoing, already-in-touch relationship)
+// or an internal team member. Warm/hot contacts are reachable, not roots: they
+// only enter a path once an introduction chain leads to them.
+const isDirectRoot = (n) => n.type === "internal_person" || (isPersonType(n.type) && n.warmth === "active");
+
+// The link object (label/strength) connecting two adjacent nodes in a chain,
+// looked up from the adjacency list built in buildGraph.
+function edgeBetween(graph, aId, bId) {
+  const nbrs = graph.adjacency.get(aId) || [];
+  return nbrs.find((n) => n.id === bId)?.link || null;
+}
+
+// An edge's label is either free text (a role_title, already human-readable)
+// or a raw relationship id (network_edges.relationship / deal_enablers.relationship,
+// e.g. "board_member"); resolve the latter to its display label for narration.
+function relationshipLabel(raw) {
+  if (!raw) return "";
+  const norm = raw.trim().toLowerCase();
+  const found = NETWORK_EDGE_RELATIONSHIPS.find((r) => r.id === norm) || DEAL_ENABLER_RELATIONSHIPS.find((r) => r.id === norm);
+  if (found) return found.label;
+  if (/^[a-z0-9_]+$/.test(raw)) return raw.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return raw;
+}
+
 // Depth-limited search for all simple paths (<= 4 hops) to the selected target
-// institution node. Paths originate from our own team: internal people are the
-// roots. If no one is marked internal yet, fall back to every known person so
-// the feature still works.
+// institution node. Paths originate from the virtual "You" node's direct,
+// first-degree relationships only (active contacts and internal team members);
+// warm/hot/cold contacts are reached through introductions along the way, never
+// starting points themselves.
 function findPaths(graph, targetId) {
-  const internalRoots = graph.nodes.filter(n => n.type === "internal_person").map(n => n.id);
-  const roots = internalRoots.length ? internalRoots : graph.nodes.filter(n => isPersonType(n.type)).map(n => n.id);
+  const roots = graph.nodes.filter(isDirectRoot).map(n => n.id);
   const results = [];
   const maxHops = 4;
   const dfs = (nodeId, path, visited) => {
@@ -142,10 +167,24 @@ function findPaths(graph, targetId) {
     }
   };
   roots.forEach((r) => dfs(r, [r], new Set([r])));
-  // Dedupe identical chains, sort by length.
+  // Dedupe identical chains.
   const seen = new Set();
   const unique = results.filter((p) => { const k = p.join(">"); if (seen.has(k)) return false; seen.add(k); return true; });
-  unique.sort((a, b) => a.length - b.length);
+  // Rank strongest first: more active/direct links along the chain, then fewer
+  // hops, then stronger edges (network_edges.strength / deal_enablers.strength).
+  const score = (chain) => {
+    let activeLinks = 0;
+    let strengthScore = 0;
+    chain.forEach((id) => { const n = graph.nodeById.get(id); if (n && isDirectRoot(n)) activeLinks++; });
+    for (let i = 0; i < chain.length - 1; i++) strengthScore += STRENGTH_RANK[edgeBetween(graph, chain[i], chain[i + 1])?.strength] || 2;
+    return { activeLinks, hops: chain.length - 1, strengthScore };
+  };
+  unique.sort((a, b) => {
+    const sa = score(a), sb = score(b);
+    if (sb.activeLinks !== sa.activeLinks) return sb.activeLinks - sa.activeLinks;
+    if (sa.hops !== sb.hops) return sa.hops - sb.hops;
+    return sb.strengthScore - sa.strengthScore;
+  });
   return unique.slice(0, 10);
 }
 
@@ -329,7 +368,7 @@ export default function MapTab({ institutions, contacts, contactRoles, dealEnabl
     if (mode === "pathfinder") {
       const targetId = stateRef.current && pathTarget;
       sim.force("x", d3.forceX((d) => {
-        if (d.type === "internal_person") return w * 0.12;
+        if (isDirectRoot(d)) return w * 0.12;
         if (d.id === targetId) return w * 0.88;
         if (d.type === "person") return w * 0.3;
         return w * 0.55;
@@ -405,11 +444,33 @@ export default function MapTab({ institutions, contacts, contactRoles, dealEnabl
     else onOpenPerson(panelNode.entity_id);
   };
 
+  // Builds the natural-language narration of a chain, distinguishing the
+  // direct first-degree relationship from each introduction hop that follows:
+  // "You are in direct contact with X (active) > X can introduce you to Y >
+  // Y is Board Member at Z."
   const pathLabel = (chain) => {
-    const first = graph.nodeById.get(chain[0]);
-    const prefix = first && first.type === "person" ? "You > " : "";
-    const names = chain.map((id) => graph.nodeById.get(id)?.label || "?");
-    return `${prefix}${names.join(" > ")}`;
+    const nodeAt = (i) => graph.nodeById.get(chain[i]);
+    const first = nodeAt(0);
+    if (!first) return "";
+    const firstWarmth = first.type === "internal_person" ? "internal team" : (first.warmth || "active");
+    const segments = [`You are in direct contact with ${first.label} (${firstWarmth})`];
+    for (let i = 0; i < chain.length - 1; i++) {
+      const a = nodeAt(i), b = nodeAt(i + 1);
+      if (!a || !b) continue;
+      if (isPersonType(a.type) && b.isInstitution) {
+        const role = relationshipLabel(edgeBetween(graph, a.id, b.id)?.label);
+        segments.push(role ? `${a.label} is ${role} at ${b.label}` : `${a.label} is connected to ${b.label}`);
+      } else if (a.isInstitution && isPersonType(b.type)) {
+        const role = relationshipLabel(edgeBetween(graph, a.id, b.id)?.label);
+        segments.push(role ? `${b.label} is ${role} at ${a.label}` : `${b.label} is connected to ${a.label}`);
+      } else if (isPersonType(a.type) && isPersonType(b.type)) {
+        segments.push(`${a.label} can introduce you to ${b.label}`);
+      } else {
+        const label = relationshipLabel(edgeBetween(graph, a.id, b.id)?.label);
+        segments.push(label ? `${a.label} is connected to ${b.label} (${label})` : `${a.label} is connected to ${b.label}`);
+      }
+    }
+    return `${segments.join(" > ")}.`;
   };
 
   return (
@@ -453,9 +514,9 @@ export default function MapTab({ institutions, contacts, contactRoles, dealEnabl
 
         {mode === "pathfinder" && pathTarget && (
           <div className="map-paths-panel">
-            <div className="map-paths-title">{paths.length > 0 ? `${paths.length} path${paths.length === 1 ? "" : "s"} found` : "No paths"}</div>
+            <div className="map-paths-title">{paths.length > 0 ? `${paths.length} path${paths.length === 1 ? "" : "s"} found, warmly reachable` : "Cold target"}</div>
             {paths.length === 0 ? (
-              <div className="map-paths-empty">No paths found to {graph.nodeById.get(pathTarget)?.label}. Consider adding enabler connections.</div>
+              <div className="map-paths-empty">No path from an active contact or internal team member to {graph.nodeById.get(pathTarget)?.label} yet. Cold target, needs a new introduction.</div>
             ) : (
               <div className="map-paths-list">
                 <button onClick={() => setActivePathIdx(-1)} className={`map-path-item ${activePathIdx === -1 ? "active" : ""}`}>Show all paths</button>
