@@ -465,14 +465,49 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .path-notes { font-size: 12px; color: var(--muted); }
 
 /* ============================================================
-   Reports
+   Week in Review (Reports tab)
    ============================================================ */
-.reports { display: flex; flex-direction: column; gap: 16px; }
-.report-box { background: var(--surface); border-radius: 16px; padding: 20px; box-shadow: var(--shadow-card); }
-.report-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; flex-wrap: wrap; gap: 8px; }
-.report-title { font-size: 16px; font-weight: 800; color: var(--text); }
-.report-desc { font-size: 13px; color: var(--muted); margin-top: 2px; }
-.report-pre { background: var(--bg); border-radius: 12px; padding: 16px; font-size: 12px; color: var(--text-2); font-family: 'SF Mono','Fira Code', monospace; line-height: 1.6; overflow-x: auto; white-space: pre-wrap; border: 1px solid var(--divider); }
+.wir { display: flex; flex-direction: column; gap: 4px; }
+.wir-header { align-items: flex-start; }
+.wir-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.wir-range-bar { display: flex; align-items: center; gap: 10px; padding: 10px 34px 0 34px; flex-wrap: wrap; }
+.wir-range-arrow { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--divider); background: var(--surface); color: var(--text); font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.wir-range-arrow:hover { background: var(--card-tint); }
+.wir-range-label { font-size: 15px; font-weight: 700; color: var(--text); min-width: 190px; }
+.wir-range-btn { padding: 6px 13px; border-radius: 10px; border: 1px solid var(--divider); background: var(--surface); color: var(--text-2); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.wir-range-btn:hover { background: var(--card-tint); }
+.wir-custom-range { display: flex; gap: 16px; padding: 10px 34px 0 34px; flex-wrap: wrap; }
+.wir-custom-range label { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.wir-custom-range input[type="date"] { border: 1px solid var(--divider); border-radius: 8px; padding: 5px 8px; font-family: inherit; font-size: 13px; background: var(--surface); color: var(--text); }
+.wir-metrics { margin-top: 10px; }
+.stat-delta-up { color: #1F8A5B; }
+.stat-delta-down { color: #C42B30; }
+.stat-delta-flat { color: var(--muted); font-weight: 500; }
+.wir-section { background: var(--surface); border-radius: 16px; padding: 20px; box-shadow: var(--shadow-card); margin: 16px 34px 0 34px; }
+.wir-section-title { font-size: 15px; font-weight: 800; color: var(--text); margin-bottom: 12px; }
+.wir-subhead { font-size: 12.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin: 14px 0 8px; }
+.wir-empty { font-size: 13px; color: var(--muted); padding: 4px 0; }
+.wir-list { display: flex; flex-direction: column; gap: 8px; }
+.wir-row { background: var(--card-tint); border-radius: 12px; padding: 10px 13px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.wir-row-click { cursor: pointer; }
+.wir-row-click:hover { filter: brightness(0.97); }
+.wir-row-main { display: flex; align-items: center; gap: 8px; }
+.wir-row-name { font-size: 13.5px; font-weight: 700; color: var(--text); }
+.wir-row-detail { font-size: 12.5px; color: var(--text-2); }
+.wir-row-date { font-size: 12px; color: var(--muted); margin-left: auto; }
+.wir-row-people { font-size: 12px; color: var(--muted); width: 100%; }
+.wir-row-flag { border-left: 3px solid #F59E0B; }
+.wir-blockers-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.wir-blocker-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--card-tint); border-radius: 10px; padding: 8px 12px; font-size: 13px; color: var(--text); }
+.wir-blocker-remove { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 2px 4px; }
+.wir-blocker-remove:hover { color: #C42B30; }
+.wir-blocker-add { display: flex; gap: 8px; }
+.wir-blocker-add input { flex: 1; border: 1px solid var(--divider); border-radius: 10px; padding: 8px 12px; font-family: inherit; font-size: 13px; background: var(--surface); color: var(--text); }
+
+@media print {
+  .sidebar, .comment-fab, .comment-panel, .mobile-tab-bar, .wir-actions, .wir-range-bar, .wir-custom-range, .wir-blocker-add, .wir-blocker-remove { display: none !important; }
+  .wir-section { box-shadow: none; border: 1px solid #ddd; break-inside: avoid; }
+}
 
 /* ============================================================
    Boss View
@@ -1001,6 +1036,9 @@ button.act-pill { -webkit-appearance: none; appearance: none; }
   .deal-sheet { padding: 16px 16px 32px; max-width: 100%; }
   .stats-bar { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 0 16px 8px; }
   .stat-value { font-size: 21px; }
+  .wir-range-bar, .wir-custom-range { padding-left: 16px; padding-right: 16px; }
+  .wir-section { margin: 14px 16px 0 16px; padding: 16px; }
+  .wir-row-date { margin-left: 0; }
   .toolbar { padding: 0 16px; }
   .deal-card:hover, .institution-card:hover, .stat:hover { transform: none; }
   .deal-card:active, .institution-card:active { transform: scale(0.99); }

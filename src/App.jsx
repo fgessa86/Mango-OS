@@ -975,7 +975,6 @@ export default function App() {
   const [networkEdges, setNetworkEdges] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
-  const [reportCopied, setReportCopied] = useState(null);
   const [dragOver, setDragOver] = useState(null);
   const [tierFilter, setTierFilter] = useState("all");
   const [showCompletedTasks, setShowCompletedTasks] = useState(false);
@@ -2514,62 +2513,6 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setDragOver(null);
   };
 
-  // REPORTS
-  const generateEOD = () => {
-    const todayActs = activities.filter((a) => isToday(a.created_at));
-    const todayDeals = deals.filter((d) => isToday(d.last_activity_at));
-    let r = `DAILY UPDATE | ${formatFull(new Date())}\n\nDEALS TOUCHED: ${todayDeals.length}  |  ACTIVITIES: ${todayActs.length}\n\n`;
-    if (todayActs.length > 0) {
-      r += `TODAY'S ACTIVITY:\n`;
-      todayActs.forEach((a) => {
-        // Section 1: show both the linked person and institution, when present.
-        const inst = activityInstitutionInfo(a, { deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles });
-        const person = activityPersonInfo(a, contacts);
-        const label = inst && person ? `${inst.name} (${person.name})` : (inst || person)?.name || "General";
-        r += `${ACT_TYPES.find((t) => t.id === a.type)?.icon || "."} ${label}: ${firstLine(stripFathomMarker(a.description))}\n`;
-      });
-      r += "\n";
-    }
-    r += `PIPELINE SNAPSHOT:\n`;
-    STAGES.filter((s) => !["won","lost"].includes(s.id)).forEach((s) => {
-      const c = deals.filter((d) => d.stage === s.id).length;
-      if (c > 0) r += `  ${s.label}: ${c}\n`;
-    });
-    const tv = deals.filter((d) => !["won","lost"].includes(d.stage)).reduce((s, d) => s + (Number(d.value) || 0), 0);
-    if (tv > 0) r += `  Total Value: $${tv.toLocaleString()}\n`;
-    const prio = deals.filter((d) => d.next_action && !["won","lost"].includes(d.stage)).slice(0, 5);
-    if (prio.length > 0) { r += `\nTOMORROW'S PRIORITIES:\n`; prio.forEach((d) => { r += `. ${d.company}: ${d.next_action}\n`; }); }
-    return r;
-  };
-
-  const generateEOW = () => {
-    const weekActs = activities.filter((a) => isThisWeek(a.created_at));
-    let r = `WEEKLY PIPELINE REPORT | Week of ${formatFull(new Date())}\n${"=".repeat(50)}\n\n`;
-    r += `SUMMARY\n. Deals touched: ${deals.filter((d) => isThisWeek(d.last_activity_at)).length}\n. Activities: ${weekActs.length}\n. New deals: ${deals.filter((d) => isThisWeek(d.created_at)).length}\n. Won: ${deals.filter((d) => d.stage === "won" && isThisWeek(d.last_activity_at)).length}\n. Lost: ${deals.filter((d) => d.stage === "lost" && isThisWeek(d.last_activity_at)).length}\n\n`;
-    const byType = {};
-    weekActs.forEach((a) => { byType[a.type] = (byType[a.type] || 0) + 1; });
-    if (Object.keys(byType).length > 0) { r += `ACTIVITY BREAKDOWN:\n`; Object.entries(byType).forEach(([t, c]) => { r += `. ${ACT_TYPES.find((x) => x.id === t)?.label || t}: ${c}\n`; }); r += "\n"; }
-    r += `PIPELINE BY STAGE:\n`;
-    STAGES.forEach((s) => {
-      const sd = deals.filter((d) => d.stage === s.id);
-      if (sd.length > 0) {
-        const v = sd.reduce((sum, d) => sum + (Number(d.value) || 0), 0);
-        r += `\n${s.label} (${sd.length})${v > 0 ? ` | $${v.toLocaleString()}` : ""}\n`;
-        sd.forEach((d) => { r += `  . ${d.company}${d.contact_name ? ` (${d.contact_name})` : ""}${d.next_action ? ` | Next: ${d.next_action}` : ""}\n`; });
-      }
-    });
-    const total = deals.filter((d) => !["won","lost"].includes(d.stage));
-    const tv = total.reduce((s, d) => s + (Number(d.value) || 0), 0);
-    r += `\nTOTALS: ${total.length} active deals${tv > 0 ? ` | $${tv.toLocaleString()} pipeline value` : ""}\n`;
-    return r;
-  };
-
-  const copyReport = (type) => {
-    navigator.clipboard.writeText(type === "eod" ? generateEOD() : generateEOW()).then(() => {
-      setReportCopied(type); setTimeout(() => setReportCopied(null), 2000);
-    });
-  };
-
   const activeDeals = deals.filter((d) => !["won","lost"].includes(d.stage));
   const totalValue = activeDeals.reduce((s, d) => s + (Number(d.value) || 0), 0);
   const institutions = buildInstitutions(deals, enablers, organizations);
@@ -3171,25 +3114,27 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         />
       )}
 
-      {/* REPORTS */}
+      {/* WEEK IN REVIEW */}
       {view === "reports" && (
-        <div className="section-pad reports">
-          <div className="page-header">
-            <div>
-              <div className="page-title">Reports</div>
-              <div className="page-sub">Copy a ready-to-send end of day or end of week summary</div>
-            </div>
-          </div>
-          {[["eod","End of Day Report","Today's activities and tomorrow's priorities"],["eow","End of Week Report","Weekly summary and pipeline breakdown"]].map(([k,t,d]) => (
-            <div key={k} className="report-box">
-              <div className="report-header">
-                <div><div className="report-title">{t}</div><div className="report-desc">{d}</div></div>
-                <button onClick={() => copyReport(k)} className="btn-copy">{reportCopied === k ? "Copied!" : "Copy"}</button>
-              </div>
-              <pre className="report-pre">{k === "eod" ? generateEOD() : generateEOW()}</pre>
-            </div>
-          ))}
-        </div>
+        <WeekInReviewTab
+          deals={deals}
+          contacts={contacts}
+          enablers={enablers}
+          organizations={organizations}
+          activities={activities}
+          todos={todos}
+          bossComments={bossComments}
+          calendarEvents={calendarEvents}
+          dealContacts={dealContacts}
+          enablerContacts={enablerContacts}
+          networkEdges={networkEdges}
+          contactRoles={contactRoles}
+          institutions={institutions}
+          onOpenInstitution={openInstitution}
+          onOpenPerson={openPerson}
+          onOpenTaskLink={openTaskLink}
+          showToast={showToast}
+        />
       )}
 
       </main>
@@ -3834,6 +3779,547 @@ function CalendarTab({ events, contacts = [], entityName, eventEntityRow, onOpen
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ============================================================
+   Week in Review (weekly boss meeting report, Reports tab)
+   ============================================================ */
+const addDaysLocal = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const toISODate = (d) => { const x = new Date(d); const y = x.getFullYear(); const m = String(x.getMonth() + 1).padStart(2, "0"); const day = String(x.getDate()).padStart(2, "0"); return `${y}-${m}-${day}`; };
+const parseISODateLocal = (s) => { const [y, m, day] = s.split("-").map(Number); return new Date(y, m - 1, day); };
+const endOfDayLocal = (d) => { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; };
+// Inclusive range check: start/end are Date objects, end is the last day included.
+const inWeekRange = (dateVal, start, end) => {
+  if (!dateVal) return false;
+  const t = new Date(dateVal).getTime();
+  return t >= startOfDay(start).getTime() && t <= endOfDayLocal(end).getTime();
+};
+
+const ACT_TYPE_NOUNS = {
+  call: ["call", "calls"],
+  email: ["email", "emails"],
+  meeting: ["meeting", "meetings"],
+  scheduled_meeting: ["scheduled meeting", "scheduled meetings"],
+  whatsapp: ["WhatsApp message", "WhatsApp messages"],
+  linkedin: ["LinkedIn message", "LinkedIn messages"],
+  note: ["note", "notes"],
+  proposal: ["proposal", "proposals"],
+  demo: ["demo", "demos"],
+  voice_note: ["voice note", "voice notes"],
+  transcript: ["transcript", "transcripts"],
+};
+const activityNoun = (type, count) => {
+  const pair = ACT_TYPE_NOUNS[type] || [type, type];
+  return count === 1 ? pair[0] : pair[1];
+};
+
+// Reconstructs stage-change history from the "Moved to X" note activities that
+// moveDeal logs on every drag (there is no dedicated stage-history table).
+// Walks each deal's moves chronologically, treating "prospecting" (the stage
+// new deals start at) as the assumed origin before the first recorded move.
+function buildStageTransitions(activities, deals) {
+  const byDeal = new Map();
+  activities
+    .filter((a) => a.deal_id && a.type === "note" && typeof a.description === "string" && a.description.startsWith("Moved to "))
+    .forEach((a) => {
+      if (!byDeal.has(a.deal_id)) byDeal.set(a.deal_id, []);
+      byDeal.get(a.deal_id).push(a);
+    });
+  const transitions = [];
+  byDeal.forEach((acts, dealId) => {
+    const deal = deals.find((d) => d.id === dealId);
+    if (!deal) return;
+    const sorted = acts.slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    let cursor = "prospecting";
+    sorted.forEach((a) => {
+      const label = a.description.slice("Moved to ".length).trim();
+      const toStage = STAGES.find((s) => s.label === label);
+      if (!toStage) return;
+      transitions.push({ dealId, company: deal.company, tier: deal.tier, fromStage: cursor, toStage: toStage.id, date: a.created_at });
+      cursor = toStage.id;
+    });
+  });
+  return transitions;
+}
+
+const stageLabel = (id) => STAGES.find((s) => s.id === id)?.label || id;
+
+function DeltaBadge({ current, prior }) {
+  const diff = current - prior;
+  if (diff === 0) return <span className="stat-delta stat-delta-flat">No change vs last period</span>;
+  const up = diff > 0;
+  return (
+    <span className={`stat-delta ${up ? "stat-delta-up" : "stat-delta-down"}`}>
+      {up ? "↑" : "↓"} {Math.abs(diff)} vs last period
+    </span>
+  );
+}
+
+function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, bossComments, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, onOpenTaskLink, showToast }) {
+  const [start, setStart] = useState(() => startOfWeek(new Date()));
+  const [end, setEnd] = useState(() => addDaysLocal(startOfWeek(new Date()), 6));
+  const [showCustom, setShowCustom] = useState(false);
+  const [blockers, setBlockers] = useState([]);
+  const [newBlocker, setNewBlocker] = useState("");
+  const [copied, setCopied] = useState(null);
+
+  const weekKey = `mango-week-review-blockers-${toISODate(start)}`;
+  useEffect(() => {
+    let saved = [];
+    try { saved = JSON.parse(localStorage.getItem(weekKey) || "[]"); } catch { saved = []; }
+    setBlockers(Array.isArray(saved) ? saved : []);
+  }, [weekKey]);
+
+  const persistBlockers = (list) => {
+    setBlockers(list);
+    try { localStorage.setItem(weekKey, JSON.stringify(list)); } catch {}
+  };
+  const addBlocker = () => {
+    const text = newBlocker.trim();
+    if (!text) return;
+    persistBlockers([...blockers, text]);
+    setNewBlocker("");
+  };
+  const removeBlocker = (idx) => persistBlockers(blockers.filter((_, i) => i !== idx));
+
+  const rangeDays = Math.round((startOfDay(end).getTime() - startOfDay(start).getTime()) / 86400000) + 1;
+  const priorStart = addDaysLocal(start, -rangeDays);
+  const priorEnd = addDaysLocal(end, -rangeDays);
+
+  const shiftRange = (dir) => {
+    setStart((s) => addDaysLocal(s, dir * rangeDays));
+    setEnd((e) => addDaysLocal(e, dir * rangeDays));
+  };
+  const jumpToThisWeek = () => {
+    setStart(startOfWeek(new Date()));
+    setEnd(addDaysLocal(startOfWeek(new Date()), 6));
+  };
+
+  const ctx = { deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles };
+
+  const weekActs = activities.filter((a) => inWeekRange(a.created_at, start, end));
+  const priorActs = activities.filter((a) => inWeekRange(a.created_at, priorStart, priorEnd));
+
+  // Section 1: headline metrics
+  const newContacts = contacts.filter((c) => inWeekRange(c.created_at, start, end)).length;
+  const priorNewContacts = contacts.filter((c) => inWeekRange(c.created_at, priorStart, priorEnd)).length;
+
+  const meetingsHeld = weekActs.filter((a) => a.type === "meeting" || a.type === "scheduled_meeting").length;
+  const priorMeetingsHeld = priorActs.filter((a) => a.type === "meeting" || a.type === "scheduled_meeting").length;
+
+  const institutionKeySet = (acts) => {
+    const set = new Set();
+    acts.forEach((a) => { const inst = activityInstitutionInfo(a, ctx); if (inst) set.add(inst.name.toLowerCase()); });
+    return set;
+  };
+  const institutionsEngaged = institutionKeySet(weekActs).size;
+  const priorInstitutionsEngaged = institutionKeySet(priorActs).size;
+
+  const allTransitions = buildStageTransitions(activities, deals);
+  const weekTransitions = allTransitions.filter((t) => inWeekRange(t.date, start, end)).sort((a, b) => new Date(b.date) - new Date(a.date));
+  const priorTransitions = allTransitions.filter((t) => inWeekRange(t.date, priorStart, priorEnd));
+  const dealsAdvanced = weekTransitions.length;
+  const priorDealsAdvanced = priorTransitions.length;
+
+  const outreachSent = weekActs.filter((a) => ["email", "linkedin", "whatsapp"].includes(a.type)).length;
+  const priorOutreachSent = priorActs.filter((a) => ["email", "linkedin", "whatsapp"].includes(a.type)).length;
+
+  // Section 2: new deals this week
+  const newDeals = deals.filter((d) => inWeekRange(d.created_at, start, end));
+
+  // Section 3: activity by institution
+  const instGroups = new Map();
+  weekActs.forEach((a) => {
+    const inst = activityInstitutionInfo(a, ctx);
+    if (!inst) return;
+    const key = inst.name.toLowerCase();
+    if (!instGroups.has(key)) instGroups.set(key, { name: inst.name, kind: inst.kind, count: 0, byType: {}, people: new Map() });
+    const g = instGroups.get(key);
+    g.count += 1;
+    g.byType[a.type] = (g.byType[a.type] || 0) + 1;
+    const person = activityPersonInfo(a, contacts);
+    if (person) g.people.set(person.id, person.name);
+  });
+  const instActivity = [...instGroups.values()].sort((a, b) => b.count - a.count);
+
+  // Section 4: new relationships
+  const newPeople = contacts.filter((c) => inWeekRange(c.created_at, start, end)).map((c) => {
+    const roles = resolveContactRoles(c, ctx);
+    const primary = roles.find((r) => r.is_primary) || roles[0];
+    return { id: c.id, name: c.name, role: c.role, institutionName: primary?.institutionName || "" };
+  });
+  const newInstitutions = organizations.filter((o) => inWeekRange(o.created_at, start, end)).map((o) => {
+    const deal = deals.find((d) => (d.company || "").trim().toLowerCase() === (o.name || "").trim().toLowerCase());
+    return { id: o.id, name: o.name, type: o.type, tier: deal?.tier || null };
+  });
+
+  // Section 5: coming up next week (the 7 days right after the selected range)
+  const nextStart = addDaysLocal(end, 1);
+  const nextEnd = addDaysLocal(nextStart, 6);
+  const upcomingEvents = calendarEvents.filter((e) => inWeekRange(e.start_time, nextStart, nextEnd)).sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+  const upcomingScheduled = activities.filter((a) => a.type === "scheduled_meeting" && inWeekRange(a.scheduled_for, nextStart, nextEnd)).sort((a, b) => new Date(a.scheduled_for) - new Date(b.scheduled_for));
+  const upcomingTasks = todos.filter((t) => t.status === "open" && (t.priority === "high" || inWeekRange(t.due_date, nextStart, nextEnd)));
+  const upcomingEventEntity = (e) => {
+    if (e.matched_deal_id) { const d = deals.find((x) => x.id === e.matched_deal_id); return d ? { name: d.company } : null; }
+    if (e.matched_enabler_id) { const en = enablers.find((x) => x.id === e.matched_enabler_id); return en ? { name: en.name } : null; }
+    if (e.matched_organization_id) { const o = organizations.find((x) => x.id === e.matched_organization_id); return o ? { name: o.name } : null; }
+    return null;
+  };
+
+  // Section 6: blockers, plus auto-surfaced flags
+  const stuckDeals = deals.filter((d) => !["won", "lost"].includes(d.stage) && (!d.last_activity_at || daysAgo(d.last_activity_at) >= 14));
+  const unresolvedComments = bossComments.filter((c) => c.author !== "Fahed Al Essa" && !c.is_read);
+
+  const rangeLabel = `${formatDate(start)} to ${formatDate(end)}, ${end.getFullYear()}`;
+  const deltaText = (cur, pri) => `${cur - pri >= 0 ? "+" : ""}${cur - pri} vs last period`;
+
+  const generatePlainReport = () => {
+    let r = `WEEK IN REVIEW: ${rangeLabel}\n${"=".repeat(50)}\n\n`;
+    r += `HEADLINE METRICS\n`;
+    r += `. New contacts added: ${newContacts} (${deltaText(newContacts, priorNewContacts)})\n`;
+    r += `. Meetings held: ${meetingsHeld} (${deltaText(meetingsHeld, priorMeetingsHeld)})\n`;
+    r += `. Institutions engaged: ${institutionsEngaged} (${deltaText(institutionsEngaged, priorInstitutionsEngaged)})\n`;
+    r += `. Deals advanced: ${dealsAdvanced} (${deltaText(dealsAdvanced, priorDealsAdvanced)})\n`;
+    r += `. Outreach sent: ${outreachSent} (${deltaText(outreachSent, priorOutreachSent)})\n\n`;
+
+    r += `PIPELINE MOVEMENT\n`;
+    if (weekTransitions.length === 0) r += `. No stage changes this period.\n`;
+    weekTransitions.forEach((t) => { r += `. ${t.company} (${t.tier || "Untiered"}): ${stageLabel(t.fromStage)} to ${stageLabel(t.toStage)}, ${formatDate(t.date)}\n`; });
+    if (newDeals.length > 0) { r += `\nNEW TO PIPELINE\n`; newDeals.forEach((d) => { r += `. ${d.company} (${d.tier || "Untiered"})\n`; }); }
+    r += `\n`;
+
+    r += `ACTIVITY BY INSTITUTION\n`;
+    if (instActivity.length === 0) r += `. No activity logged this period.\n`;
+    instActivity.forEach((g) => {
+      const parts = Object.entries(g.byType).map(([t, c]) => `${c} ${activityNoun(t, c)}`).join(", ");
+      const people = [...g.people.values()].join(", ");
+      r += `. ${g.name}: ${parts}${people ? ` (${people})` : ""}\n`;
+    });
+    r += `\n`;
+
+    r += `NEW RELATIONSHIPS\n`;
+    if (newPeople.length === 0 && newInstitutions.length === 0) r += `. None this period.\n`;
+    newPeople.forEach((p) => { r += `. ${p.name}${p.role ? `, ${p.role}` : ""}${p.institutionName ? ` at ${p.institutionName}` : ""}\n`; });
+    newInstitutions.forEach((i) => { r += `. ${i.name} (${institutionTypeMeta(i.type).label}${i.tier ? `, ${i.tier}` : ""})\n`; });
+    r += `\n`;
+
+    r += `COMING UP NEXT WEEK\n`;
+    if (upcomingEvents.length === 0 && upcomingScheduled.length === 0 && upcomingTasks.length === 0) r += `. Nothing scheduled yet.\n`;
+    upcomingEvents.forEach((e) => { r += `. ${formatDate(e.start_time)}: ${e.title || "Untitled event"}\n`; });
+    upcomingScheduled.forEach((a) => { r += `. ${formatDate(a.scheduled_for)}: ${firstLine(stripFathomMarker(a.description)) || "Scheduled meeting"}\n`; });
+    if (upcomingTasks.length > 0) { r += `Tasks:\n`; upcomingTasks.forEach((t) => { r += `. ${t.title}${t.due_date ? ` (due ${formatDate(t.due_date)})` : ""}\n`; }); }
+    r += `\n`;
+
+    r += `BLOCKERS AND DECISIONS NEEDED\n`;
+    if (blockers.length === 0 && stuckDeals.length === 0 && unresolvedComments.length === 0) r += `. None flagged.\n`;
+    blockers.forEach((b) => { r += `. ${b}\n`; });
+    stuckDeals.forEach((d) => { r += `. ${d.company}: no activity in ${d.last_activity_at ? `${daysAgo(d.last_activity_at)} days` : "a while"}, may need attention\n`; });
+    unresolvedComments.forEach((c) => { r += `. Unresolved comment from ${c.author}: ${firstLine(c.content)}\n`; });
+
+    return r;
+  };
+
+  const generateHtmlReport = () => {
+    const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    let h = `<div style="font-family:-apple-system,Arial,sans-serif;color:#2A2620;max-width:640px;">`;
+    h += `<h2 style="margin-bottom:2px;">Week in Review</h2><div style="color:#8A8072;margin-bottom:16px;">${esc(rangeLabel)}</div>`;
+    h += `<h3>Headline Metrics</h3><ul>`;
+    h += `<li>New contacts added: <b>${newContacts}</b> (${esc(deltaText(newContacts, priorNewContacts))})</li>`;
+    h += `<li>Meetings held: <b>${meetingsHeld}</b> (${esc(deltaText(meetingsHeld, priorMeetingsHeld))})</li>`;
+    h += `<li>Institutions engaged: <b>${institutionsEngaged}</b> (${esc(deltaText(institutionsEngaged, priorInstitutionsEngaged))})</li>`;
+    h += `<li>Deals advanced: <b>${dealsAdvanced}</b> (${esc(deltaText(dealsAdvanced, priorDealsAdvanced))})</li>`;
+    h += `<li>Outreach sent: <b>${outreachSent}</b> (${esc(deltaText(outreachSent, priorOutreachSent))})</li>`;
+    h += `</ul>`;
+
+    h += `<h3>Pipeline Movement</h3>`;
+    if (weekTransitions.length === 0) h += `<p>No stage changes this period.</p>`;
+    else { h += `<ul>`; weekTransitions.forEach((t) => { h += `<li>${esc(t.company)} (${esc(t.tier || "Untiered")}): ${esc(stageLabel(t.fromStage))} to ${esc(stageLabel(t.toStage))}, ${esc(formatDate(t.date))}</li>`; }); h += `</ul>`; }
+    if (newDeals.length > 0) { h += `<p><b>New to Pipeline</b></p><ul>`; newDeals.forEach((d) => { h += `<li>${esc(d.company)} (${esc(d.tier || "Untiered")})</li>`; }); h += `</ul>`; }
+
+    h += `<h3>Activity by Institution</h3>`;
+    if (instActivity.length === 0) h += `<p>No activity logged this period.</p>`;
+    else { h += `<ul>`; instActivity.forEach((g) => { const parts = Object.entries(g.byType).map(([t, c]) => `${c} ${activityNoun(t, c)}`).join(", "); const people = [...g.people.values()].join(", "); h += `<li>${esc(g.name)}: ${esc(parts)}${people ? ` (${esc(people)})` : ""}</li>`; }); h += `</ul>`; }
+
+    h += `<h3>New Relationships</h3>`;
+    if (newPeople.length === 0 && newInstitutions.length === 0) h += `<p>None this period.</p>`;
+    else {
+      h += `<ul>`;
+      newPeople.forEach((p) => { h += `<li>${esc(p.name)}${p.role ? `, ${esc(p.role)}` : ""}${p.institutionName ? ` at ${esc(p.institutionName)}` : ""}</li>`; });
+      newInstitutions.forEach((i) => { h += `<li>${esc(i.name)} (${esc(institutionTypeMeta(i.type).label)}${i.tier ? `, ${esc(i.tier)}` : ""})</li>`; });
+      h += `</ul>`;
+    }
+
+    h += `<h3>Coming Up Next Week</h3>`;
+    if (upcomingEvents.length === 0 && upcomingScheduled.length === 0 && upcomingTasks.length === 0) h += `<p>Nothing scheduled yet.</p>`;
+    else {
+      h += `<ul>`;
+      upcomingEvents.forEach((e) => { h += `<li>${esc(formatDate(e.start_time))}: ${esc(e.title || "Untitled event")}</li>`; });
+      upcomingScheduled.forEach((a) => { h += `<li>${esc(formatDate(a.scheduled_for))}: ${esc(firstLine(stripFathomMarker(a.description)) || "Scheduled meeting")}</li>`; });
+      h += `</ul>`;
+      if (upcomingTasks.length > 0) { h += `<p><b>Tasks</b></p><ul>`; upcomingTasks.forEach((t) => { h += `<li>${esc(t.title)}${t.due_date ? ` (due ${esc(formatDate(t.due_date))})` : ""}</li>`; }); h += `</ul>`; }
+    }
+
+    h += `<h3>Blockers and Decisions Needed</h3>`;
+    if (blockers.length === 0 && stuckDeals.length === 0 && unresolvedComments.length === 0) h += `<p>None flagged.</p>`;
+    else {
+      h += `<ul>`;
+      blockers.forEach((b) => { h += `<li>${esc(b)}</li>`; });
+      stuckDeals.forEach((d) => { h += `<li>${esc(d.company)}: no activity in ${d.last_activity_at ? `${daysAgo(d.last_activity_at)} days` : "a while"}, may need attention</li>`; });
+      unresolvedComments.forEach((c) => { h += `<li>Unresolved comment from ${esc(c.author)}: ${esc(firstLine(c.content))}</li>`; });
+      h += `</ul>`;
+    }
+
+    h += `</div>`;
+    return h;
+  };
+
+  const copyPlain = () => {
+    navigator.clipboard.writeText(generatePlainReport()).then(() => {
+      setCopied("plain"); showToast && showToast("Report copied"); setTimeout(() => setCopied(null), 2000);
+    });
+  };
+  const copyEmail = () => {
+    const text = generatePlainReport();
+    if (window.ClipboardItem) {
+      const html = generateHtmlReport();
+      const item = new ClipboardItem({
+        "text/plain": new Blob([text], { type: "text/plain" }),
+        "text/html": new Blob([html], { type: "text/html" }),
+      });
+      navigator.clipboard.write([item]).then(() => {
+        setCopied("email"); showToast && showToast("Email-ready report copied"); setTimeout(() => setCopied(null), 2000);
+      }).catch(() => {
+        navigator.clipboard.writeText(text).then(() => { setCopied("email"); setTimeout(() => setCopied(null), 2000); });
+      });
+    } else {
+      navigator.clipboard.writeText(text).then(() => { setCopied("email"); setTimeout(() => setCopied(null), 2000); });
+    }
+  };
+
+  return (
+    <div className="section-pad wir">
+      <div className="page-header wir-header">
+        <div>
+          <div className="page-title">Week in Review</div>
+          <div className="page-sub">A live dashboard for the Tuesday call, and a copy/send version for Andy beforehand.</div>
+        </div>
+        <div className="wir-actions">
+          <button className="btn-copy btn-copy-lg" onClick={copyPlain}>{copied === "plain" ? "Copied!" : "Copy Report"}</button>
+          <button className="btn-copy" onClick={copyEmail}>{copied === "email" ? "Copied!" : "Copy for Email"}</button>
+        </div>
+      </div>
+
+      <div className="wir-range-bar">
+        <button type="button" className="wir-range-arrow" onClick={() => shiftRange(-1)} title="Previous period">‹</button>
+        <div className="wir-range-label">{rangeLabel}</div>
+        <button type="button" className="wir-range-arrow" onClick={() => shiftRange(1)} title="Next period">›</button>
+        <button type="button" className="wir-range-btn" onClick={jumpToThisWeek}>This week</button>
+        <button type="button" className="wir-range-btn" onClick={() => setShowCustom((v) => !v)}>{showCustom ? "Hide custom range" : "Custom range"}</button>
+      </div>
+      {showCustom && (
+        <div className="wir-custom-range">
+          <label>From <input type="date" value={toISODate(start)} onChange={(e) => e.target.value && setStart(parseISODateLocal(e.target.value))} /></label>
+          <label>To <input type="date" value={toISODate(end)} onChange={(e) => e.target.value && setEnd(parseISODateLocal(e.target.value))} /></label>
+        </div>
+      )}
+
+      <div className="stats-bar wir-metrics">
+        <div className="stat">
+          <div className="stat-label">New Contacts</div>
+          <div className="stat-value">{newContacts}</div>
+          <DeltaBadge current={newContacts} prior={priorNewContacts} />
+        </div>
+        <div className="stat">
+          <div className="stat-label">Meetings Held</div>
+          <div className="stat-value">{meetingsHeld}</div>
+          <DeltaBadge current={meetingsHeld} prior={priorMeetingsHeld} />
+        </div>
+        <div className="stat">
+          <div className="stat-label">Institutions Engaged</div>
+          <div className="stat-value">{institutionsEngaged}</div>
+          <DeltaBadge current={institutionsEngaged} prior={priorInstitutionsEngaged} />
+        </div>
+        <div className="stat">
+          <div className="stat-label">Deals Advanced</div>
+          <div className="stat-value">{dealsAdvanced}</div>
+          <DeltaBadge current={dealsAdvanced} prior={priorDealsAdvanced} />
+        </div>
+        <div className="stat">
+          <div className="stat-label">Outreach Sent</div>
+          <div className="stat-value">{outreachSent}</div>
+          <DeltaBadge current={outreachSent} prior={priorOutreachSent} />
+        </div>
+      </div>
+
+      <div className="wir-section">
+        <div className="wir-section-title">Pipeline Movement</div>
+        {weekTransitions.length === 0 ? (
+          <div className="wir-empty">No stage changes this period.</div>
+        ) : (
+          <div className="wir-list">
+            {weekTransitions.map((t, i) => {
+              const tierMeta = DEAL_TIERS.find((x) => x.id === t.tier) || DEAL_TIERS[DEAL_TIERS.length - 1];
+              return (
+                <div key={i} className="wir-row wir-row-click" onClick={() => onOpenInstitution(t.company)}>
+                  <div className="wir-row-main">
+                    <span className="wir-row-name">{t.company}</span>
+                    <span className="badge" style={{ background: tierMeta.bg, color: tierMeta.fg, border: `1px solid ${tierMeta.fg}44` }}>{tierMeta.label}</span>
+                  </div>
+                  <div className="wir-row-detail">{stageLabel(t.fromStage)} to {stageLabel(t.toStage)}</div>
+                  <div className="wir-row-date">{formatDate(t.date)}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {newDeals.length > 0 && (
+          <>
+            <div className="wir-subhead">New to Pipeline</div>
+            <div className="wir-list">
+              {newDeals.map((d) => {
+                const tierMeta = DEAL_TIERS.find((x) => x.id === d.tier) || DEAL_TIERS[DEAL_TIERS.length - 1];
+                return (
+                  <div key={d.id} className="wir-row wir-row-click" onClick={() => onOpenInstitution(d.company)}>
+                    <div className="wir-row-main">
+                      <span className="wir-row-name">{d.company}</span>
+                      <span className="badge" style={{ background: tierMeta.bg, color: tierMeta.fg, border: `1px solid ${tierMeta.fg}44` }}>{tierMeta.label}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="wir-section">
+        <div className="wir-section-title">Activity by Institution</div>
+        {instActivity.length === 0 ? (
+          <div className="wir-empty">No activity logged this period.</div>
+        ) : (
+          <div className="wir-list">
+            {instActivity.map((g) => (
+              <div key={g.name} className="wir-row">
+                <button type="button" className={`task-pill task-pill-${g.kind}`} onClick={() => onOpenInstitution(g.name)}>{g.name}</button>
+                <div className="wir-row-detail">{Object.entries(g.byType).map(([t, c]) => `${c} ${activityNoun(t, c)}`).join(", ")}</div>
+                {g.people.size > 0 && <div className="wir-row-people">{[...g.people.values()].join(", ")}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="wir-section">
+        <div className="wir-section-title">New Relationships</div>
+        {(newPeople.length === 0 && newInstitutions.length === 0) ? (
+          <div className="wir-empty">No new people or institutions this period.</div>
+        ) : (
+          <>
+            {newPeople.length > 0 && (
+              <div className="wir-list">
+                {newPeople.map((p) => (
+                  <div key={p.id} className="wir-row wir-row-click" onClick={() => onOpenPerson(p.id)}>
+                    <span className="wir-row-name">{p.name}</span>
+                    <span className="wir-row-detail">{p.role}{p.institutionName ? ` at ${p.institutionName}` : ""}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {newInstitutions.length > 0 && (
+              <div className="wir-list">
+                {newInstitutions.map((i) => {
+                  const meta = institutionTypeMeta(i.type);
+                  return (
+                    <div key={i.id} className="wir-row wir-row-click" onClick={() => onOpenInstitution(i.name)}>
+                      <span className="wir-row-name">{i.name}</span>
+                      <span className="badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{meta.label}</span>
+                      {i.tier && <span className="badge">{i.tier}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="wir-section">
+        <div className="wir-section-title">Coming Up Next Week</div>
+        {(upcomingEvents.length === 0 && upcomingScheduled.length === 0 && upcomingTasks.length === 0) ? (
+          <div className="wir-empty">Nothing scheduled yet.</div>
+        ) : (
+          <div className="wir-list">
+            {upcomingEvents.map((e) => {
+              const inst = upcomingEventEntity(e);
+              const clickable = !!inst || !!e.matched_contact_id;
+              return (
+                <div key={`ev-${e.id}`} className={`wir-row ${clickable ? "wir-row-click" : ""}`} onClick={() => { if (inst) onOpenInstitution(inst.name); else if (e.matched_contact_id) onOpenPerson(e.matched_contact_id); }}>
+                  <span className="wir-row-name">{e.title || "Untitled event"}</span>
+                  <span className="wir-row-detail">{formatDateTime(e.start_time)}</span>
+                </div>
+              );
+            })}
+            {upcomingScheduled.map((a) => (
+              <div key={`sm-${a.id}`} className="wir-row">
+                <span className="wir-row-name">{firstLine(stripFathomMarker(a.description)) || "Scheduled meeting"}</span>
+                <span className="wir-row-detail">{formatDateTime(a.scheduled_for)}</span>
+              </div>
+            ))}
+            {upcomingTasks.length > 0 && (
+              <>
+                <div className="wir-subhead">Tasks</div>
+                {upcomingTasks.map((t) => (
+                  <div key={t.id} className="wir-row">
+                    <span className="wir-row-name">{t.title}</span>
+                    <PriorityBadge priority={t.priority} />
+                    {t.due_date && <span className="wir-row-detail">Due {formatDate(t.due_date)}</span>}
+                    <TaskPills todo={t} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} onNavigate={onOpenTaskLink} />
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="wir-section">
+        <div className="wir-section-title">Blockers and Decisions Needed</div>
+        <div className="wir-blockers-list">
+          {blockers.map((b, i) => (
+            <div key={i} className="wir-blocker-item">
+              <span>{b}</span>
+              <button type="button" className="wir-blocker-remove" onClick={() => removeBlocker(i)} title="Remove">✕</button>
+            </div>
+          ))}
+        </div>
+        <div className="wir-blocker-add">
+          <input type="text" value={newBlocker} onChange={(e) => setNewBlocker(e.target.value)} placeholder="Add an item for Andy's input..." onKeyDown={(e) => { if (e.key === "Enter") addBlocker(); }} />
+          <button type="button" className="btn-copy" onClick={addBlocker}>Add</button>
+        </div>
+        {(stuckDeals.length > 0 || unresolvedComments.length > 0) && <div className="wir-subhead">Auto-flagged</div>}
+        {stuckDeals.length > 0 && (
+          <div className="wir-list">
+            {stuckDeals.map((d) => (
+              <div key={d.id} className="wir-row wir-row-click wir-row-flag" onClick={() => onOpenInstitution(d.company)}>
+                <span className="wir-row-name">{d.company}</span>
+                <span className="wir-row-detail">May need attention: no activity in {d.last_activity_at ? `${daysAgo(d.last_activity_at)} days` : "a while"}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {unresolvedComments.length > 0 && (
+          <div className="wir-list">
+            {unresolvedComments.map((c) => (
+              <div key={c.id} className="wir-row wir-row-flag">
+                <span className="wir-row-name">Comment from {c.author}</span>
+                <span className="wir-row-detail">{firstLine(c.content)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

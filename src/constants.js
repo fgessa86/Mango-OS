@@ -18,6 +18,7 @@ export const ACT_TYPES = [
   { id: "call", label: "Call", icon: "\u{1F4DE}" },
   { id: "email", label: "Email", icon: "\u{1F4E7}" },
   { id: "meeting", label: "Meeting", icon: "\u{1F91D}" },
+  { id: "scheduled_meeting", label: "Scheduled Meeting", icon: "\u{1F4C5}" },
   { id: "whatsapp", label: "WhatsApp", icon: "\u{1F4AC}", color: "#25D366" },
   { id: "linkedin", label: "LinkedIn", icon: "in", color: "#0A66C2" },
   { id: "note", label: "Note", icon: "\u{1F4DD}" },
