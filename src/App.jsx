@@ -2983,6 +2983,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             }}
             onOpenInstitution={openInstitution}
             onOpenPerson={openPerson}
+            onOpenSearch={() => setSearchOpen(true)}
           />
         </div>
       )}
@@ -3172,6 +3173,14 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         <GlobalSearch
           institutions={institutions}
           contacts={contacts}
+          deals={deals}
+          enablers={enablers}
+          organizations={organizations}
+          dealContacts={dealContacts}
+          enablerContacts={enablerContacts}
+          networkEdges={networkEdges}
+          contactRoles={contactRoles}
+          customOptions={customOptions}
           activities={activities}
           todos={todos}
           notes={notes}
@@ -7150,6 +7159,7 @@ function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOpt
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
+  const [linkedin, setLinkedin] = useState("");
   const [warmth, setWarmth] = useState("unknown");
   const [notes, setNotes] = useState("");
   const [roles, setRoles] = useState([{ institutionKey: "", role: "", primary: true }]);
@@ -7170,7 +7180,7 @@ function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOpt
     try {
       const ordered = [...roles].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0));
       const payload = ordered.map(r => ({ institutionKey: r.institutionKey, role: r.role }));
-      await onSave({ name, email, phone, warmth, notes, roles: payload, connectedThrough: connectedThrough || null, canReach: canReach || null, relationship });
+      await onSave({ name, email, phone, linkedin, warmth, notes, roles: payload, connectedThrough: connectedThrough || null, canReach: canReach || null, relationship });
     } finally { setSaving(false); }
   };
 
@@ -7218,6 +7228,7 @@ function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOpt
       <div className="form-grid">
         <div className="field"><label className="label">Email</label><input className="input" type="email" value={email} onChange={e => setEmail(e.target.value)} /></div>
         <div className="field"><label className="label">Phone</label><input className="input" value={phone} onChange={e => setPhone(e.target.value)} /></div>
+        <div className="field"><label className="label">LinkedIn URL</label><input className="input" value={linkedin} onChange={e => setLinkedin(e.target.value)} placeholder="linkedin.com/in/..." /></div>
         <div className="field-full"><label className="label">Warmth</label><ButtonGroupWithCustom options={warmthOpts} value={warmth} onChange={(v) => { setWarmth(v); trackCustom("warmth", warmthOpts, onAddCustomOption)(v); }} renderOption={(w) => <><span className="warmth-dot" style={{background:w.color}} />{w.label}</>} /></div>
         <div className="field-full"><label className="label">Notes</label><textarea className="input textarea" value={notes} onChange={e => setNotes(e.target.value)} /></div>
       </div>
@@ -7237,10 +7248,9 @@ const NETWORK_SUBTABS = [{ id: "institutions", label: "Institutions" }, { id: "p
 // name-keyed union of deals/enablers/organizations; people are contacts.
 function NetworkTab({
   institutions, contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles,
-  customOptions, onAddCustomOption, onAddInstitution, onCreateInstitution, onAddPersonWithRoles, onUpdateInstitution, onUpdateInstitutionCity, onUpdateContact, onUpdateRoleTitle, onSetOutreach, onLinkPersonToInstitution, onOpenInstitution, onOpenPerson,
+  customOptions, onAddCustomOption, onAddInstitution, onCreateInstitution, onAddPersonWithRoles, onUpdateInstitution, onUpdateInstitutionCity, onUpdateContact, onUpdateRoleTitle, onSetOutreach, onLinkPersonToInstitution, onOpenInstitution, onOpenPerson, onOpenSearch,
 }) {
   const [subtab, setSubtab] = useState("institutions");
-  const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [cityFilter, setCityFilter] = useState("");
   const [targetsOnly, setTargetsOnly] = useState(false);
@@ -7263,14 +7273,12 @@ function NetworkTab({
     ...types.filter(id => !INSTITUTION_TYPES.some(t => t.id === id)).sort(),
   ];
 
-  const q = search.trim().toLowerCase();
   const filteredInst = institutions.filter(i =>
     (!typeFilter || i.type === typeFilter) &&
     (!cityFilter || parseCities(i.city).includes(cityFilter)) &&
     (!targetsOnly || i.isTarget) &&
     (!enablersOnly || i.isEnabler) &&
-    (!internalOnly || i.isInternal) &&
-    (!q || i.name.toLowerCase().includes(q)));
+    (!internalOnly || i.isInternal));
 
   // People sub-tab data: every contact with their resolved roles.
   const peopleData = contacts.map(c => {
@@ -7281,7 +7289,6 @@ function NetworkTab({
     return { contact: c, roles, roleStr, connCount, cities: personCities };
   });
   const filteredPeople = peopleData.filter(p =>
-    (!q || p.contact.name.toLowerCase().includes(q) || p.roleStr.toLowerCase().includes(q)) &&
     (!warmthFilter || (p.contact.warmth || "unknown") === warmthFilter) &&
     (!cityFilter || p.cities.includes(cityFilter)) &&
     (!instFilter || p.roles.some(r => r.institutionName === instFilter)));
@@ -7292,7 +7299,7 @@ function NetworkTab({
   return (
     <div className="network-directory">
       <div className="network-top-bar">
-        <input className="input network-search" placeholder={`Search ${subtab}...`} value={search} onChange={e => setSearch(e.target.value)} />
+        <button type="button" className="input network-search network-search-btn" onClick={onOpenSearch}>Search people and institutions...</button>
         <div className="network-top-buttons">
           {!readOnly && <button onClick={() => setActiveForm(a => (a === "institution" ? null : "institution"))} className={`btn-primary ${activeForm === "institution" ? "active-toggle" : ""}`}>+ Institution</button>}
           {!readOnly && <button onClick={() => setActiveForm(a => (a === "person" ? null : "person"))} className={`btn-primary ${activeForm === "person" ? "active-toggle" : ""}`}>+ Person</button>}
@@ -7596,7 +7603,7 @@ function PeopleTable({ people, institutionNames, cities, onUpdateContact, onUpda
 // Global search (Cmd+K): client-side search over every loaded entity type,
 // grouped by kind, each result navigating straight to its home.
 // ============================================================
-function GlobalSearch({ institutions, contacts, activities, todos, notes, materials, entityName, onOpenInstitution, onOpenPerson, onOpenEntity, onOpenTasks, onOpenNote, onOpenMaterials, onClose }) {
+function GlobalSearch({ institutions, contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], activities, todos, notes, materials, entityName, onOpenInstitution, onOpenPerson, onOpenEntity, onOpenTasks, onOpenNote, onOpenMaterials, onClose }) {
   const [q, setQ] = useState("");
   const inputRef = useRef(null);
   useEffect(() => { if (inputRef.current) inputRef.current.focus(); }, []);
@@ -7609,10 +7616,19 @@ function GlobalSearch({ institutions, contacts, activities, todos, notes, materi
   const query = q.trim().toLowerCase();
   const hit = (s) => (s || "").toLowerCase().includes(query);
   const CAP = 5;
+  const roleCtx = { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles };
+  // A person's institution can live on the raw company text field, or only in
+  // contact_roles (added via a role picker rather than typed on the contact),
+  // so resolve their primary role's institution name too before matching.
+  const personInstitutionName = (c) => {
+    const roles = resolveContactRoles(c, roleCtx);
+    const primary = roles.find((r) => r.is_primary) || roles[0];
+    return primary?.institutionName || "";
+  };
   const groups = query.length < 2 ? [] : [
     {
       label: "Institutions",
-      items: institutions.filter((i) => hit(i.name)).slice(0, CAP).map((i) => ({
+      items: institutions.filter((i) => hit(i.name) || hit(i.type) || hit(institutionTypeMeta(i.type, customOptions).label) || parseCities(i.city).some(hit)).slice(0, CAP).map((i) => ({
         key: `inst-${i.key}`, title: i.name,
         sub: [i.isTarget ? "Target" : null, i.isEnabler ? "Enabler" : null, parseCities(i.city)[0] || null].filter(Boolean).join(" . "),
         go: () => onOpenInstitution(i.name),
@@ -7620,8 +7636,8 @@ function GlobalSearch({ institutions, contacts, activities, todos, notes, materi
     },
     {
       label: "People",
-      items: contacts.filter((c) => hit(c.name) || hit(c.company) || hit(c.role) || hit(c.email)).slice(0, CAP).map((c) => ({
-        key: `c-${c.id}`, title: c.name, sub: [c.role, c.company].filter(Boolean).join(", "),
+      items: contacts.filter((c) => hit(c.name) || hit(c.company) || hit(c.role) || hit(c.email) || hit(personInstitutionName(c))).slice(0, CAP).map((c) => ({
+        key: `c-${c.id}`, title: c.name, sub: [c.role, c.company || personInstitutionName(c)].filter(Boolean).join(", "),
         go: () => onOpenPerson(c.id),
       })),
     },

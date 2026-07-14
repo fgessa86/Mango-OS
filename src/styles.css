@@ -379,6 +379,8 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
    ============================================================ */
 .network-top-bar { display: flex; gap: 11px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
 .network-search { flex: 1; min-width: 240px; }
+.network-search-btn { text-align: left; color: var(--dim); cursor: pointer; }
+.network-search-btn:hover { border-color: var(--mango); }
 .network-top-buttons { display: flex; gap: 9px; flex-wrap: wrap; }
 .network-top-buttons .active-toggle { background: var(--next-tint); color: var(--accent-strong); }
 .network-filter-row { display: flex; gap: 9px; margin-bottom: 18px; flex-wrap: wrap; }
