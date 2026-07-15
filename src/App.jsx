@@ -90,18 +90,43 @@ function isInternalMeeting(ev, contacts) {
 
 // Renders an activity description. Fathom notes (and any description that looks
 // structured: "Heading:" lines and "- " bullets) get light formatting; a Fathom
-// badge marks auto-imported recaps.
-function ActivityDescription({ description }) {
+// badge marks auto-imported recaps. Email activities additionally get the
+// Gmail sync's body_snippet (or, once generated, its one-sentence ai_summary)
+// shown below the description, clamped to 2 lines and expandable on click; a
+// "Summarize" link appears until a summary exists.
+function ActivityDescription({ activity, onSummarizeEmail, summarizingId }) {
+  const [expanded, setExpanded] = useState(false);
+  const description = activity.description;
   const fathom = isFathomActivity({ description });
   const text = stripFathomMarker(description);
   const lines = text.split("\n");
   const structured = fathom
     || lines.some((l) => /^\s*[-•]\s+/.test(l))
     || lines.some((l) => /^[A-Za-z][\w ()/&'-]{0,40}:$/.test(l.trim()));
+  const snippet = (activity.body_snippet || "").trim();
+  const summary = (activity.ai_summary || "").trim();
+  const isEmail = activity.type === "email" && !!snippet;
+  const summarizing = summarizingId === activity.id;
   return (
     <div className="act-desc">
       {fathom && <span className="fathom-badge" title="Auto-imported from Fathom"><span className="fathom-badge-dot" />Fathom</span>}
       {structured ? <FormattedActivityBody lines={lines} /> : text}
+      {isEmail && (
+        <div className={`act-email-snippet ${expanded ? "expanded" : "clamped"}`} onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }} title={expanded ? "Click to collapse" : "Click to expand"}>
+          {summary && <span className="ai-badge" title="AI-generated summary">AI</span>}
+          {summary || snippet}
+        </div>
+      )}
+      {isEmail && !summary && onSummarizeEmail && (
+        <button
+          type="button"
+          className="link-btn act-summarize-btn"
+          onClick={(e) => { e.stopPropagation(); onSummarizeEmail(activity); }}
+          disabled={summarizing}
+        >
+          {summarizing ? "Summarizing..." : "Summarize"}
+        </button>
+      )}
     </div>
   );
 }
@@ -969,6 +994,7 @@ export default function App() {
   const [dealContacts, setDealContacts] = useState([]);
   const [enablerContacts, setEnablerContacts] = useState([]);
   const [todos, setTodos] = useState([]);
+  const [todoContacts, setTodoContacts] = useState([]);
   const [taskFilter, setTaskFilter] = useState("all");
   const [organizations, setOrganizations] = useState([]);
   const [dealEnablers, setDealEnablers] = useState([]);
@@ -989,6 +1015,7 @@ export default function App() {
   const [customOptions, setCustomOptions] = useState([]);
   const [contactRoles, setContactRoles] = useState([]);
   const [summarizing, setSummarizing] = useState(false);
+  const [summarizingActivityId, setSummarizingActivityId] = useState(null);
   const [researchingInst, setResearchingInst] = useState(null);
   // Institution keys we've already auto-researched this session, so opening a
   // sheet with an empty description does not re-hit the API on every render.
@@ -1005,7 +1032,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1013,6 +1040,7 @@ export default function App() {
         api("deal_contacts", "GET", null, "?select=*,contacts(*)&order=created_at.asc"),
         api("enabler_contacts", "GET", null, "?select=*,contacts(*)&order=created_at.asc"),
         api("todos", "GET", null, "?select=*&order=created_at.desc"),
+        api("todo_contacts", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
         api("organizations", "GET", null, "?select=*&order=name.asc"),
         api("deal_enablers", "GET", null, "?select=*,deals(*),enablers(*)&order=created_at.desc"),
         api("network_edges", "GET", null, "?select=*&order=created_at.desc"),
@@ -1030,7 +1058,7 @@ export default function App() {
         api("calendar_events", "GET", null, "?select=*&order=start_time.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
-      setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []);
+      setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []); setTodoContacts(tdc || []);
       setOrganizations(orgs || []); setDealEnablers(de || []); setNetworkEdges(ne || []);
       setCustomOptions(co || []); setContactRoles(cr || []); setBossComments(bc || []); setNotes(nt || []); setNoteFolders(nf || []);
       setMaterials(mat || []); setMaterialLinks(ml || []); setMeetingBriefs(mb || []); setEmailTemplates(et || []); setCalendarEvents(cal || []);
@@ -2049,19 +2077,45 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   };
 
   // TODOS
+  // Reconciles todo_contacts against a fresh list of contact ids for a task:
+  // adds rows for newly-picked people, removes rows for unpicked ones. Called
+  // after every todos write that carries a contact_ids array.
+  const syncTodoContacts = async (todoId, contactIds) => {
+    const ids = [...new Set((contactIds || []).filter(Boolean))];
+    const existing = todoContacts.filter((tc) => tc.todo_id === todoId);
+    const toAdd = ids.filter((id) => !existing.some((tc) => tc.contact_id === id));
+    const toRemove = existing.filter((tc) => !ids.includes(tc.contact_id));
+    const [addedRows] = await Promise.all([
+      Promise.all(toAdd.map((contactId) => api("todo_contacts", "POST", { todo_id: todoId, contact_id: contactId }).catch(() => null))),
+      Promise.all(toRemove.map((tc) => api("todo_contacts", "DELETE", null, `?id=eq.${tc.id}`).catch(() => {}))),
+    ]);
+    const added = addedRows.flatMap((r) => (Array.isArray(r) ? r : (r ? [r] : [])));
+    const removedIds = new Set(toRemove.map((tc) => tc.id));
+    setTodoContacts((prev) => [...prev.filter((tc) => !removedIds.has(tc.id)), ...added]);
+  };
+
+  // A task's contactIds come either as an explicit array (the multi-select
+  // form) or a single legacy contact_id; todos.contact_id always stays
+  // populated with the first pick so older reads keep working.
+  const resolveContactIds = (form) => [...new Set((form.contact_ids || (form.contact_id ? [form.contact_id] : [])).filter(Boolean))];
+
   const saveTodo = async (form) => {
     try {
       const title = (form.title || "").trim();
       if (!title) { showToast("Title is required"); return; }
+      const contactIds = resolveContactIds(form);
       const clean = { title, priority: form.priority || "medium", status: "open" };
       if (form.due_date) clean.due_date = form.due_date;
-      if (form.contact_id) clean.contact_id = form.contact_id;
+      if (contactIds[0]) clean.contact_id = contactIds[0];
       if (form.deal_id) clean.deal_id = form.deal_id;
       if (form.enabler_id) clean.enabler_id = form.enabler_id;
       if (form.organization_id) clean.organization_id = form.organization_id;
       const rows = await api("todos", "POST", clean);
       const row = Array.isArray(rows) ? rows[0] : rows;
-      if (row) setTodos((prev) => [row, ...prev]);
+      if (row) {
+        setTodos((prev) => [row, ...prev]);
+        if (contactIds.length) await syncTodoContacts(row.id, contactIds);
+      }
       showToast("To-do added");
     } catch { showToast("Error adding to-do"); }
   };
@@ -2077,8 +2131,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
   const updateTodo = async (id, patch) => {
     try {
-      await api("todos", "PATCH", patch, `?id=eq.${id}`);
-      setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+      const { contact_ids, ...rest } = patch;
+      const clean = { ...rest };
+      if (contact_ids) clean.contact_id = contact_ids[0] || null;
+      await api("todos", "PATCH", clean, `?id=eq.${id}`);
+      setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, ...clean } : t)));
+      if (contact_ids) await syncTodoContacts(id, contact_ids);
       showToast("To-do updated");
     } catch { showToast("Error updating to-do"); }
   };
@@ -2547,6 +2605,21 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Error logging activity"); }
   };
 
+  // On-demand AI summary for an email activity's body_snippet (the Gmail sync
+  // stores the cleaned snippet; the summary itself is only ever generated when
+  // the user asks for it, and saved so it never has to run again).
+  const summarizeEmailActivity = async (activity) => {
+    const snippet = (activity.body_snippet || "").trim();
+    if (!snippet || summarizingActivityId) return;
+    setSummarizingActivityId(activity.id);
+    try {
+      const summary = await generateSummary(`Summarize this email in one clear sentence, focusing on what was communicated or requested: ${snippet}`, 150);
+      await api("activities", "PATCH", { ai_summary: summary }, `?id=eq.${activity.id}`);
+      setActivities((prev) => prev.map((a) => (a.id === activity.id ? { ...a, ai_summary: summary } : a)));
+    } catch { showToast("Error summarizing email"); }
+    setSummarizingActivityId(null);
+  };
+
   const handleDrop = (e, stageId) => {
     e.preventDefault();
     const dealId = e.dataTransfer.getData("dealId");
@@ -2725,6 +2798,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           (inst.dealId && a.deal_id === inst.dealId) ||
           (inst.enablerId && a.enabler_id === inst.enablerId) ||
           (inst.orgId && a.organization_id === inst.orgId));
+        const instPeopleIds = new Set(institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, networkEdges, contacts }).map((p) => p.contactId));
         const genSummary = (_e, acts, people) => {
           if (inst.org) return generateOrganizationSummary(inst.org, acts, people);
           if (inst.deal) return generateDealSummary(inst.deal, acts);
@@ -2740,6 +2814,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             institution={inst}
             summaryEntity={inst.org || inst.deal || inst.enabler}
             activities={instActivities}
+            allActivities={activities}
             contacts={contacts}
             deals={deals}
             enablers={enablers}
@@ -2765,6 +2840,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onSetFlag={(flag, checked) => setInstitutionFlag(inst, flag, checked)}
             onDelete={() => deleteInstitution(inst)}
             onAddActivity={addActivity}
+            onSummarizeEmail={summarizeEmailActivity}
+            summarizingActivityId={summarizingActivityId}
             linkedNotes={notes.filter((n) => (inst.dealId && n.deal_id === inst.dealId) || (inst.enablerId && n.enabler_id === inst.enablerId) || (inst.orgId && n.organization_id === inst.orgId))}
             materials={materials}
             materialLinks={materialLinks.filter((l) => (inst.dealId && l.deal_id === inst.dealId) || (inst.enablerId && l.enabler_id === inst.enablerId) || (inst.orgId && l.organization_id === inst.orgId))}
@@ -2780,7 +2857,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onChangeStage={(stage) => inst.dealId && moveDeal(inst.dealId, stage)}
             onChangeTier={inst.dealId ? ((t) => setDealTier(inst.dealId, t)) : null}
             onUpdateDeal={inst.dealId ? ((patch) => updateDeal(inst.dealId, patch)) : null}
-            todos={todos.filter((t) => (inst.dealId && t.deal_id === inst.dealId) || (inst.enablerId && t.enabler_id === inst.enablerId) || (inst.orgId && t.organization_id === inst.orgId))}
+            todos={todos.filter((t) =>
+              (inst.dealId && t.deal_id === inst.dealId) || (inst.enablerId && t.enabler_id === inst.enablerId) || (inst.orgId && t.organization_id === inst.orgId) ||
+              (t.contact_id && instPeopleIds.has(t.contact_id)) ||
+              todoContacts.some((tc) => tc.todo_id === t.id && instPeopleIds.has(tc.contact_id)))}
+            todoContacts={todoContacts}
             taskInitial={(() => { const p = institutionPrimaryEntity(inst); return p ? { [`${p.type}_id`]: p.id } : {}; })()}
             onAddTodo={(form) => { const p = institutionPrimaryEntity(inst); return saveTodo({ ...(p ? { [`${p.type}_id`]: p.id } : {}), ...form }); }}
             onToggleTodo={toggleTodo}
@@ -2828,8 +2909,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onDelete={deleteContact}
             onCompose={() => setCompose({ contactId: sheetContact.id })}
             onAddActivity={addActivity}
-            onAddTodo={(form) => saveTodo({ ...form, contact_id: sheetContact.id })}
-            todos={todos.filter((t) => t.contact_id === sheetContact.id)}
+            onSummarizeEmail={summarizeEmailActivity}
+            summarizingActivityId={summarizingActivityId}
+            onAddTodo={(form) => saveTodo({ ...form, contact_ids: [...new Set([sheetContact.id, ...(form.contact_ids || [])])], contact_id: sheetContact.id })}
+            todos={todos.filter((t) => t.contact_id === sheetContact.id || todoContacts.some((tc) => tc.todo_id === t.id && tc.contact_id === sheetContact.id))}
+            todoContacts={todoContacts}
             taskInitial={{ contact_id: sheetContact.id }}
             onToggleTodo={toggleTodo}
             onUpdateTodo={updateTodo}
@@ -2865,11 +2949,13 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onOpenCalendar={() => navigateTab("calendar")}
           urgentTasks={urgentTasks}
           onToggleTodo={toggleTodo}
+          onNavigateTask={openTaskLink}
           recentActivities={recentActivities}
           deals={deals}
           enablers={enablers}
           organizations={organizations}
           contacts={contacts}
+          todoContacts={todoContacts}
           dealContacts={dealContacts}
           enablerContacts={enablerContacts}
           networkEdges={networkEdges}
@@ -3068,6 +3154,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
                   deals={deals}
                   enablers={enablers}
                   organizations={organizations}
+                  todoContacts={todoContacts}
                   customOptions={customOptions}
                   onAddCustomOption={addCustomOption}
                   onToggle={toggleTodo}
@@ -3090,6 +3177,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
                       deals={deals}
                       enablers={enablers}
                       organizations={organizations}
+                      todoContacts={todoContacts}
                       customOptions={customOptions}
                       onAddCustomOption={addCustomOption}
                       onToggle={toggleTodo}
@@ -3174,6 +3262,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           organizations={organizations}
           activities={activities}
           todos={todos}
+          todoContacts={todoContacts}
           bossComments={bossComments}
           calendarEvents={calendarEvents}
           dealContacts={dealContacts}
@@ -3294,7 +3383,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, onPrepBriefEvent, onOpenCalendar, urgentTasks, onToggleTodo, recentActivities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, onPrepBriefEvent, onOpenCalendar, urgentTasks, onToggleTodo, onNavigateTask, recentActivities, deals, enablers, organizations, contacts, todoContacts = [], dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
@@ -3431,7 +3520,9 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
                     <div className="home-task-meta">
                       <PriorityBadge priority={t.priority} />
                       {t.due_date && <span className={`home-due ${overdue ? "due-overdue" : dueToday ? "due-today" : ""}`}>{overdue ? `Overdue ${formatDate(t.due_date)}` : dueToday ? "Due today" : `Due ${formatDate(t.due_date)}`}</span>}
-                      {name && <span className="home-task-entity">{name}</span>}
+                    </div>
+                    <div onClick={(e) => e.stopPropagation()}>
+                      <TaskPills todo={t} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} todoContacts={todoContacts} onNavigate={onNavigateTask} />
                     </div>
                   </div>
                 </div>
@@ -3920,7 +4011,7 @@ function DeltaBadge({ current, prior }) {
   );
 }
 
-function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, bossComments, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, onOpenTaskLink, showToast }) {
+function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, todoContacts = [], bossComments, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, onOpenTaskLink, showToast }) {
   const [start, setStart] = useState(() => startOfWeek(new Date()));
   const [end, setEnd] = useState(() => addDaysLocal(startOfWeek(new Date()), 6));
   const [showCustom, setShowCustom] = useState(false);
@@ -4338,7 +4429,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
                     <span className="wir-row-name">{t.title}</span>
                     <PriorityBadge priority={t.priority} />
                     {t.due_date && <span className="wir-row-detail">Due {formatDate(t.due_date)}</span>}
-                    <TaskPills todo={t} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} onNavigate={onOpenTaskLink} />
+                    <TaskPills todo={t} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} todoContacts={todoContacts} onNavigate={onOpenTaskLink} />
                   </div>
                 ))}
               </>
@@ -5488,7 +5579,7 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onAddTodo, todos = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -5759,6 +5850,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
           deals={deals}
           enablers={enablers}
           organizations={organizations}
+          todoContacts={todoContacts}
           customOptions={customOptions}
           onAddCustomOption={onAddCustomOption}
           onCreateInstitution={onCreateInstitution}
@@ -5787,10 +5879,10 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
             <div key={a.id} className="timeline-item">
               <ActivityGlyph type={a.type} />
               <div>
-                <ActivityDescription description={a.description} />
+                <ActivityDescription activity={a} onSummarizeEmail={onSummarizeEmail} summarizingId={summarizingActivityId} />
                 <div className="act-date">
                   <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} dealContacts={dealContacts} enablerContacts={enablerContacts} networkEdges={networkEdges} contactRoles={contactRoles} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} hidePerson />
-                  {formatDate(a.created_at)}
+                  {formatDateTime(a.created_at)}
                 </div>
               </div>
             </div>
@@ -6346,18 +6438,62 @@ function EntityPicker({ placeholder, options, value, onChange, onCreateInstituti
   );
 }
 
+// Multi-select over a list of {value, label} options: already-picked entries
+// show as removable chips, with a search box below to add more. Used for a
+// task's contacts, where any number of people can be linked.
+function MultiContactPicker({ options, value = [], onChange, placeholder = "Search contacts..." }) {
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(false);
+  const selected = value.map((id) => options.find((o) => o.value === id)).filter(Boolean);
+  const query = q.trim().toLowerCase();
+  const available = options.filter((o) => !value.includes(o.value));
+  const filtered = (query ? available.filter((o) => o.label.toLowerCase().includes(query)) : available).slice(0, 8);
+  const add = (id) => { onChange([...value, id]); setQ(""); setOpen(false); };
+  const remove = (id) => onChange(value.filter((v) => v !== id));
+  return (
+    <div className="entity-picker multi-contact-picker">
+      {selected.length > 0 && (
+        <div className="multi-contact-pills">
+          {selected.map((o) => (
+            <span key={o.value} className="entity-picker-chip">
+              {o.label}
+              <button type="button" className="entity-picker-clear" onClick={() => remove(o.value)} title="Remove">✕</button>
+            </span>
+          ))}
+        </div>
+      )}
+      <input
+        className="input entity-picker-input"
+        placeholder={placeholder}
+        value={q}
+        onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+      />
+      {open && (
+        <div className="entity-picker-options">
+          {filtered.length === 0 ? <div className="empty-small entity-picker-empty">No matches.</div> : filtered.map((o) => (
+            <button type="button" key={o.value} className="entity-picker-option" onMouseDown={() => add(o.value)}>{o.label}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // The one task form used everywhere (Tasks tab quick-add, sheet To-Do/Task
 // sections, and inline task editing). Links to any combination of deal,
-// institution (enabler or organization), and contact. `initial` pre-fills from
-// context; when there is no onCancel it behaves as a persistent quick-add and
-// resets after each save.
+// institution (enabler or organization), and any number of contacts. `initial`
+// pre-fills from context (its `contact_ids` array, falling back to a single
+// `contact_id`); when there is no onCancel it behaves as a persistent quick-add
+// and resets after each save.
 function TaskForm({ deals = [], enablers = [], organizations = [], contacts = [], customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, initial = {}, onSave, onCancel, submitLabel = "Add Task" }) {
   const [title, setTitle] = useState(initial.title || "");
   const [priority, setPriority] = useState(initial.priority || "medium");
   const [dueDate, setDueDate] = useState(initial.due_date || "");
   const [dealId, setDealId] = useState(initial.deal_id || "");
   const [inst, setInst] = useState(initial.enabler_id ? `enabler:${initial.enabler_id}` : initial.organization_id ? `organization:${initial.organization_id}` : "");
-  const [contactId, setContactId] = useState(initial.contact_id || "");
+  const [contactIds, setContactIds] = useState(initial.contact_ids || (initial.contact_id ? [initial.contact_id] : []));
   const [saving, setSaving] = useState(false);
   const priorityOpts = optionsWithCustom(PRIORITIES, customOptions, "priority");
 
@@ -6373,13 +6509,13 @@ function TaskForm({ deals = [], enablers = [], organizations = [], contacts = []
 
   const submit = async () => {
     if (!title.trim() || saving) return;
-    const form = { title: title.trim(), priority, due_date: dueDate || null, deal_id: dealId || null, enabler_id: null, organization_id: null, contact_id: contactId || null };
+    const form = { title: title.trim(), priority, due_date: dueDate || null, deal_id: dealId || null, enabler_id: null, organization_id: null, contact_ids: contactIds, contact_id: contactIds[0] || null };
     if (inst.startsWith("enabler:")) form.enabler_id = inst.slice(8);
     else if (inst.startsWith("organization:")) form.organization_id = inst.slice(13);
     setSaving(true);
     try {
       await onSave(form);
-      if (!onCancel) { setTitle(""); setPriority("medium"); setDueDate(""); setDealId(""); setInst(""); setContactId(""); }
+      if (!onCancel) { setTitle(""); setPriority("medium"); setDueDate(""); setDealId(""); setInst(""); setContactIds([]); }
     } finally { setSaving(false); }
   };
 
@@ -6393,7 +6529,7 @@ function TaskForm({ deals = [], enablers = [], organizations = [], contacts = []
       <div className="task-form-links">
         <div className="task-form-link"><span className="task-form-link-label">Deal</span><EntityPicker placeholder="Search deals..." options={dealOpts} value={dealId} onChange={setDealId} /></div>
         <div className="task-form-link"><span className="task-form-link-label">Institution</span><EntityPicker placeholder="Search enablers and orgs..." options={instOpts} value={inst} onChange={handleInstChange} onCreateInstitution={onCreateInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption} /></div>
-        <div className="task-form-link"><span className="task-form-link-label">Contact</span><EntityPicker placeholder="Search contacts..." options={contactOpts} value={contactId} onChange={setContactId} /></div>
+        <div className="task-form-link"><span className="task-form-link-label">Contacts</span><MultiContactPicker placeholder="Search contacts..." options={contactOpts} value={contactIds} onChange={setContactIds} /></div>
       </div>
       <div className="task-form-actions">
         {onCancel && <button className="btn-sec" onClick={onCancel}>Cancel</button>}
@@ -6405,12 +6541,17 @@ function TaskForm({ deals = [], enablers = [], organizations = [], contacts = []
 
 // Clickable pills for every entity a task is linked to: blue deal, gold enabler,
 // green contact, gray organization. Clicking navigates to that entity's sheet.
-function TaskPills({ todo, deals = [], enablers = [], organizations = [], contacts = [], onNavigate }) {
+function TaskPills({ todo, deals = [], enablers = [], organizations = [], contacts = [], todoContacts = [], onNavigate }) {
   const pills = [];
   if (todo.deal_id) { const d = deals.find((x) => x.id === todo.deal_id); if (d) pills.push({ kind: "deal", id: d.id, label: d.company }); }
   if (todo.enabler_id) { const e = enablers.find((x) => x.id === todo.enabler_id); if (e) pills.push({ kind: "enabler", id: e.id, label: e.name }); }
   if (todo.organization_id) { const o = organizations.find((x) => x.id === todo.organization_id); if (o) pills.push({ kind: "organization", id: o.id, label: o.name }); }
-  if (todo.contact_id) { const c = contacts.find((x) => x.id === todo.contact_id); if (c) pills.push({ kind: "contact", id: c.id, label: c.name }); }
+  // A task can now link any number of people via todo_contacts; fall back to
+  // the legacy single contact_id for rows from before that table existed.
+  const linkedContactIds = todoContacts.length
+    ? [...new Set(todoContacts.filter((tc) => tc.todo_id === todo.id).map((tc) => tc.contact_id))]
+    : (todo.contact_id ? [todo.contact_id] : []);
+  linkedContactIds.forEach((cid) => { const c = contacts.find((x) => x.id === cid); if (c) pills.push({ kind: "contact", id: c.id, label: c.name }); });
   if (pills.length === 0) return null;
   return (
     <div className="task-pills">
@@ -6421,13 +6562,16 @@ function TaskPills({ todo, deals = [], enablers = [], organizations = [], contac
   );
 }
 
-function TodoRow({ todo, contacts = [], deals = [], enablers = [], organizations = [], customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onToggle, onUpdate, onNavigate }) {
+function TodoRow({ todo, contacts = [], deals = [], enablers = [], organizations = [], todoContacts = [], customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onToggle, onUpdate, onNavigate }) {
   const readOnly = useReadOnly();
   const [editing, setEditing] = useState(false);
   const overdue = todo.status !== "completed" && isOverdue(todo.due_date);
   const done = todo.status === "completed";
 
   if (editing && !readOnly && onUpdate) {
+    const contactIds = todoContacts.length
+      ? [...new Set(todoContacts.filter((tc) => tc.todo_id === todo.id).map((tc) => tc.contact_id))]
+      : (todo.contact_id ? [todo.contact_id] : []);
     return (
       <div className="todo-row todo-row-editing">
         <input type="checkbox" checked={done} onChange={() => onToggle(todo)} className="todo-checkbox" />
@@ -6435,7 +6579,7 @@ function TodoRow({ todo, contacts = [], deals = [], enablers = [], organizations
           <TaskForm
             deals={deals} enablers={enablers} organizations={organizations} contacts={contacts}
             customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCreateInstitution={onCreateInstitution}
-            initial={todo} submitLabel="Save"
+            initial={{ ...todo, contact_ids: contactIds }} submitLabel="Save"
             onSave={(form) => { onUpdate(todo.id, form); setEditing(false); }}
             onCancel={() => setEditing(false)}
           />
@@ -6461,7 +6605,7 @@ function TodoRow({ todo, contacts = [], deals = [], enablers = [], organizations
           {done && todo.completed_at && <span className="todo-due">Completed {formatDate(todo.completed_at)}</span>}
           {!done && todo.due_date && <span className="todo-due">Due {formatDate(todo.due_date)}</span>}
         </div>
-        <TaskPills todo={todo} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} onNavigate={onNavigate} />
+        <TaskPills todo={todo} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} todoContacts={todoContacts} onNavigate={onNavigate} />
       </div>
     </div>
   );
@@ -6469,13 +6613,13 @@ function TodoRow({ todo, contacts = [], deals = [], enablers = [], organizations
 
 // A tasks section for a sheet (institution "To-Dos" or person "Tasks"). The
 // "+ Task" button expands the shared TaskForm, pre-filled from `initial`.
-function TodoSection({ label = "To-Dos", todos, contacts = [], deals = [], enablers = [], organizations = [], customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, initial = {}, onAdd, onToggle, onUpdate, onNavigate }) {
+function TodoSection({ label = "To-Dos", todos, contacts = [], deals = [], enablers = [], organizations = [], todoContacts = [], customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, initial = {}, onAdd, onToggle, onUpdate, onNavigate }) {
   const readOnly = useReadOnly();
   const [showForm, setShowForm] = useState(false);
   const [showCompleted, setShowCompleted] = useState(false);
   const open = sortTodos(todos.filter(t => t.status !== "completed"));
   const completed = todos.filter(t => t.status === "completed").slice().sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at));
-  const rowProps = { contacts, deals, enablers, organizations, customOptions, onAddCustomOption, onCreateInstitution, onToggle, onUpdate, onNavigate };
+  const rowProps = { contacts, deals, enablers, organizations, todoContacts, customOptions, onAddCustomOption, onCreateInstitution, onToggle, onUpdate, onNavigate };
 
   return (
     <div className="todo-section">
@@ -6679,16 +6823,17 @@ function institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, 
 }
 
 function InstitutionSheet({
-  institution: inst, summaryEntity, activities, contacts, deals, enablers, organizations,
+  institution: inst, summaryEntity, activities, allActivities, contacts, deals, enablers, organizations,
   dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution,
-  onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, linkedNotes = [], onOpenNote, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
+  onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, onSummarizeEmail, summarizingActivityId, linkedNotes = [], onOpenNote, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
-  onChangeStage, onChangeTier, onUpdateDeal, todos = [], taskInitial = {}, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
+  onChangeStage, onChangeTier, onUpdateDeal, todos = [], todoContacts = [], taskInitial = {}, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
   materials = [], materialLinks = [], onAttachMaterial, onRemoveMaterialLink, onDownloadMaterial,
   onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot,
 }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
+  const [timelineScope, setTimelineScope] = useState("all");
   const [addPersonOpen, setAddPersonOpen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const meta = institutionTypeMeta(inst.type, customOptions);
@@ -6734,6 +6879,18 @@ function InstitutionSheet({
   }, [inst.key]);
 
   const people = institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, networkEdges, contacts });
+  // The cumulative timeline: every activity tagged directly to this
+  // institution, PLUS every activity logged with any of its people (a role at
+  // this institution is enough, regardless of which entity the activity's own
+  // FK points at). Array.filter never repeats an element, so this is already
+  // deduplicated by construction.
+  const peopleContactIds = new Set(people.map((p) => p.contactId));
+  const cumulativeActivities = (allActivities || activities).filter((a) =>
+    (inst.dealId && a.deal_id === inst.dealId) ||
+    (inst.enablerId && a.enabler_id === inst.enablerId) ||
+    (inst.orgId && a.organization_id === inst.orgId) ||
+    (a.contact_id && peopleContactIds.has(a.contact_id)));
+  const cumulativePeopleCount = new Set(cumulativeActivities.map((a) => a.contact_id).filter(Boolean)).size;
   // A researched person counts as "added" if this session added them, or a
   // person with the same name is already linked to this institution (so
   // reopening the sheet and Add All never create duplicates).
@@ -6782,7 +6939,8 @@ function InstitutionSheet({
   };
   const pendingCount = researchPeopleList().filter(x => !isAdded(x.key, x.p.name)).length;
 
-  const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
+  const scopedActivities = timelineScope === "direct" ? activities : cumulativeActivities;
+  const filtered = scopedActivities.filter(a => filter === "all" || a.type === filter).slice().reverse();
   const primary = institutionPrimaryEntity(inst);
 
   const targets = [["deal", inst.dealId], ["enabler", inst.enablerId], ["organization", inst.orgId]].filter(([, id]) => id);
@@ -7036,7 +7194,7 @@ function InstitutionSheet({
       )}
 
       {onAddTodo && (
-        <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} organizations={organizations} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCreateInstitution={onCreateInstitution} initial={taskInitial} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
+        <TodoSection todos={todos} contacts={contacts} deals={deals} enablers={enablers} organizations={organizations} todoContacts={todoContacts} customOptions={customOptions} onAddCustomOption={onAddCustomOption} onCreateInstitution={onCreateInstitution} initial={taskInitial} onAdd={onAddTodo} onToggle={onToggleTodo} onUpdate={onUpdateTodo} onNavigate={onNavigate} />
       )}
 
       <div className="people-section">
@@ -7103,6 +7261,11 @@ function InstitutionSheet({
 
       <div className="timeline">
         <div className="section-label">Activity Timeline</div>
+        <div className="timeline-scope-summary">{cumulativeActivities.length} interaction{cumulativeActivities.length === 1 ? "" : "s"} across {cumulativePeopleCount} people</div>
+        <div className="timeline-scope-toggle">
+          <button type="button" onClick={() => setTimelineScope("all")} className={`tag-btn ${timelineScope === "all" ? "active" : ""}`}>All activity</button>
+          <button type="button" onClick={() => setTimelineScope("direct")} className={`tag-btn ${timelineScope === "direct" ? "active" : ""}`}>Direct only</button>
+        </div>
         <div className="timeline-tabs">
           {TIMELINE_TABS.map(tb => <button key={tb.id} onClick={() => setFilter(tb.id)} className={`tag-btn ${filter === tb.id ? "active" : ""}`}>{tb.label}</button>)}
         </div>
@@ -7112,10 +7275,10 @@ function InstitutionSheet({
             <div key={a.id} className="timeline-item">
               <ActivityGlyph type={a.type} />
               <div>
-                <ActivityDescription description={a.description} />
+                <ActivityDescription activity={a} onSummarizeEmail={onSummarizeEmail} summarizingId={summarizingActivityId} />
                 <div className="act-date">
                   <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} hideInstitution />
-                  {formatDate(a.created_at)}
+                  {formatDateTime(a.created_at)}
                 </div>
               </div>
             </div>
