@@ -94,7 +94,7 @@ body {
 .nav-icon-diamond { border: 2px solid #b9ac93; transform: rotate(45deg); }
 .nav-icon-lines { display: flex; flex-direction: column; gap: 2.5px; justify-content: center; }
 .nav-icon-lines i { height: 2px; background: #b9ac93; border-radius: 2px; display: block; }
-.nav-item.active .nav-icon-square, .nav-item.active .nav-icon-circle, .nav-item.active .nav-icon-diamond { border-color: var(--mango); }
+.nav-item.active .nav-icon-square, .nav-item.active .nav-icon-circle, .nav-item.active .nav-icon-diamond, .nav-item.active .nav-icon-doc { border-color: var(--mango); }
 .nav-item.active .nav-icon-lines i { background: var(--mango); }
 
 .sidebar-section-label { margin-top: 22px; padding: 0 11px; font-size: 11px; font-weight: 700; letter-spacing: 0.09em; color: #a89a80; text-transform: uppercase; }
@@ -526,9 +526,24 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .wir-blocker-remove:hover { color: #C42B30; }
 .wir-blocker-add { display: flex; gap: 8px; }
 .wir-blocker-add input { flex: 1; border: 1px solid var(--divider); border-radius: 10px; padding: 8px 12px; font-family: inherit; font-size: 13px; background: var(--surface); color: var(--text); }
+.wir-blocker-item-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.wir-blockers-prominent { border: 1px solid #F5D48A; background: #FFFBF0; }
+.wir-blockers-tag { margin-left: 10px; font-size: 11px; font-weight: 700; color: #B77400; background: #FDECCB; border-radius: 20px; padding: 2px 9px; text-transform: none; vertical-align: middle; }
+.wir-row-wrap { display: flex; flex-direction: column; gap: 6px; }
+.wir-comment-tag { border: none; background: #EEF1FB; color: #3A4DB0; font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: 20px; cursor: pointer; font-family: inherit; }
+.wir-comment-tag:hover { filter: brightness(0.96); }
+.wir-comment-inline { background: var(--surface); border: 1px solid var(--divider); border-radius: 10px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
+.wir-comment-inline-item { font-size: 12.5px; color: var(--text-2); }
+.wir-comment-inline-author { font-weight: 700; color: var(--text); margin-right: 4px; }
+.wir-comments-sub { margin-bottom: 14px; }
+.wir-comments { display: flex; flex-direction: column; gap: 14px; }
+.wir-comment-compose { display: flex; gap: 10px; align-items: flex-end; }
+.wir-comment-compose .comment-compose-input { flex: 1; min-height: 60px; }
+.wir-comment-replying { font-size: 12px; color: var(--muted); margin-top: -6px; }
+.wir-comment-feed { display: flex; flex-direction: column; gap: 14px; max-height: 480px; overflow-y: auto; }
 
 @media print {
-  .sidebar, .comment-fab, .comment-panel, .mobile-tab-bar, .wir-actions, .wir-range-bar, .wir-custom-range, .wir-blocker-add, .wir-blocker-remove { display: none !important; }
+  .sidebar, .comment-fab, .comment-panel, .mobile-tab-bar, .wir-actions, .wir-range-bar, .wir-custom-range, .wir-blocker-add, .wir-blocker-remove, .wir-comments-section, .wir-comment-tag { display: none !important; }
   .wir-section { box-shadow: none; border: 1px solid #ddd; break-inside: avoid; }
 }
 
@@ -817,6 +832,9 @@ button.act-pill { -webkit-appearance: none; appearance: none; }
 .home-nudge-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; text-align: left; border: 1px solid #F3D4D5; background: #FCE8E8; color: #C42B30; font-size: 13.5px; font-weight: 700; padding: 12px 16px; border-radius: 12px; cursor: pointer; font-family: inherit; margin-bottom: 10px; }
 .home-nudge-banner:hover { filter: brightness(0.98); }
 .home-nudge-arrow { font-size: 15px; }
+.home-comment-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; text-align: left; border: 1px solid #D8DEF3; background: #EEF1FB; color: #3A4DB0; font-size: 13.5px; font-weight: 700; padding: 12px 16px; border-radius: 12px; cursor: pointer; font-family: inherit; margin-bottom: 10px; }
+.home-comment-banner:hover { filter: brightness(0.98); }
+.home-comment-banner-count { background: #3A4DB0; color: #fff; border-radius: 20px; padding: 1px 8px; font-size: 12px; }
 
 /* Follow-ups dashboard */
 .followup-group { margin-bottom: 22px; }

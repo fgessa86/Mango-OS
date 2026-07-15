@@ -401,13 +401,18 @@ function parseDueHint(hint) {
 // the sidebar on mobile). Home is the landing tab; the Network Map is
 // desktop-only, and Reports is reachable from the Home screen on mobile.
 function MobileTabBar({ view, setView, tasksCount, sheetOrigin = "network", bossMode = false }) {
-  const tabs = [
+  const tabs = bossMode ? [
+    // Andy's homepage is the Week in Review, so it replaces Home on his tab bar too.
+    { id: "reports", label: "Week in Review", shape: "doc" },
+    { id: "pipeline", label: "Pipeline", shape: "square" },
+    { id: "network", label: "Ecosystem", shape: "circle" },
+    { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
+  ] : [
     { id: "home", label: "Home", shape: "house" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Ecosystem", shape: "circle" },
     { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
-    // Outreach is an action workflow, hidden in Boss View (audit H4).
-    ...(bossMode ? [] : [{ id: "outreach", label: "Outreach", shape: "send" }]),
+    { id: "outreach", label: "Outreach", shape: "send" },
   ];
   const mapView = view === "institution-sheet" ? sheetOrigin : view === "person-sheet" ? "network" : view;
   return (
@@ -456,23 +461,28 @@ function MobilePipelineNav({ kanbanRef }) {
 
 // Left sidebar: wordmark, primary nav (geometric icons), a More section for
 // Reports/Boss View, static Saved Views, and a user card pinned to the bottom.
-function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0, bossMode = false, onRefresh, onOpenSearch, lastSynced }) {
-  const nav = [
+function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsToday = 0, bossMode = false, onRefresh, onOpenSearch, lastSynced, reportsUnreadCount = 0 }) {
+  // Andy's homepage is the Week in Review: it leads his nav, and the rest of
+  // his sidebar narrows to just the tabs he actually needs read-only.
+  const nav = bossMode ? [
+    { id: "reports", label: "Week in Review", shape: "doc" },
+    { id: "pipeline", label: "Pipeline", shape: "square" },
+    { id: "network", label: "Ecosystem", shape: "circle" },
+    { id: "calendar", label: "Calendar", shape: "calendar" },
+    { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
+  ] : [
     { id: "home", label: "Home", shape: "house" },
     { id: "calendar", label: "Calendar", shape: "calendar" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Ecosystem", shape: "circle" },
     { id: "map", label: "Network Map", shape: "diamond" },
     { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
-    // Notes are Fahed's personal workspace, hidden in Boss View (like Reports).
-    ...(bossMode ? [] : [{ id: "notes", label: "Notes", shape: "note" }]),
-    // Materials are shared collateral: visible in Boss View too (read-only).
+    { id: "notes", label: "Notes", shape: "note" },
     { id: "materials", label: "Materials", shape: "folder" },
-    // Outreach is Fahed's action workflow (compose, nudge): hidden in Boss View.
-    ...(bossMode ? [] : [{ id: "outreach", label: "Outreach", shape: "send" }]),
+    { id: "outreach", label: "Outreach", shape: "send" },
   ];
   const more = [
-    { id: "reports", label: "Reports" },
+    { id: "reports", label: "Reports", count: reportsUnreadCount },
   ];
   const mapView = view === "institution-sheet" ? sheetOrigin : view === "person-sheet" ? "network" : view;
   return (
@@ -507,6 +517,7 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
               <button key={n.id} onClick={() => setView(n.id)} className={`nav-item nav-item-sm ${mapView === n.id ? "active" : ""}`}>
                 <span className="nav-bar" />
                 <span className="nav-label">{n.label}</span>
+                {n.count > 0 && <span className="nav-count">{n.count}</span>}
               </button>
             ))}
           </div>
@@ -993,7 +1004,9 @@ function TagPickerWithCustom({ options, value, onToggle }) {
 }
 
 export default function App() {
-  const [view, setView] = useState("home");
+  // Boss View's homepage is the Week in Review (Andy's default landing page),
+  // not Home. Fahed still lands on Home.
+  const [view, setView] = useState(() => (new URLSearchParams(window.location.search).get("view") === "boss" ? "reports" : "home"));
   const [deals, setDeals] = useState([]);
   const [contacts, setContacts] = useState([]);
   const [activities, setActivities] = useState([]);
@@ -2737,10 +2750,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   };
   // Tab-level navigation resets the sheet history.
   const navigateTab = (v) => { setNavStack([]); setInstitutionSheetKey(null); setPersonSheetId(null); setView(v); };
-  // Boss View hides Notes and Outreach; if it ever lands on one (deep link,
-  // stale URL) send it Home rather than rendering a blank main area (M4).
+  // Boss View's sidebar is now just Week in Review / Pipeline / Ecosystem /
+  // Calendar / Tasks; if it ever lands elsewhere (deep link, stale URL) send
+  // it back to the Week in Review, Andy's homepage, rather than a tab that is
+  // no longer in his nav (M4).
   useEffect(() => {
-    if (bossMode && (view === "outreach" || view === "notes")) setView("home");
+    if (bossMode && ["outreach", "notes", "home", "map", "materials"].includes(view)) setView("reports");
   }, [bossMode, view]);
   const VIEW_BACK_LABELS = { home: "Home", calendar: "Calendar", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports" };
   const backTarget = navStack[navStack.length - 1];
@@ -2748,6 +2763,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     if (!backTarget) return sheetOrigin === "pipeline" ? "Back to Pipeline" : "Back to Ecosystem";
     if (backTarget.view === "institution-sheet") { const i = institutions.find((x) => x.key === backTarget.institutionSheetKey); return i ? `Back to ${i.name}` : "Back"; }
     if (backTarget.view === "person-sheet") { const c = contacts.find((x) => x.id === backTarget.personSheetId); return c ? `Back to ${c.name}` : "Back"; }
+    if (backTarget.view === "reports") return `Back to ${bossMode ? "Week in Review" : "Reports"}`;
     return `Back to ${VIEW_BACK_LABELS[backTarget.view] || "Ecosystem"}`;
   })();
 
@@ -2816,7 +2832,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     <div className="app">
       {toast && <div className="toast">{toast}</div>}
 
-      <Sidebar view={view} setView={navigateTab} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} apiCallsToday={apiCallsToday} bossMode={bossMode} onRefresh={refreshData} onOpenSearch={() => setSearchOpen(true)} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} />
+      <Sidebar view={view} setView={navigateTab} tasksCount={openTodos.length} sheetOrigin={sheetOrigin} apiCallsToday={apiCallsToday} bossMode={bossMode} onRefresh={refreshData} onOpenSearch={() => setSearchOpen(true)} lastSynced={lastSyncedActivity ? `Synced ${formatDateTime(lastSyncedActivity.created_at)}` : "No sync yet"} reportsUnreadCount={bossMode ? 0 : unreadBossComments.length} />
 
       <main className="main">
 
@@ -3297,6 +3313,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           todos={todos}
           todoContacts={todoContacts}
           bossComments={bossComments}
+          commentAuthor={commentAuthor}
+          onPostComment={postBossComment}
+          onMarkCommentRead={bossMode ? null : markCommentRead}
           calendarEvents={calendarEvents}
           dealContacts={dealContacts}
           enablerContacts={enablerContacts}
@@ -3434,6 +3453,15 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
           {onRefresh && <button className="home-refresh-btn" onClick={onRefresh} title="Reload all data from the server">↻</button>}
         </div>
       </div>
+
+      {/* Andy's comments on the Week in Review live there now (see the Comments
+          section on that page); this banner is just the shortcut in. */}
+      {!bossMode && unreadComments.length > 0 && (
+        <button className="home-comment-banner" onClick={onOpenReports}>
+          <span>💬 Andy commented on the Week in Review</span>
+          <span className="home-comment-banner-count">{unreadComments.length}</span>
+        </button>
+      )}
 
       {/* 1. Unread comments from the other person (Andy for Fahed, Fahed for Andy) */}
       <div className="home-section">
@@ -4047,13 +4075,19 @@ function DeltaBadge({ current, prior }) {
   );
 }
 
-function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, todoContacts = [], bossComments, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, onOpenTaskLink, showToast }) {
+function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, todoContacts = [], bossComments, commentAuthor, onPostComment, onMarkCommentRead, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, onOpenTaskLink, showToast }) {
+  const readOnly = useReadOnly();
   const [start, setStart] = useState(() => startOfWeek(new Date()));
   const [end, setEnd] = useState(() => addDaysLocal(startOfWeek(new Date()), 6));
   const [showCustom, setShowCustom] = useState(false);
   const [blockers, setBlockers] = useState([]);
   const [newBlocker, setNewBlocker] = useState("");
   const [copied, setCopied] = useState(null);
+  // A "Respond" click on a blocker/flag pre-loads the Comments composer below
+  // with a quoted reference (and the item's entity tag, if it has one).
+  const [pendingReply, setPendingReply] = useState(null); // { text, tag } | null
+  const [expandedTags, setExpandedTags] = useState(() => new Set());
+  const commentsRef = useRef(null);
 
   const weekKey = `mango-week-review-blockers-${toISODate(start)}`;
   useEffect(() => {
@@ -4088,6 +4122,63 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
   };
 
   const ctx = { deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles };
+
+  // Ties an institution's name back to whichever backing rows (deal/enabler/
+  // organization) it has, so a comment tagged to any of them surfaces here.
+  const institutionIdsFor = (name) => {
+    const key = (name || "").trim().toLowerCase();
+    const ids = {};
+    const d = deals.find((x) => (x.company || "").trim().toLowerCase() === key);
+    if (d) ids.deal_id = d.id;
+    const e = enablers.find((x) => (x.name || "").trim().toLowerCase() === key);
+    if (e) ids.enabler_id = e.id;
+    const o = organizations.find((x) => (x.name || "").trim().toLowerCase() === key);
+    if (o) ids.organization_id = o.id;
+    return ids;
+  };
+  const unresolvedCommentsFor = (name) => {
+    const ids = institutionIdsFor(name);
+    if (!ids.deal_id && !ids.enabler_id && !ids.organization_id) return [];
+    return bossComments.filter((c) => !c.is_read && ((ids.deal_id && c.deal_id === ids.deal_id) || (ids.enabler_id && c.enabler_id === ids.enabler_id) || (ids.organization_id && c.organization_id === ids.organization_id)));
+  };
+  const toggleTag = (name) => setExpandedTags((prev) => { const next = new Set(prev); if (next.has(name)) next.delete(name); else next.add(name); return next; });
+  const respondTo = (text, tag = {}) => {
+    setPendingReply({ text: `Re: "${text}"\n\n`, tag });
+    setTimeout(() => commentsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+  };
+  const commentTargetName = (c) => {
+    if (c.deal_id) return deals.find((d) => d.id === c.deal_id)?.company || null;
+    if (c.enabler_id) return enablers.find((e) => e.id === c.enabler_id)?.name || null;
+    if (c.organization_id) return organizations.find((o) => o.id === c.organization_id)?.name || null;
+    return null;
+  };
+  // Small inline badge next to a Pipeline Movement / Activity by Institution
+  // row: shows an unresolved-comment count for that institution, and expands
+  // those comments right there when clicked.
+  const CommentTagBadge = ({ name }) => {
+    const list = unresolvedCommentsFor(name);
+    if (list.length === 0) return null;
+    return (
+      <button type="button" className="wir-comment-tag" onClick={(e) => { e.stopPropagation(); toggleTag(name); }} title={`${list.length} unresolved comment${list.length === 1 ? "" : "s"}`}>
+        💬 {list.length}
+      </button>
+    );
+  };
+  const CommentTagInline = ({ name }) => {
+    if (!expandedTags.has(name)) return null;
+    const list = unresolvedCommentsFor(name);
+    if (list.length === 0) return null;
+    return (
+      <div className="wir-comment-inline" onClick={(e) => e.stopPropagation()}>
+        {list.map((c) => (
+          <div key={c.id} className="wir-comment-inline-item">
+            <span className="wir-comment-inline-author">{c.author}:</span>
+            <span className="wir-comment-inline-text">{firstLine(c.content)}</span>
+          </div>
+        ))}
+      </div>
+    );
+  };
 
   const weekActs = activities.filter((a) => inWeekRange(a.created_at, start, end));
   const priorActs = activities.filter((a) => inWeekRange(a.created_at, priorStart, priorEnd));
@@ -4293,10 +4384,10 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
       <div className="page-header wir-header">
         <div>
           <div className="page-title">Week in Review</div>
-          <div className="page-sub">A live dashboard for the Tuesday call, and a copy/send version for Andy beforehand.</div>
+          <div className="page-sub">{readOnly ? "Fahed's week: what moved, what's next, and what needs your input." : "A live dashboard for the Tuesday call, and a copy/send version for Andy beforehand."}</div>
         </div>
         <div className="wir-actions">
-          <button className="btn-copy btn-copy-lg" onClick={copyPlain}>{copied === "plain" ? "Copied!" : "Copy Report"}</button>
+          {!readOnly && <button className="btn-copy btn-copy-lg" onClick={copyPlain}>{copied === "plain" ? "Copied!" : "Copy Report"}</button>}
           <button className="btn-copy" onClick={copyEmail}>{copied === "email" ? "Copied!" : "Copy for Email"}</button>
         </div>
       </div>
@@ -4352,13 +4443,17 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
             {weekTransitions.map((t, i) => {
               const tierMeta = DEAL_TIERS.find((x) => x.id === t.tier) || DEAL_TIERS[DEAL_TIERS.length - 1];
               return (
-                <div key={i} className="wir-row wir-row-click" onClick={() => onOpenInstitution(t.company)}>
-                  <div className="wir-row-main">
-                    <span className="wir-row-name">{t.company}</span>
-                    <span className="badge" style={{ background: tierMeta.bg, color: tierMeta.fg, border: `1px solid ${tierMeta.fg}44` }}>{tierMeta.label}</span>
+                <div key={i} className="wir-row-wrap">
+                  <div className="wir-row wir-row-click" onClick={() => onOpenInstitution(t.company)}>
+                    <div className="wir-row-main">
+                      <span className="wir-row-name">{t.company}</span>
+                      <span className="badge" style={{ background: tierMeta.bg, color: tierMeta.fg, border: `1px solid ${tierMeta.fg}44` }}>{tierMeta.label}</span>
+                      <CommentTagBadge name={t.company} />
+                    </div>
+                    <div className="wir-row-detail">{stageLabel(t.fromStage)} to {stageLabel(t.toStage)}</div>
+                    <div className="wir-row-date">{formatDate(t.date)}</div>
                   </div>
-                  <div className="wir-row-detail">{stageLabel(t.fromStage)} to {stageLabel(t.toStage)}</div>
-                  <div className="wir-row-date">{formatDate(t.date)}</div>
+                  <CommentTagInline name={t.company} />
                 </div>
               );
             })}
@@ -4391,10 +4486,14 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
         ) : (
           <div className="wir-list">
             {instActivity.map((g) => (
-              <div key={g.name} className="wir-row">
-                <button type="button" className={`task-pill task-pill-${g.kind}`} onClick={() => onOpenInstitution(g.name)}>{g.name}</button>
-                <div className="wir-row-detail">{Object.entries(g.byType).map(([t, c]) => `${c} ${activityNoun(t, c)}`).join(", ")}</div>
-                {g.people.size > 0 && <div className="wir-row-people">{[...g.people.values()].join(", ")}</div>}
+              <div key={g.name} className="wir-row-wrap">
+                <div className="wir-row">
+                  <button type="button" className={`task-pill task-pill-${g.kind}`} onClick={() => onOpenInstitution(g.name)}>{g.name}</button>
+                  <CommentTagBadge name={g.name} />
+                  <div className="wir-row-detail">{Object.entries(g.byType).map(([t, c]) => `${c} ${activityNoun(t, c)}`).join(", ")}</div>
+                  {g.people.size > 0 && <div className="wir-row-people">{[...g.people.values()].join(", ")}</div>}
+                </div>
+                <CommentTagInline name={g.name} />
               </div>
             ))}
           </div>
@@ -4474,27 +4573,36 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
         )}
       </div>
 
-      <div className="wir-section">
-        <div className="wir-section-title">Blockers and Decisions Needed</div>
+      <div className={`wir-section ${readOnly ? "wir-blockers-prominent" : ""}`}>
+        <div className="wir-section-title">Blockers and Decisions Needed{readOnly && <span className="wir-blockers-tag">Your action list</span>}</div>
         <div className="wir-blockers-list">
           {blockers.map((b, i) => (
             <div key={i} className="wir-blocker-item">
               <span>{b}</span>
-              <button type="button" className="wir-blocker-remove" onClick={() => removeBlocker(i)} title="Remove">✕</button>
+              <div className="wir-blocker-item-actions">
+                {readOnly && <button type="button" className="btn-copy" onClick={() => respondTo(b)}>Respond</button>}
+                {!readOnly && <button type="button" className="wir-blocker-remove" onClick={() => removeBlocker(i)} title="Remove">✕</button>}
+              </div>
             </div>
           ))}
+          {blockers.length === 0 && <div className="wir-empty">Nothing flagged for input this period.</div>}
         </div>
-        <div className="wir-blocker-add">
-          <input type="text" value={newBlocker} onChange={(e) => setNewBlocker(e.target.value)} placeholder="Add an item for Andy's input..." onKeyDown={(e) => { if (e.key === "Enter") addBlocker(); }} />
-          <button type="button" className="btn-copy" onClick={addBlocker}>Add</button>
-        </div>
+        {!readOnly && (
+          <div className="wir-blocker-add">
+            <input type="text" value={newBlocker} onChange={(e) => setNewBlocker(e.target.value)} placeholder="Add an item for Andy's input..." onKeyDown={(e) => { if (e.key === "Enter") addBlocker(); }} />
+            <button type="button" className="btn-copy" onClick={addBlocker}>Add</button>
+          </div>
+        )}
         {(stuckDeals.length > 0 || unresolvedComments.length > 0) && <div className="wir-subhead">Auto-flagged</div>}
         {stuckDeals.length > 0 && (
           <div className="wir-list">
             {stuckDeals.map((d) => (
-              <div key={d.id} className="wir-row wir-row-click wir-row-flag" onClick={() => onOpenInstitution(d.company)}>
-                <span className="wir-row-name">{d.company}</span>
-                <span className="wir-row-detail">May need attention: no activity in {d.last_activity_at ? `${daysAgo(d.last_activity_at)} days` : "a while"}</span>
+              <div key={d.id} className="wir-row wir-row-flag">
+                <div className="wir-row-click" onClick={() => onOpenInstitution(d.company)} style={{ flex: 1 }}>
+                  <span className="wir-row-name">{d.company}</span>
+                  <span className="wir-row-detail">May need attention: no activity in {d.last_activity_at ? `${daysAgo(d.last_activity_at)} days` : "a while"}</span>
+                </div>
+                {readOnly && <button type="button" className="btn-copy" onClick={() => respondTo(`${d.company}: no activity in ${d.last_activity_at ? `${daysAgo(d.last_activity_at)} days` : "a while"}`, institutionIdsFor(d.company))}>Respond</button>}
               </div>
             ))}
           </div>
@@ -4509,6 +4617,91 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
             ))}
           </div>
         )}
+      </div>
+
+      <div className="wir-section wir-comments-section" ref={commentsRef}>
+        <div className="wir-section-title">Comments</div>
+        <div className="page-sub wir-comments-sub">Between Fahed and Andy, right here on the report.</div>
+        <WeekInReviewComments
+          comments={bossComments}
+          author={commentAuthor}
+          onPost={onPostComment}
+          onMarkRead={onMarkCommentRead}
+          readOnly={readOnly}
+          targetName={commentTargetName}
+          pendingReply={pendingReply}
+          onConsumeReply={() => setPendingReply(null)}
+        />
+      </div>
+    </div>
+  );
+}
+
+// The Week in Review's always-visible comment thread (item 3): the same
+// two-way conversation as the floating CommentPanel, but shown inline so the
+// report and the discussion around it live on one page. A "Respond" click
+// elsewhere on the page pre-fills the composer via pendingReply.
+function WeekInReviewComments({ comments, author, onPost, onMarkRead, readOnly, targetName, pendingReply, onConsumeReply }) {
+  const [text, setText] = useState("");
+  const [posting, setPosting] = useState(false);
+  const textareaRef = useRef(null);
+  const markedRef = useRef(new Set());
+  const sorted = [...comments].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+  useEffect(() => {
+    if (!pendingReply) return;
+    setText(pendingReply.text);
+    textareaRef.current?.focus();
+  }, [pendingReply]);
+
+  // Fahed viewing this section marks Andy's comments read (item 6). Andy's own
+  // view never marks Fahed's comments read here (no onMarkRead is passed in).
+  useEffect(() => {
+    if (!onMarkRead) return;
+    comments.forEach((c) => {
+      if (!c.is_read && c.author !== author && !markedRef.current.has(c.id)) {
+        markedRef.current.add(c.id);
+        onMarkRead(c.id);
+      }
+    });
+  }, [comments, author, onMarkRead]);
+
+  const send = async () => {
+    const t = text.trim();
+    if (!t || posting) return;
+    setPosting(true);
+    try {
+      await onPost({ author, content: t, ...(pendingReply?.tag || {}) });
+      setText("");
+      if (pendingReply) onConsumeReply();
+    } finally { setPosting(false); }
+  };
+
+  return (
+    <div className="wir-comments">
+      <div className="comment-compose wir-comment-compose">
+        <textarea ref={textareaRef} className="input comment-compose-input" placeholder={readOnly ? "Leave a note for Fahed..." : "Reply to Andy..."} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); }} />
+        <button className="btn-primary" onClick={send} disabled={posting || !text.trim()}>Send</button>
+      </div>
+      {pendingReply?.text && (text === pendingReply.text) && <div className="wir-comment-replying">Replying to the item above</div>}
+      <div className="comment-feed wir-comment-feed">
+        {sorted.length === 0 && <div className="empty-small">No comments yet. Start the conversation.</div>}
+        {sorted.map((c) => {
+          const tName = targetName ? targetName(c) : null;
+          return (
+            <div key={c.id} className="boss-comment">
+              <Avatar name={c.author} size={32} />
+              <div className="boss-comment-main">
+                <div className="boss-comment-meta"><span className="boss-comment-author">{c.author}</span><span className="boss-comment-time">{formatDateTime(c.created_at)}</span></div>
+                {tName && <div className="comment-target-chip">re: {tName}</div>}
+                {c.content && <div className="boss-comment-text">{c.content}</div>}
+                {c.file_data && (String(c.file_data).startsWith("data:image")
+                  ? <img className="boss-comment-img" src={c.file_data} alt={c.file_name || "attachment"} />
+                  : <a className="boss-comment-file" href={c.file_data} download={c.file_name || "file"}>📎 {c.file_name || "Download attachment"}</a>)}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
