@@ -1497,12 +1497,13 @@ export default function App() {
   // keep all three in sync no matter which surface the write comes from)
   const addDealContact = async (dealId, contactId, role) => {
     try {
+      if (dealContacts.some((dc) => dc.deal_id === dealId && dc.contact_id === contactId)) { showToast("Person already linked"); return; }
       const clean = { deal_id: dealId, contact_id: contactId };
       if ((role || "").trim()) clean.role_in_deal = role.trim();
       await api("deal_contacts", "POST", clean);
       await api("contact_roles", "POST", { contact_id: contactId, entity_type: "deal", entity_id: dealId, role_title: (role || "").trim() || null }).catch(() => {});
       await loadData(); showToast("Person added");
-    } catch { showToast("Error adding person (maybe already linked)"); }
+    } catch { showToast("Error adding person"); }
   };
 
   const removeDealContact = async (id) => {
@@ -1516,12 +1517,13 @@ export default function App() {
 
   const addEnablerContact = async (enablerId, contactId, role) => {
     try {
+      if (enablerContacts.some((ec) => ec.enabler_id === enablerId && ec.contact_id === contactId)) { showToast("Person already linked"); return; }
       const clean = { enabler_id: enablerId, contact_id: contactId };
       if ((role || "").trim()) clean.role_in_org = role.trim();
       await api("enabler_contacts", "POST", clean);
       await api("contact_roles", "POST", { contact_id: contactId, entity_type: "enabler", entity_id: enablerId, role_title: (role || "").trim() || null }).catch(() => {});
       await loadData(); showToast("Person added");
-    } catch { showToast("Error adding person (maybe already linked)"); }
+    } catch { showToast("Error adding person"); }
   };
 
 
@@ -1530,9 +1532,24 @@ export default function App() {
   // section (which still reads deal_contacts/enabler_contacts/network_edges)
   // keeps working without changes. No UI side effects, so callers that add
   // several roles in a row (see addPersonWithRoles) can reload/toast once at the end.
+  // Matches the DB's unique index on contact_roles (contact_id, entity_type,
+  // entity_id, COALESCE(role_title, '')): a null and an empty-string title are
+  // the same row for dedupe purposes.
+  const roleTitlesMatch = (a, b) => (a || "").trim() === (b || "").trim();
+
   const persistPersonRole = async ({ contactId, entityType, entityId, roleTitle, isPrimary = false }) => {
     const title = (roleTitle || "").trim() || null;
-    await api("contact_roles", "POST", { contact_id: contactId, entity_type: entityType, entity_id: entityId, role_title: title, is_primary: !!isPrimary });
+    // Dedupe against already-loaded state first (the common case), then fall
+    // back to treating a 409 from the unique index as the same outcome, in
+    // case local state is stale (e.g. a role added on another device).
+    const dup = contactRoles.some((r) => r.contact_id === contactId && r.entity_type === entityType && r.entity_id === entityId && roleTitlesMatch(r.role_title, title));
+    if (dup) return { duplicate: true };
+    try {
+      await api("contact_roles", "POST", { contact_id: contactId, entity_type: entityType, entity_id: entityId, role_title: title, is_primary: !!isPrimary });
+    } catch (e) {
+      if (e?.status === 409) return { duplicate: true };
+      throw e;
+    }
     if (entityType === "deal") {
       await api("deal_contacts", "POST", { deal_id: entityId, contact_id: contactId, ...(title ? { role_in_deal: title } : {}) }).catch(() => {});
     } else if (entityType === "enabler") {
@@ -1540,6 +1557,7 @@ export default function App() {
     } else if (entityType === "organization") {
       await api("network_edges", "POST", { source_type: "contact", source_id: contactId, target_type: "organization", target_id: entityId, relationship: "works_at", strength: "unknown", ...(title ? { notes: title } : {}) }).catch(() => {});
     }
+    return { duplicate: false };
   };
 
   // True when the entity being linked belongs to an internal institution, so a
@@ -1553,13 +1571,14 @@ export default function App() {
 
   const addPersonRole = async (args) => {
     try {
-      await persistPersonRole(args);
+      const result = await persistPersonRole(args);
+      if (result.duplicate) { showToast("Role already exists"); await loadData(); return; }
       // People at an internal institution automatically become internal team.
       if (args.contactId && entityIsInternal(args.entityType, args.entityId)) {
         await api("contacts", "PATCH", { is_internal: true }, `?id=eq.${args.contactId}`).catch(() => {});
       }
       await loadData(); showToast("Person added");
-    } catch { showToast("Error adding person (maybe already linked)"); }
+    } catch { showToast("Error adding person"); }
   };
 
   const removePersonRole = async (roleRow) => {
@@ -1793,6 +1812,7 @@ export default function App() {
   // DEAL <-> ENABLER CONNECTIONS
   const addDealEnabler = async (form) => {
     try {
+      if (dealEnablers.some((de) => de.deal_id === form.deal_id && de.enabler_id === form.enabler_id)) { showToast("Connection already exists"); return; }
       const clean = {
         deal_id: form.deal_id,
         enabler_id: form.enabler_id,
@@ -1808,6 +1828,14 @@ export default function App() {
 
   // GENERIC POLYMORPHIC EDGES (any entity to any entity, used when the pair
   // isn't a deal/enabler/contact combo with its own dedicated junction table)
+  // There is no DB-level unique constraint on network_edges, so this is the
+  // only thing stopping a duplicate: the same pair of nodes (in either
+  // direction, since most edges are bidirectional) with the same relationship.
+  const networkEdgeExists = (e) => networkEdges.some((x) =>
+    x.relationship === e.relationship &&
+    ((x.source_type === e.source_type && x.source_id === e.source_id && x.target_type === e.target_type && x.target_id === e.target_id) ||
+     (x.source_type === e.target_type && x.source_id === e.target_id && x.target_type === e.source_type && x.target_id === e.source_id)));
+
   const addNetworkEdge = async (form) => {
     try {
       const clean = {
@@ -1820,6 +1848,7 @@ export default function App() {
         direction: form.direction || "bidirectional",
       };
       if ((form.notes || "").trim()) clean.notes = form.notes.trim();
+      if (networkEdgeExists(clean)) { showToast("Connection already exists"); return; }
       await api("network_edges", "POST", clean);
       await loadData(); showToast("Connection added");
     } catch { showToast("Error adding connection"); }
@@ -2739,7 +2768,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             linkedNotes={notes.filter((n) => (inst.dealId && n.deal_id === inst.dealId) || (inst.enablerId && n.enabler_id === inst.enablerId) || (inst.orgId && n.organization_id === inst.orgId))}
             materials={materials}
             materialLinks={materialLinks.filter((l) => (inst.dealId && l.deal_id === inst.dealId) || (inst.enablerId && l.enabler_id === inst.enablerId) || (inst.orgId && l.organization_id === inst.orgId))}
-            onAttachMaterial={(materialId) => { const p = institutionPrimaryEntity(inst); if (p) attachMaterial(materialId, { [`${p.type}_id`]: p.id }); }}
+            onAttachMaterial={(materialId) => { const p = institutionPrimaryEntity(inst); return p ? attachMaterial(materialId, { [`${p.type}_id`]: p.id }) : undefined; }}
             onRemoveMaterialLink={removeMaterialLink}
             onDownloadMaterial={downloadMaterial}
             onOpenNote={openNote}
@@ -4516,11 +4545,17 @@ function MaterialsTab({ materials, onUpload, onUpdate, onDelete, onDownload, sho
 function MaterialsSection({ materials = [], links = [], onAttach, onRemoveLink, onDownload }) {
   const readOnly = useReadOnly();
   const [picking, setPicking] = useState(false);
+  const [attaching, setAttaching] = useState(false);
   const linked = links
     .map((l) => ({ link: l, material: materials.find((m) => m.id === l.material_id) }))
     .filter((x) => x.material);
   const linkedIds = new Set(linked.map((x) => x.material.id));
   const attachable = materials.filter((m) => !linkedIds.has(m.id));
+  const attach = async (materialId) => {
+    if (attaching) return;
+    setAttaching(true);
+    try { await onAttach(materialId); setPicking(false); } finally { setAttaching(false); }
+  };
   return (
     <div className="people-section">
       <div className="ai-summary-header">
@@ -4532,7 +4567,7 @@ function MaterialsSection({ materials = [], links = [], onAttach, onRemoveLink, 
           {attachable.length === 0 ? (
             <div className="empty-small">Every library material is already attached (or the library is empty).</div>
           ) : attachable.map((m) => (
-            <button key={m.id} className="material-picker-row" onClick={() => { onAttach(m.id); setPicking(false); }}>
+            <button key={m.id} className="material-picker-row" onClick={() => attach(m.id)} disabled={attaching}>
               <span className="material-picker-name">{m.name}</span>
               <MaterialTypeBadge type={m.type} />
               {m.version && <span className="material-version">{m.version}</span>}
@@ -5015,6 +5050,7 @@ function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, o
   const [menu, setMenu] = useState(null); // { folderId, x, y }
   const [dragNoteId, setDragNoteId] = useState(null);
   const [dragOverTarget, setDragOverTarget] = useState(null); // folder id or "unfiled"
+  const [creatingNote, setCreatingNote] = useState(false);
   const entityCtx = { deals, enablers, organizations, contacts };
 
   const persistExpanded = (set) => { try { localStorage.setItem("mango-note-folders-expanded", JSON.stringify([...set])); } catch { /* ignore */ } };
@@ -5035,7 +5071,11 @@ function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, o
   const selected = notes.find((n) => n.id === selectedId) || null;
   const searchResults = q ? notes.filter((n) => (n.title || "").toLowerCase().includes(q) || (n.content || "").toLowerCase().includes(q)).sort(byUpdated) : null;
 
-  const handleNewNote = async () => { const row = await onCreate(); if (row) { setFocusNew(row.id); setSearch(""); } };
+  const handleNewNote = async () => {
+    if (creatingNote) return;
+    setCreatingNote(true);
+    try { const row = await onCreate(); if (row) { setFocusNew(row.id); setSearch(""); } } finally { setCreatingNote(false); }
+  };
   const handleNewFolder = async () => { const row = await onCreateFolder("New Folder", null); if (row) { setRenamingId(row.id); setRenameValue("New Folder"); } };
   const startRename = (f) => { setMenu(null); setRenamingId(f.id); setRenameValue(f.name); };
   const commitRename = () => { if (renamingId) onRenameFolder(renamingId, renameValue.trim() || "Untitled Folder"); setRenamingId(null); };
@@ -5104,7 +5144,7 @@ function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, o
         <div className="notes-list-head">
           {!readOnly && (
             <div className="notes-head-btns">
-              <button className="btn-primary notes-new-btn" onClick={handleNewNote}>+ New Note</button>
+              <button className="btn-primary notes-new-btn" onClick={handleNewNote} disabled={creatingNote}>+ New Note</button>
               <button className="btn-sec notes-new-folder-btn" onClick={handleNewFolder}>+ New Folder</button>
             </div>
           )}
@@ -5454,9 +5494,11 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
   const [addingRole, setAddingRole] = useState(false);
   const [roleInst, setRoleInst] = useState("");
   const [roleTitle, setRoleTitle] = useState("");
+  const [savingRole, setSavingRole] = useState(false);
   const [addingConn, setAddingConn] = useState(false);
   const [connContactId, setConnContactId] = useState("");
   const [connRel, setConnRel] = useState("knows");
+  const [savingConn, setSavingConn] = useState(false);
   const [editingTags, setEditingTags] = useState(false);
   const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
   const warmth = WARMTH_LEVELS.find(w => w.id === (contact.warmth || "unknown"));
@@ -5502,10 +5544,13 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
   }).filter(Boolean);
 
   const submitRole = async () => {
-    if (!roleInst) return;
-    const idx = roleInst.indexOf(":");
-    await onAddRole({ contactId: contact.id, entityType: roleInst.slice(0, idx), entityId: roleInst.slice(idx + 1), roleTitle });
-    setAddingRole(false); setRoleInst(""); setRoleTitle("");
+    if (!roleInst || savingRole) return;
+    setSavingRole(true);
+    try {
+      const idx = roleInst.indexOf(":");
+      await onAddRole({ contactId: contact.id, entityType: roleInst.slice(0, idx), entityId: roleInst.slice(idx + 1), roleTitle });
+      setAddingRole(false); setRoleInst(""); setRoleTitle("");
+    } finally { setSavingRole(false); }
   };
 
   // Quick Add's "At institution..." picker only offers this person's own roles
@@ -5554,9 +5599,12 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
   const relOpts = optionsWithCustom(PERSON_CONNECTION_RELATIONSHIPS, customOptions, "relationship");
 
   const submitConn = async () => {
-    if (!connContactId || !onConnectPerson) return;
-    await onConnectPerson(contact.id, connContactId, connRel);
-    setAddingConn(false); setConnContactId(""); setConnRel("knows");
+    if (!connContactId || !onConnectPerson || savingConn) return;
+    setSavingConn(true);
+    try {
+      await onConnectPerson(contact.id, connContactId, connRel);
+      setAddingConn(false); setConnContactId(""); setConnRel("knows");
+    } finally { setSavingConn(false); }
   };
 
   return (
@@ -5642,7 +5690,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
               onCreateInstitution={onCreateInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption}
             />
             <input className="input" placeholder="Role title (e.g. CEO)" value={roleTitle} onChange={e => setRoleTitle(e.target.value)} />
-            <button onClick={submitRole} className="btn-primary" disabled={!roleInst}>Add</button>
+            <button onClick={submitRole} className="btn-primary" disabled={!roleInst || savingRole}>{savingRole ? "Adding..." : "Add"}</button>
           </div>
         )}
         {roles.length === 0 ? (
@@ -5684,7 +5732,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
               {connectableContacts.map(c => <option key={c.id} value={c.id}>{c.name}{c.company ? ` (${c.company})` : ""}</option>)}
             </select>
             <SelectWithCustom options={relOpts} value={connRel} onChange={(v) => { setConnRel(v); trackCustom("relationship", relOpts, onAddCustomOption)(v); }} />
-            <button onClick={submitConn} className="btn-primary" disabled={!connContactId}>Connect</button>
+            <button onClick={submitConn} className="btn-primary" disabled={!connContactId || savingConn}>{savingConn ? "Connecting..." : "Connect"}</button>
           </div>
         )}
         {connections.length === 0 ? (
@@ -6538,8 +6586,14 @@ function AddOrgLinkModal({ title, pickLabel, entityOptions, showRole, customOpti
   const [role, setRole] = useState("");
   const [strength, setStrength] = useState("medium");
   const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
   const relOpts = optionsWithCustom(NETWORK_EDGE_RELATIONSHIPS, customOptions, "relationship_type");
   const strengthOpts = optionsWithCustom(STRENGTHS, customOptions, "strength");
+  const submit = async () => {
+    if (!entityId || saving) return;
+    setSaving(true);
+    try { await onSave({ entityId, relationship, role, strength, notes }); } finally { setSaving(false); }
+  };
   return (
     <div className="overlay" onClick={onClose}><div className="modal modal-sm" onClick={e => e.stopPropagation()}>
       <div className="modal-header"><div className="modal-title">{title}</div><button onClick={onClose} className="close-btn">✕</button></div>
@@ -6563,7 +6617,7 @@ function AddOrgLinkModal({ title, pickLabel, entityOptions, showRole, customOpti
       <div className="mb-sm"><label className="label">Notes</label><textarea className="input textarea" value={notes} onChange={e => setNotes(e.target.value)} /></div>
       <div className="modal-actions">
         <button onClick={onClose} className="btn-sec">Cancel</button>
-        <button onClick={() => entityId && onSave({ entityId, relationship, role, strength, notes })} className="btn-primary" disabled={!entityId}>Add</button>
+        <button onClick={submit} className="btn-primary" disabled={!entityId || saving}>{saving ? "Adding..." : "Add"}</button>
       </div>
     </div></div>
   );
