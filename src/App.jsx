@@ -243,6 +243,28 @@ const OUTREACH_STATUSES = [
   { id: "nurture", label: "Nurture", color: "#8B5CF6" },
 ];
 const outreachStatusMeta = (id) => OUTREACH_STATUSES.find((s) => s.id === id) || OUTREACH_STATUSES[0];
+
+// Outreach channels: email, LinkedIn, phone, WhatsApp. Colors/glyphs mirror the
+// matching ACTIVITY_GLYPHS entry so a channel badge and its logged activity
+// always look the same. "activityType" is what gets logged in `activities`
+// (phone outreach logs as a "call").
+const OUTREACH_CHANNELS = [
+  { id: "email", label: "Email", glyph: "✉", color: "#2A6FDB", activityType: "email" },
+  { id: "linkedin", label: "LinkedIn", glyph: "in", color: "#0A66C2", activityType: "linkedin" },
+  { id: "phone", label: "Phone", glyph: "☎", color: "#1F8A5B", activityType: "call" },
+  { id: "whatsapp", label: "WhatsApp", glyph: "💬", color: "#25D366", activityType: "whatsapp" },
+];
+const outreachChannelMeta = (id) => OUTREACH_CHANNELS.find((c) => c.id === id) || OUTREACH_CHANNELS[0];
+// Best channel to default a contact into: email if we have one, else LinkedIn
+// if we have a profile URL, else phone. WhatsApp is never auto-suggested since
+// it is just "phone with a template", the user opts into it explicitly.
+function suggestChannel(contact) {
+  if (!contact) return "email";
+  if ((contact.email || "").trim()) return "email";
+  if ((contact.linkedin || "").trim()) return "linkedin";
+  if ((contact.phone || "").trim()) return "phone";
+  return "email";
+}
 const TEMPLATE_CATEGORIES = [
   { id: "intro_request", label: "Intro Request", color: "#2A6FDB" },
   { id: "direct_intro", label: "Direct Intro", color: "#1F8A5B" },
@@ -264,11 +286,14 @@ const NUDGE_AFTER_DAYS = 5;
 
 // Seeded into email_templates on first load when the table is empty.
 const STARTER_TEMPLATES = [
-  { name: "Intro Request", category: "intro_request", subject: "Quick favor: intro to {full_name}?", body: "Hi {first_name},\n\nHope you're doing well. I noticed you're connected to {full_name} at {institution}. We're working on oncology data partnerships in the Kingdom and I think there could be a strong fit.\n\nWould you be open to making a brief introduction? Happy to send a short blurb you can forward.\n\n{my_note}\n\nBest,\nFahed" },
-  { name: "Direct Intro", category: "direct_intro", subject: "Mango Sciences x {institution}: oncology data partnership", body: "Dear {first_name},\n\nI'm Fahed Al Essa, VP of Commercial at Mango Sciences. We work with cancer centers across the region on real-world oncology data and value-based financing.\n\n{my_note}\n\nWould you have 20 minutes in the coming weeks for a brief introduction?\n\nBest regards,\nFahed Al Essa" },
-  { name: "Post-Meeting Follow-up", category: "post_meeting", subject: "Great speaking today, next steps", body: "Dear {first_name},\n\nThank you for the time today. As discussed, I'm attaching {my_note}.\n\nLooking forward to the next steps we outlined. I'll follow up on the specifics shortly.\n\nBest,\nFahed" },
-  { name: "Materials Send", category: "materials", subject: "Mango Sciences overview for {institution}", body: "Dear {first_name},\n\nAs promised, please find attached our overview materials relevant to {institution}.\n\n{my_note}\n\nHappy to walk through any of this in more detail.\n\nBest,\nFahed" },
-  { name: "Re-engagement", category: "reengagement", subject: "Following up: Mango Sciences x {institution}", body: "Dear {first_name},\n\nI wanted to circle back on my earlier note. I understand things get busy.\n\n{my_note}\n\nWould it make sense to find 15 minutes in the coming weeks?\n\nBest,\nFahed" },
+  { name: "Intro Request", category: "intro_request", channel: "email", subject: "Quick favor: intro to {full_name}?", body: "Hi {first_name},\n\nHope you're doing well. I noticed you're connected to {full_name} at {institution}. We're working on oncology data partnerships in the Kingdom and I think there could be a strong fit.\n\nWould you be open to making a brief introduction? Happy to send a short blurb you can forward.\n\n{my_note}\n\nBest,\nFahed" },
+  { name: "Direct Intro", category: "direct_intro", channel: "email", subject: "Mango Sciences x {institution}: oncology data partnership", body: "Dear {first_name},\n\nI'm Fahed Al Essa, VP of Commercial at Mango Sciences. We work with cancer centers across the region on real-world oncology data and value-based financing.\n\n{my_note}\n\nWould you have 20 minutes in the coming weeks for a brief introduction?\n\nBest regards,\nFahed Al Essa" },
+  { name: "Post-Meeting Follow-up", category: "post_meeting", channel: "email", subject: "Great speaking today, next steps", body: "Dear {first_name},\n\nThank you for the time today. As discussed, I'm attaching {my_note}.\n\nLooking forward to the next steps we outlined. I'll follow up on the specifics shortly.\n\nBest,\nFahed" },
+  { name: "Materials Send", category: "materials", channel: "email", subject: "Mango Sciences overview for {institution}", body: "Dear {first_name},\n\nAs promised, please find attached our overview materials relevant to {institution}.\n\n{my_note}\n\nHappy to walk through any of this in more detail.\n\nBest,\nFahed" },
+  { name: "Re-engagement", category: "reengagement", channel: "email", subject: "Following up: Mango Sciences x {institution}", body: "Dear {first_name},\n\nI wanted to circle back on my earlier note. I understand things get busy.\n\n{my_note}\n\nWould it make sense to find 15 minutes in the coming weeks?\n\nBest,\nFahed" },
+  { name: "LinkedIn Connection Request", category: "intro_request", channel: "linkedin", subject: "", body: "Hi {first_name}, I lead commercial for Mango Sciences in the Kingdom. We work with cancer centers on real-world oncology data. Would be glad to connect. {my_note}" },
+  { name: "LinkedIn Intro Message", category: "direct_intro", channel: "linkedin", subject: "", body: "Hi {first_name}, thanks for connecting. I'm Fahed, VP of Commercial at Mango Sciences. We work with hospitals across KSA on oncology data and value-based financing. {my_note} Would you be open to a short call?" },
+  { name: "LinkedIn Follow-up", category: "reengagement", channel: "linkedin", subject: "", body: "Hi {first_name}, following up on my earlier note. {my_note} Happy to share more whenever convenient." },
 ];
 
 // Replaces merge fields with the contact's data. {my_note} is intentionally
@@ -2471,7 +2496,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   }, [loading, bossMode, emailTemplates.length]);
 
   const saveTemplate = async (form, id = null) => {
-    const clean = { name: (form.name || "").trim() || "Untitled Template", category: form.category || "custom", subject: form.subject || "", body: form.body || "" };
+    const clean = { name: (form.name || "").trim() || "Untitled Template", category: form.category || "custom", channel: form.channel || "email", subject: form.subject || "", body: form.body || "" };
     try {
       if (id) {
         const now = new Date().toISOString();
@@ -2509,15 +2534,20 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Error updating outreach status"); }
   };
 
-  // After "Open in Gmail" / "Copy to Clipboard": mark awaiting reply and log
-  // the outreach as an email activity. The "Sent outreach:" prefix is the
-  // contract that keeps reply detection from counting our own sends.
-  const recordOutreach = async (contact, subject) => {
+  // After the channel's send action (Open in Gmail / Copy the LinkedIn or
+  // WhatsApp message / log a call outcome): mark awaiting reply, stamp the
+  // channel used, and log an activity of the matching type. For email the
+  // "Sent outreach:" prefix is a contract reply detection depends on (it only
+  // ever watches type "email"); other channels can never be auto-detected
+  // (see the Follow-ups "Mark as replied" button instead).
+  const recordOutreach = async (contact, { channel = "email", description, bodySnippet } = {}) => {
     const now = new Date().toISOString();
     try {
-      const patch = { outreach_status: "awaiting_reply", last_outreach_at: now, awaiting_reply_since: now, last_contacted_at: now };
+      const patch = { outreach_status: "awaiting_reply", last_outreach_at: now, awaiting_reply_since: now, last_contacted_at: now, outreach_channel: channel };
       await api("contacts", "PATCH", patch, `?id=eq.${contact.id}`);
-      const rows = await api("activities", "POST", { type: "email", contact_id: contact.id, description: `Sent outreach: ${subject}` });
+      const activityBody = { type: outreachChannelMeta(channel).activityType, contact_id: contact.id, description };
+      if (bodySnippet) activityBody.body_snippet = bodySnippet;
+      const rows = await api("activities", "POST", activityBody);
       setContacts((prev) => prev.map((c) => (c.id === contact.id ? { ...c, ...patch } : c)));
       const row = Array.isArray(rows) ? rows[0] : rows;
       if (row) setActivities((prev) => [row, ...prev]);
@@ -2907,7 +2937,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onCreateInstitution={createInstitutionInline}
             onUpdate={(patch) => updateContact(sheetContact.id, patch)}
             onDelete={deleteContact}
-            onCompose={() => setCompose({ contactId: sheetContact.id })}
+            onCompose={() => setCompose({ contactId: sheetContact.id, channel: sheetContact.outreach_channel || suggestChannel(sheetContact) })}
             onAddActivity={addActivity}
             onSummarizeEmail={summarizeEmailActivity}
             summarizingActivityId={summarizingActivityId}
@@ -3247,7 +3277,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onSaveTemplate={saveTemplate}
           onDeleteTemplate={deleteTemplate}
           onSetStatus={setOutreachStatus}
-          onCompose={(contactId, templateId = null) => setCompose({ contactId, templateId })}
+          onCompose={(contactId, templateId = null, channel = null) => {
+            const c = contacts.find((x) => x.id === contactId);
+            setCompose({ contactId, templateId, channel: channel || c?.outreach_channel || suggestChannel(c) });
+          }}
           onOpenPerson={openPerson}
           onOpenInstitution={(name) => openInstitution(name)}
         />
@@ -3365,8 +3398,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             contact={composeContact}
             roles={resolveContactRoles(composeContact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles })}
             templates={emailTemplates}
+            activities={activities}
             initialTemplateId={compose.templateId}
-            onSent={(subject) => { setCompose(null); recordOutreach(composeContact, subject); }}
+            initialChannel={compose.channel}
+            onUpdateContact={(patch) => updateContact(composeContact.id, patch)}
+            onSent={(payload) => { setCompose(null); recordOutreach(composeContact, payload); }}
             showToast={showToast}
             onClose={() => setCompose(null)}
           />
@@ -4827,13 +4863,26 @@ function OutreachStatusSelect({ contact, onSetStatus }) {
   );
 }
 
+// Whether a contact has the contact detail a given channel actually needs.
+const channelHasTarget = (c, ch) => {
+  if (ch === "email") return !!(c.email || "").trim();
+  if (ch === "linkedin") return !!(c.linkedin || "").trim();
+  if (ch === "phone" || ch === "whatsapp") return !!(c.phone || "").trim();
+  return false;
+};
+const channelMissingLabel = (ch) => (ch === "email" ? "No email" : ch === "linkedin" ? "No LinkedIn URL" : "No phone");
+
 // One row on the Follow-ups dashboard.
-function FollowupRow({ contact, institution, daysWaiting, onSetStatus, onOpenPerson, onOpenInstitution, action }) {
+function FollowupRow({ contact, channel, institution, daysWaiting, showMarkReplied, onSetStatus, onOpenPerson, onOpenInstitution, action }) {
+  const cm = outreachChannelMeta(channel);
   return (
     <div className="followup-row">
       <Avatar name={contact.name} size={32} />
       <div className="followup-main" onClick={() => onOpenPerson(contact.id)}>
-        <div className="followup-name">{contact.name}</div>
+        <div className="followup-name">
+          {contact.name}
+          <span className="followup-channel-badge" style={{ color: cm.color, background: cm.color + "1a" }} title={`${cm.label} outreach`}>{cm.glyph}</span>
+        </div>
         <div className="followup-meta">
           {institution && (onOpenInstitution
             ? <span className="followup-inst-link" onClick={(e) => { e.stopPropagation(); onOpenInstitution(institution); }} title={`Open ${institution}`}>{institution}</span>
@@ -4843,6 +4892,7 @@ function FollowupRow({ contact, institution, daysWaiting, onSetStatus, onOpenPer
         </div>
       </div>
       <OutreachStatusSelect contact={contact} onSetStatus={onSetStatus} />
+      {showMarkReplied && <button className="btn-sec followup-action" onClick={(e) => { e.stopPropagation(); onSetStatus(contact.id, "replied"); }}>Mark as replied</button>}
       {action}
     </div>
   );
@@ -4850,12 +4900,24 @@ function FollowupRow({ contact, institution, daysWaiting, onSetStatus, onOpenPer
 
 function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles, templates, onSaveTemplate, onDeleteTemplate, onSetStatus, onCompose, onOpenPerson, onOpenInstitution }) {
   const [subtab, setSubtab] = useState("followups");
+  const [channelFilter, setChannelFilter] = useState("all");
+  const [templateChannelFilter, setTemplateChannelFilter] = useState("all");
   const [editingTemplate, setEditingTemplate] = useState(null); // null | "new" | template row
   const rolesCtx = { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles };
   const instOf = (c) => {
     const roles = resolveContactRoles(c, rolesCtx);
     const primary = roles.find((r) => r.is_primary) || roles[0];
     return primary ? primary.institutionName : c.company || "";
+  };
+  // The channel to badge/filter/compose by: the one actually used last, or the
+  // best-guess suggestion when a contact has never been reached yet.
+  const channelOf = (c) => c.outreach_channel || suggestChannel(c);
+  const byChannel = (list) => (channelFilter === "all" ? list : list.filter((c) => channelOf(c) === channelFilter));
+  // A reengagement/follow-up template matched to the contact's own channel,
+  // falling back to any reengagement template if that channel has none yet.
+  const reengagementFor = (c) => {
+    const ch = channelOf(c);
+    return templates.find((t) => t.category === "reengagement" && (t.channel || "email") === ch) || templates.find((t) => t.category === "reengagement");
   };
 
   // Grouping. Contacts with a null status count as not_contacted (DB default).
@@ -4888,10 +4950,9 @@ function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, e
     (!c.outreach_status || c.outreach_status === "not_contacted") &&
     (tier1ContactIds.has(c.id) || ["warm", "hot"].includes(c.warmth)));
 
-  const reengagement = templates.find((t) => t.category === "reengagement");
   const byWait = (a, b) => new Date(a.awaiting_reply_since || 0) - new Date(b.awaiting_reply_since || 0);
 
-  const group = (title, tone, list, renderAction, daysOf = null, empty) => (
+  const group = (title, tone, list, renderAction, daysOf = null, empty, markReplied = false) => (
     <div className="followup-group">
       <div className={`followup-group-head tone-${tone}`}>{title} ({list.length})</div>
       {list.length === 0 ? <div className="empty-small followup-empty">{empty}</div> : (
@@ -4900,8 +4961,10 @@ function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, e
             <FollowupRow
               key={c.id}
               contact={c}
+              channel={channelOf(c)}
               institution={instOf(c)}
               daysWaiting={daysOf ? daysOf(c) : null}
+              showMarkReplied={markReplied && channelOf(c) !== "email"}
               onSetStatus={onSetStatus}
               onOpenPerson={onOpenPerson}
               onOpenInstitution={onOpenInstitution}
@@ -4928,28 +4991,40 @@ function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, e
 
       {subtab === "followups" ? (
         <>
-          {group("NEEDS NUDGE", "red", [...needsNudge].sort(byWait),
-            (c) => (c.email
-              ? <button className="btn-sec followup-action" onClick={() => onCompose(c.id, reengagement ? reengagement.id : null)}>Draft Nudge</button>
-              : <span className="followup-noemail">No email</span>),
+          <div className="outreach-channel-filter">
+            <button className={`tag-btn ${channelFilter === "all" ? "active" : ""}`} onClick={() => setChannelFilter("all")}>All channels</button>
+            {OUTREACH_CHANNELS.map((c) => (
+              <button key={c.id} className={`tag-btn ${channelFilter === c.id ? "active" : ""}`} onClick={() => setChannelFilter(c.id)}>{c.glyph} {c.label}</button>
+            ))}
+          </div>
+          {group("NEEDS NUDGE", "red", byChannel([...needsNudge].sort(byWait)),
+            (c) => (channelHasTarget(c, channelOf(c))
+              ? <button className="btn-sec followup-action" onClick={() => onCompose(c.id, reengagementFor(c)?.id || null, channelOf(c))}>Draft Nudge</button>
+              : <span className="followup-noemail">{channelMissingLabel(channelOf(c))}</span>),
             (c) => daysAgo(c.awaiting_reply_since),
-            "Nobody is overdue for a nudge.")}
-          {group("AWAITING REPLY", "yellow", [...awaiting].sort(byWait), null,
+            "Nobody is overdue for a nudge.", true)}
+          {group("AWAITING REPLY", "yellow", byChannel([...awaiting].sort(byWait)), null,
             (c) => (c.awaiting_reply_since ? daysAgo(c.awaiting_reply_since) : null),
-            "No open outreach under 5 days.")}
-          {group("RECENTLY REPLIED", "green", replied,
+            "No open outreach under 5 days.", true)}
+          {group("RECENTLY REPLIED", "green", byChannel(replied),
             null, null, "No replies detected yet.")}
-          {group("NOT YET CONTACTED", "gray", notContacted,
-            (c) => (c.email
-              ? <button className="btn-sec followup-action" onClick={() => onCompose(c.id)}>Compose</button>
-              : <span className="followup-noemail">No email</span>),
+          {group("NOT YET CONTACTED", "gray", byChannel(notContacted),
+            (c) => (channelHasTarget(c, channelOf(c))
+              ? <button className="btn-sec followup-action" onClick={() => onCompose(c.id, null, channelOf(c))}>Compose</button>
+              : <span className="followup-noemail">{channelMissingLabel(channelOf(c))}</span>),
             null, "No untouched Tier 1 or warm contacts.")}
         </>
       ) : (
         <>
           <div className="ai-summary-header">
-            <div className="section-label">Email Templates</div>
+            <div className="section-label">Templates</div>
             <button className="btn-copy" onClick={() => setEditingTemplate("new")}>+ New Template</button>
+          </div>
+          <div className="outreach-channel-filter">
+            <button className={`tag-btn ${templateChannelFilter === "all" ? "active" : ""}`} onClick={() => setTemplateChannelFilter("all")}>All</button>
+            {OUTREACH_CHANNELS.map((c) => (
+              <button key={c.id} className={`tag-btn ${templateChannelFilter === c.id ? "active" : ""}`} onClick={() => setTemplateChannelFilter(c.id)}>{c.glyph} {c.label}</button>
+            ))}
           </div>
           {editingTemplate && (
             <TemplateEditor
@@ -4958,27 +5033,32 @@ function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, e
               onCancel={() => setEditingTemplate(null)}
             />
           )}
-          {templates.length === 0 ? (
-            <div className="empty-state">No templates yet.</div>
-          ) : (
-            <div className="template-list">
-              {templates.map((t) => {
-                const cat = templateCategoryMeta(t.category);
-                return (
-                  <div key={t.id} className="template-row" onClick={() => setEditingTemplate(t)}>
-                    <div className="template-main">
-                      <div className="template-name-row">
-                        <span className="template-name">{t.name}</span>
-                        <span className="badge" style={{ background: cat.color + "22", color: cat.color, border: `1px solid ${cat.color}44` }}>{cat.label}</span>
+          {(() => {
+            const filteredTemplates = templateChannelFilter === "all" ? templates : templates.filter((t) => (t.channel || "email") === templateChannelFilter);
+            return filteredTemplates.length === 0 ? (
+              <div className="empty-state">No templates yet.</div>
+            ) : (
+              <div className="template-list">
+                {filteredTemplates.map((t) => {
+                  const cat = templateCategoryMeta(t.category);
+                  const cm = outreachChannelMeta(t.channel || "email");
+                  return (
+                    <div key={t.id} className="template-row" onClick={() => setEditingTemplate(t)}>
+                      <div className="template-main">
+                        <div className="template-name-row">
+                          <span className="template-name">{t.name}</span>
+                          <span className="badge" style={{ background: cm.color + "22", color: cm.color, border: `1px solid ${cm.color}44` }}>{cm.glyph} {cm.label}</span>
+                          <span className="badge" style={{ background: cat.color + "22", color: cat.color, border: `1px solid ${cat.color}44` }}>{cat.label}</span>
+                        </div>
+                        {t.subject && <div className="template-subject">{t.subject}</div>}
                       </div>
-                      <div className="template-subject">{t.subject}</div>
+                      <button className="person-remove" title="Delete template" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete template "${t.name}"?`)) onDeleteTemplate(t.id); }}>✕</button>
                     </div>
-                    <button className="person-remove" title="Delete template" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete template "${t.name}"?`)) onDeleteTemplate(t.id); }}>✕</button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+                  );
+                })}
+              </div>
+            );
+          })()}
         </>
       )}
     </div>
@@ -4986,18 +5066,22 @@ function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, e
 }
 
 function TemplateEditor({ template, onSave, onCancel }) {
-  const [f, setF] = useState({ name: template?.name || "", category: template?.category || "custom", subject: template?.subject || "", body: template?.body || "" });
+  const [f, setF] = useState({ name: template?.name || "", category: template?.category || "custom", channel: template?.channel || "email", subject: template?.subject || "", body: template?.body || "" });
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  const hasSubject = f.channel === "email";
   return (
     <div className="template-editor">
       <div className="template-editor-row">
         <input className="input template-editor-name" placeholder="Template name..." value={f.name} onChange={(e) => set("name", e.target.value)} />
+        <select className="input" value={f.channel} onChange={(e) => set("channel", e.target.value)}>
+          {OUTREACH_CHANNELS.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+        </select>
         <select className="input" value={f.category} onChange={(e) => set("category", e.target.value)}>
           {TEMPLATE_CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
         </select>
       </div>
-      <input className="input template-editor-subject" placeholder="Subject line..." value={f.subject} onChange={(e) => set("subject", e.target.value)} />
-      <textarea className="input template-editor-body" placeholder="Email body..." value={f.body} onChange={(e) => set("body", e.target.value)} />
+      {hasSubject && <input className="input template-editor-subject" placeholder="Subject line..." value={f.subject} onChange={(e) => set("subject", e.target.value)} />}
+      <textarea className="input template-editor-body" placeholder={f.channel === "phone" ? "Talking points / call script..." : "Message body..."} value={f.body} onChange={(e) => set("body", e.target.value)} />
       <div className="merge-legend">
         Merge fields: {MERGE_FIELDS.map(([token, hint]) => <span key={token} className="merge-chip" title={hint}>{token}</span>)}
       </div>
@@ -5012,53 +5096,197 @@ function TemplateEditor({ template, onSave, onCancel }) {
 // Compose panel: pick a template, merge fields fill from the contact, then
 // hand off to Gmail or the clipboard. Either action marks the contact
 // awaiting_reply and logs a "Sent outreach" activity via onSent.
-function ComposeModal({ contact, roles, templates, initialTemplateId, onSent, showToast, onClose }) {
-  const initial = initialTemplateId ? templates.find((t) => t.id === initialTemplateId) : null;
+// LinkedIn connection requests cap around this many characters; InMail and
+// direct messages to an existing connection allow much more.
+const LINKEDIN_REQUEST_LIMIT = 300;
+
+const normalizeUrl = (u) => {
+  const t = (u || "").trim();
+  if (!t) return "";
+  return /^https?:\/\//i.test(t) ? t : `https://${t}`;
+};
+const digitsOnly = (s) => (s || "").replace(/[^\d]/g, "");
+
+function ComposeModal({ contact, roles, templates, initialTemplateId, initialChannel, activities = [], onUpdateContact, onSent, showToast, onClose }) {
+  const [channel, setChannel] = useState(initialChannel || suggestChannel(contact));
+  const channelTemplates = templates.filter((t) => (t.channel || "email") === channel);
+  const initial = initialTemplateId && (templates.find((t) => t.id === initialTemplateId)?.channel || "email") === channel
+    ? templates.find((t) => t.id === initialTemplateId) : null;
   const [templateId, setTemplateId] = useState(initial ? initial.id : "");
   const [subject, setSubject] = useState(initial ? fillTemplate(initial.subject, contact, roles) : "");
   const [body, setBody] = useState(initial ? fillTemplate(initial.body, contact, roles) : "");
+  const [addingLinkedin, setAddingLinkedin] = useState(false);
+  const [linkedinDraft, setLinkedinDraft] = useState("");
+  const recentContext = activities.filter((a) => a.contact_id === contact.id).slice(0, 3).map((a) => firstLine(stripFathomMarker(a.description))).filter(Boolean).join("\n");
+  const [talkingPoints, setTalkingPoints] = useState((contact.ai_summary || recentContext || "").trim());
+  const [callOutcome, setCallOutcome] = useState("");
+  const [logging, setLogging] = useState(false);
+
+  const switchChannel = (next) => { setChannel(next); setTemplateId(""); setSubject(""); setBody(""); };
   const pickTemplate = (id) => {
     setTemplateId(id);
     const t = templates.find((x) => x.id === id);
     if (t) { setSubject(fillTemplate(t.subject, contact, roles)); setBody(fillTemplate(t.body, contact, roles)); }
   };
   const hasNotePlaceholder = subject.includes("{my_note}") || body.includes("{my_note}");
+
+  // EMAIL
   const emailValid = isValidEmail(contact.email);
   const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(contact.email || "")}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  const openGmail = () => { window.open(gmailUrl, "_blank", "noopener"); onSent(subject); };
+  const openGmail = () => { window.open(gmailUrl, "_blank", "noopener"); onSent({ channel: "email", description: `Sent outreach: ${subject}`, bodySnippet: body }); };
   const copyEmail = () => {
     navigator.clipboard.writeText(`Subject: ${subject}\n\n${body}`).then(
-      () => { showToast("Email copied to clipboard"); onSent(subject); },
+      () => { showToast("Email copied to clipboard"); onSent({ channel: "email", description: `Sent outreach: ${subject}`, bodySnippet: body }); },
       () => showToast("Could not copy to clipboard"));
   };
+
+  // LINKEDIN
+  const linkedinUrl = normalizeUrl(contact.linkedin);
+  const openLinkedinProfile = () => { window.open(linkedinUrl, "_blank", "noopener"); };
+  const saveLinkedinUrl = async () => {
+    const url = linkedinDraft.trim();
+    if (!url) return;
+    await onUpdateContact({ linkedin: url });
+    setAddingLinkedin(false); setLinkedinDraft("");
+  };
+  const copyLinkedin = () => {
+    navigator.clipboard.writeText(body).then(
+      () => { showToast("Message copied to clipboard"); onSent({ channel: "linkedin", description: "Sent LinkedIn message", bodySnippet: body }); },
+      () => showToast("Could not copy to clipboard"));
+  };
+
+  // WHATSAPP
+  const waPhone = digitsOnly(contact.phone);
+  const waUrl = `https://wa.me/${waPhone}?text=${encodeURIComponent(body)}`;
+  const openWhatsapp = () => { window.open(waUrl, "_blank", "noopener"); onSent({ channel: "whatsapp", description: "Sent WhatsApp message", bodySnippet: body }); };
+  const copyWhatsapp = () => {
+    navigator.clipboard.writeText(body).then(
+      () => { showToast("Message copied to clipboard"); onSent({ channel: "whatsapp", description: "Sent WhatsApp message", bodySnippet: body }); },
+      () => showToast("Could not copy to clipboard"));
+  };
+
+  // PHONE
+  const telHref = `tel:${digitsOnly(contact.phone)}`;
+  const logCall = async () => {
+    if (logging) return;
+    setLogging(true);
+    try { await onSent({ channel: "phone", description: callOutcome.trim() || `Called ${contact.name}` }); }
+    finally { setLogging(false); }
+  };
+
   return (
     <div className="overlay" onClick={onClose}>
       <div className="modal compose-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <div>
             <div className="modal-title">Compose to {contact.name}</div>
-            <div className="brief-sub">{contact.email}</div>
+            <div className="brief-sub">{contact.email || contact.phone || contact.linkedin || "No contact details on file"}</div>
           </div>
           <button className="close-btn" onClick={onClose}>✕</button>
         </div>
-        <select className="input compose-template-select" value={templateId} onChange={(e) => pickTemplate(e.target.value)}>
-          <option value="">Pick a template...</option>
-          {templates.map((t) => <option key={t.id} value={t.id}>{t.name} ({templateCategoryMeta(t.category).label})</option>)}
-        </select>
-        <label className="label">Subject</label>
-        <input className="input compose-subject" value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Subject..." />
-        <label className="label">Body</label>
-        <textarea className="input compose-body" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Pick a template above, or write from scratch..." />
-        {hasNotePlaceholder && (
-          <div className="compose-note-warning">The <span className="compose-note-token">{"{my_note}"}</span> placeholder is still in this email. Replace it with your personal note before sending.</div>
-        )}
-        {contact.email && !emailValid && (
-          <div className="compose-note-warning">"{contact.email}" does not look like a valid email address. Fix it on the person's sheet before opening Gmail.</div>
-        )}
-        <div className="modal-actions compose-actions">
-          <button className="btn-sec" onClick={copyEmail} disabled={!subject.trim() && !body.trim()}>Copy to Clipboard</button>
-          <button className="btn-primary" onClick={openGmail} disabled={!emailValid || (!subject.trim() && !body.trim())}>Open in Gmail</button>
+
+        <div className="compose-channel-tabs">
+          {OUTREACH_CHANNELS.map((c) => (
+            <button key={c.id} type="button" className={`tag-btn ${channel === c.id ? "active" : ""}`} onClick={() => switchChannel(c.id)}>{c.glyph} {c.label}</button>
+          ))}
         </div>
+
+        {channel === "email" && (
+          <>
+            <select className="input compose-template-select" value={templateId} onChange={(e) => pickTemplate(e.target.value)}>
+              <option value="">Pick a template...</option>
+              {channelTemplates.map((t) => <option key={t.id} value={t.id}>{t.name} ({templateCategoryMeta(t.category).label})</option>)}
+            </select>
+            <label className="label">Subject</label>
+            <input className="input compose-subject" value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Subject..." />
+            <label className="label">Body</label>
+            <textarea className="input compose-body" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Pick a template above, or write from scratch..." />
+            {hasNotePlaceholder && (
+              <div className="compose-note-warning">The <span className="compose-note-token">{"{my_note}"}</span> placeholder is still in this email. Replace it with your personal note before sending.</div>
+            )}
+            {contact.email && !emailValid && (
+              <div className="compose-note-warning">"{contact.email}" does not look like a valid email address. Fix it on the person's sheet before opening Gmail.</div>
+            )}
+            <div className="modal-actions compose-actions">
+              <button className="btn-sec" onClick={copyEmail} disabled={!subject.trim() && !body.trim()}>Copy to Clipboard</button>
+              <button className="btn-primary" onClick={openGmail} disabled={!emailValid || (!subject.trim() && !body.trim())}>Open in Gmail</button>
+            </div>
+          </>
+        )}
+
+        {channel === "linkedin" && (
+          <>
+            <select className="input compose-template-select" value={templateId} onChange={(e) => pickTemplate(e.target.value)}>
+              <option value="">Pick a template...</option>
+              {channelTemplates.map((t) => <option key={t.id} value={t.id}>{t.name} ({templateCategoryMeta(t.category).label})</option>)}
+            </select>
+            <label className="label">Message</label>
+            <textarea className="input compose-body" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Pick a template above, or write from scratch..." />
+            <div className={`compose-char-counter ${body.length > LINKEDIN_REQUEST_LIMIT ? "over" : ""}`}>
+              {body.length} / {LINKEDIN_REQUEST_LIMIT} characters (connection request limit)
+              {body.length > LINKEDIN_REQUEST_LIMIT && " , over the limit for a connection request"}
+            </div>
+            <div className="compose-hint">InMail and messages to an existing connection allow much more than a connection request.</div>
+            {hasNotePlaceholder && (
+              <div className="compose-note-warning">The <span className="compose-note-token">{"{my_note}"}</span> placeholder is still in this message. Replace it with your personal note before sending.</div>
+            )}
+            {!contact.linkedin && !addingLinkedin && (
+              <div className="compose-note-warning">No LinkedIn URL on file. <button type="button" className="link-btn" onClick={() => setAddingLinkedin(true)}>Add LinkedIn URL first</button></div>
+            )}
+            {addingLinkedin && (
+              <div className="compose-inline-add">
+                <input className="input" placeholder="linkedin.com/in/..." value={linkedinDraft} onChange={(e) => setLinkedinDraft(e.target.value)} />
+                <button type="button" className="btn-sec" onClick={() => setAddingLinkedin(false)}>Cancel</button>
+                <button type="button" className="btn-primary" onClick={saveLinkedinUrl} disabled={!linkedinDraft.trim()}>Save</button>
+              </div>
+            )}
+            <div className="modal-actions compose-actions">
+              <button className="btn-sec" onClick={copyLinkedin} disabled={!body.trim()}>Copy Message</button>
+              <button className="btn-primary" onClick={openLinkedinProfile} disabled={!contact.linkedin}>Open LinkedIn Profile</button>
+            </div>
+          </>
+        )}
+
+        {channel === "whatsapp" && (
+          <>
+            <select className="input compose-template-select" value={templateId} onChange={(e) => pickTemplate(e.target.value)}>
+              <option value="">Pick a template...</option>
+              {channelTemplates.map((t) => <option key={t.id} value={t.id}>{t.name} ({templateCategoryMeta(t.category).label})</option>)}
+            </select>
+            <label className="label">Message</label>
+            <textarea className="input compose-body" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Pick a template above, or write from scratch..." />
+            {hasNotePlaceholder && (
+              <div className="compose-note-warning">The <span className="compose-note-token">{"{my_note}"}</span> placeholder is still in this message. Replace it with your personal note before sending.</div>
+            )}
+            {!contact.phone && (
+              <div className="compose-note-warning">No phone number on file. Add one on the person's sheet before opening WhatsApp.</div>
+            )}
+            <div className="modal-actions compose-actions">
+              <button className="btn-sec" onClick={copyWhatsapp} disabled={!body.trim()}>Copy Message</button>
+              <button className="btn-primary" onClick={openWhatsapp} disabled={!contact.phone || !body.trim()}>Open WhatsApp</button>
+            </div>
+          </>
+        )}
+
+        {channel === "phone" && (
+          <>
+            {contact.phone ? (
+              <div className="compose-phone-row">
+                <div className="compose-phone-number">{contact.phone}</div>
+                <a className="btn-primary compose-call-btn" href={telHref}>Call</a>
+              </div>
+            ) : (
+              <div className="compose-note-warning">No phone number on file. Add one on the person's sheet.</div>
+            )}
+            <label className="label">Talking points</label>
+            <textarea className="input compose-body" value={talkingPoints} onChange={(e) => setTalkingPoints(e.target.value)} placeholder="What to cover on the call..." />
+            <label className="label">Log call outcome</label>
+            <textarea className="input compose-body compose-call-outcome" value={callOutcome} onChange={(e) => setCallOutcome(e.target.value)} placeholder="What happened on the call..." />
+            <div className="modal-actions compose-actions">
+              <button className="btn-primary" onClick={logCall} disabled={logging}>{logging ? "Logging..." : "Log Call"}</button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -5720,8 +5948,8 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
             </div>
             <div className="contact-details mb-sm">
               <div>📧 <InlineText value={contact.email} onSave={(v) => onUpdate({ email: v })} placeholder="Add email" />
-                {contact.email && !readOnly && onCompose && (
-                  <button className="compose-btn" onClick={onCompose} title="Compose email to this contact">✉ Compose Email</button>
+                {(contact.email || contact.phone || contact.linkedin) && !readOnly && onCompose && (
+                  <button className="compose-btn" onClick={onCompose} title="Compose outreach to this contact">✉ Compose</button>
                 )}
               </div>
               <div>📞 <InlineText value={contact.phone} onSave={(v) => onUpdate({ phone: v })} placeholder="Add phone" /></div>
