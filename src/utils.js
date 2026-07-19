@@ -30,3 +30,27 @@ export const stripFathomMarker = (desc) => {
   const d = desc || "";
   return d.startsWith(FATHOM_MARKER) ? d.slice(FATHOM_MARKER.length).replace(/^[ \t]+/, "") : d;
 };
+
+// Calendar-event outcome marker: logging a meeting outcome from the calendar
+// event detail panel prefixes the activity description with this token (the
+// event id it belongs to), so the timeline can link back to the event without
+// a dedicated calendar_event_id column on activities.
+export const CALEVENT_MARKER_PREFIX = "[[CALEVENT:";
+export const CALEVENT_MARKER_SUFFIX = "]]";
+export const calendarEventIdFromActivity = (desc) => {
+  const d = desc || "";
+  if (!d.startsWith(CALEVENT_MARKER_PREFIX)) return null;
+  const end = d.indexOf(CALEVENT_MARKER_SUFFIX);
+  return end === -1 ? null : d.slice(CALEVENT_MARKER_PREFIX.length, end);
+};
+export const stripCalendarEventMarker = (desc) => {
+  const d = desc || "";
+  if (!d.startsWith(CALEVENT_MARKER_PREFIX)) return d;
+  const end = d.indexOf(CALEVENT_MARKER_SUFFIX);
+  if (end === -1) return d;
+  return d.slice(end + CALEVENT_MARKER_SUFFIX.length).replace(/^[ \t\n]+/, "");
+};
+// Strips whichever known marker prefix (Fathom recap or calendar-event
+// outcome) an activity description carries, for any place that just wants the
+// human-readable content (AI prompts, plain-text previews, etc).
+export const cleanActivityText = (desc) => stripFathomMarker(stripCalendarEventMarker(desc));

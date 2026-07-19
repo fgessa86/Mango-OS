@@ -681,6 +681,8 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .home-meeting-title { font-size: 14.5px; font-weight: 600; color: var(--text); }
 .home-meeting-sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; display: flex; gap: 10px; flex-wrap: wrap; }
 .home-meeting-entity { color: var(--muted-2); font-weight: 600; }
+.home-meeting-entity-btn { background: none; border: none; padding: 0; font-family: inherit; font-size: inherit; cursor: pointer; text-decoration: underline; }
+.home-meeting-entity-btn:hover { color: var(--mango); }
 
 .home-task { border-left: 3px solid transparent; display: flex; align-items: flex-start; gap: 11px; }
 .home-task.is-overdue { border-left-color: #E5484D; }
@@ -712,6 +714,7 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .act-pill-deal { background: #E4EDFB; color: #2A6FDB; border-color: #2A6FDB44; }
 .act-pill-enabler { background: #FDECCB; color: #B77400; border-color: #B7740044; }
 .act-pill-organization { background: #ECECEF; color: #6B6B7B; border-color: #6B6B7B44; }
+.act-pill-calendar { background: #EEF1FB; color: #3A4DB0; border-color: #3A4DB044; }
 button.act-pill { -webkit-appearance: none; appearance: none; }
 
 .home-stale { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -1453,9 +1456,26 @@ select.inline-select, .inline-select-wrap .input { width: auto; min-width: 130px
 .cal-week-block-title { font-size: 11.5px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cal-block-none { background: #ECECEF; color: #6B6B7B; border-color: #6B6B7B44; }
 
-.cal-popover { max-width: 460px; }
-.cal-popover-time { font-size: 13px; color: var(--muted); font-weight: 600; padding: 0 2px 10px; }
-.cal-popover-desc { font-size: 13px; color: var(--text-2); line-height: 1.5; margin-top: 10px; white-space: pre-wrap; border-top: 1px solid var(--divider); padding-top: 10px; }
+.cal-event-click { cursor: pointer; }
+.cal-event-click:hover { filter: brightness(0.98); }
+.cal-event-indicators { display: inline-flex; gap: 4px; margin-left: 8px; font-size: 11px; vertical-align: middle; }
+.cal-week-block-indicators { margin-top: 2px; font-size: 10px; }
+
+.event-detail-overlay { justify-content: flex-end; padding: 0; }
+.event-detail-panel { width: 460px; max-width: 460px; height: 100vh; max-height: 100vh; border-radius: 0; margin: 0; display: flex; flex-direction: column; gap: 16px; }
+.event-detail-loc { font-size: 13px; color: var(--muted); }
+.event-detail-section { display: flex; flex-direction: column; gap: 8px; }
+.event-detail-attendees { font-size: 13px; color: var(--text-2); line-height: 1.5; }
+.event-detail-textarea { min-height: 72px; flex: 1; }
+.event-detail-brief-btn { align-self: flex-start; }
+.event-detail-outcome-row { display: flex; gap: 8px; align-items: flex-start; }
+.event-detail-mic { flex-shrink: 0; width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--divider); background: var(--surface); font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.event-detail-mic.recording { background: #FCE8E8; border-color: #F3D4D5; color: #C42B30; }
+.event-detail-outcome-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+@media (max-width: 768px) {
+  .event-detail-panel { width: 100%; max-width: 100%; }
+}
 
 @media (max-width: 768px) {
   .calendar-agenda, .calendar-week { padding-left: 16px; padding-right: 16px; }

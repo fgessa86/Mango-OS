@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, createContext, useContext } f
 import { api } from "./supabase";
 import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
-import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, FATHOM_MARKER, isFathomActivity, stripFathomMarker } from "./utils";
+import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, FATHOM_MARKER, isFathomActivity, stripFathomMarker, calendarEventIdFromActivity, cleanActivityText, CALEVENT_MARKER_PREFIX, CALEVENT_MARKER_SUFFIX } from "./utils";
 import MapTab from "./MapTab";
 import "./styles.css";
 
@@ -98,7 +98,7 @@ function ActivityDescription({ activity, onSummarizeEmail, summarizingId }) {
   const [expanded, setExpanded] = useState(false);
   const description = activity.description;
   const fathom = isFathomActivity({ description });
-  const text = stripFathomMarker(description);
+  const text = cleanActivityText(description);
   const lines = text.split("\n");
   const structured = fathom
     || lines.some((l) => /^\s*[-•]\s+/.test(l))
@@ -164,14 +164,16 @@ function activityPersonInfo(a, contacts) {
 // linked institution, when present (Section 1). Either can be suppressed when
 // the surrounding timeline already IS that entity, e.g. a person's own timeline
 // hides their own name pill but keeps the institution pill, and vice versa.
-function ActivityEntityPills({ activity, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, hidePerson = false, hideInstitution = false }) {
+function ActivityEntityPills({ activity, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, hidePerson = false, hideInstitution = false }) {
   const inst = hideInstitution ? null : activityInstitutionInfo(activity, { deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles });
   const person = hidePerson ? null : activityPersonInfo(activity, contacts);
-  if (!inst && !person) return null;
+  const calEventId = onOpenCalendarEvent ? calendarEventIdFromActivity(activity.description) : null;
+  if (!inst && !person && !calEventId) return null;
   return (
     <div className="act-pills">
       {person && <button type="button" className="act-pill act-pill-person" onClick={() => onOpenPerson(person.id)} title={`Open ${person.name}`}>{person.name}</button>}
       {inst && <button type="button" className={`act-pill act-pill-${inst.kind}`} onClick={() => onOpenInstitution(inst.name)} title={`Open ${inst.name}`}>{inst.name}</button>}
+      {calEventId && <button type="button" className="act-pill act-pill-calendar" onClick={() => onOpenCalendarEvent(calEventId)} title="Open this meeting on the calendar">📅 Meeting</button>}
     </div>
   );
 }
@@ -1019,6 +1021,12 @@ export default function App() {
   const [meetingBriefs, setMeetingBriefs] = useState([]);
   const [emailTemplates, setEmailTemplates] = useState([]);
   const [calendarEvents, setCalendarEvents] = useState([]);
+  const [eventInstitutions, setEventInstitutions] = useState([]);
+  const [eventContacts, setEventContacts] = useState([]);
+  // The calendar event whose detail panel is open (a global overlay, so it can
+  // be reached from the Calendar tab or from a "📅 Meeting" activity pill
+  // anywhere in the app).
+  const [eventDetailId, setEventDetailId] = useState(null);
   // Outreach compose modal: { contactId, templateId } or null. templateId
   // preselects a template (Draft Nudge opens the Re-engagement one).
   const [compose, setCompose] = useState(null);
@@ -1070,7 +1078,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1094,12 +1102,15 @@ export default function App() {
         api("meeting_briefs", "GET", null, "?select=*&order=created_at.desc").catch(() => []),
         api("email_templates", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
         api("calendar_events", "GET", null, "?select=*&order=start_time.asc").catch(() => []),
+        api("event_institutions", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
+        api("event_contacts", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []); setTodoContacts(tdc || []);
       setOrganizations(orgs || []); setDealEnablers(de || []); setNetworkEdges(ne || []);
       setCustomOptions(co || []); setContactRoles(cr || []); setBossComments(bc || []); setNotes(nt || []); setNoteFolders(nf || []);
       setMaterials(mat || []); setMaterialLinks(ml || []); setMeetingBriefs(mb || []); setEmailTemplates(et || []); setCalendarEvents(cal || []);
+      setEventInstitutions(evinst || []); setEventContacts(evcon || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -1114,8 +1125,14 @@ export default function App() {
   // runs hourly via the Apps Script; this just pulls whatever it last wrote).
   const refreshCalendar = async () => {
     try {
-      const rows = await api("calendar_events", "GET", null, "?select=*&order=start_time.asc");
+      const [rows, evinst, evcon] = await Promise.all([
+        api("calendar_events", "GET", null, "?select=*&order=start_time.asc"),
+        api("event_institutions", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
+        api("event_contacts", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
+      ]);
       setCalendarEvents(rows || []);
+      setEventInstitutions(evinst || []);
+      setEventContacts(evcon || []);
       showToast("Calendar refreshed", 1500);
     } catch { showToast("Could not refresh calendar"); }
   };
@@ -1960,7 +1977,7 @@ export default function App() {
     setSummarizing(true);
     try {
       const activityText = dealActivities.length > 0
-        ? dealActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${stripFathomMarker(a.description)}`).join("\n")
+        ? dealActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${cleanActivityText(a.description)}`).join("\n")
         : "No activities logged yet.";
       const prompt = `You are a sales analyst summarizing a deal for a BD pipeline tool.
 
@@ -1991,7 +2008,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setSummarizing(true);
     try {
       const activityText = enablerActivities.length > 0
-        ? enablerActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${stripFathomMarker(a.description)}`).join("\n")
+        ? enablerActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${cleanActivityText(a.description)}`).join("\n")
         : "No activities logged yet.";
       const prompt = `You are a partnerships analyst summarizing the relationship with an enabler (a VC, government body, research institution, strategic partner, accelerator, or connector) for a BD pipeline tool.
 
@@ -2021,7 +2038,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setSummarizing(true);
     try {
       const activityText = contactActivities.length > 0
-        ? contactActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${stripFathomMarker(a.description)}`).join("\n")
+        ? contactActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${cleanActivityText(a.description)}`).join("\n")
         : "No activities logged yet.";
       const prompt = `You are a relationship manager summarizing interactions with a contact for a BD pipeline tool.
 
@@ -2060,7 +2077,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setSummarizing(true);
     try {
       const activityText = orgActivities.length > 0
-        ? orgActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${stripFathomMarker(a.description)}`).join("\n")
+        ? orgActivities.slice().reverse().map((a) => `[${formatDate(a.created_at)}] ${ACT_TYPES.find((t) => t.id === a.type)?.label || a.type}: ${cleanActivityText(a.description)}`).join("\n")
         : "No activities logged yet.";
       const t = ORG_TYPES.find((x) => x.id === organization.type);
       const prompt = `You are a market intelligence analyst summarizing an organization for a BD pipeline tool.
@@ -2319,7 +2336,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // be revisited without regenerating.
   const gatherBriefContext = ({ contact, deal, enabler, org }) => {
     const lines = [];
-    const actLine = (a) => `[${formatDate(a.created_at)}] ${a.type}: ${firstLine(stripFathomMarker(a.description))}`;
+    const actLine = (a) => `[${formatDate(a.created_at)}] ${a.type}: ${firstLine(cleanActivityText(a.description))}`;
     if (contact) {
       lines.push(`PERSON: ${contact.name}${contact.role ? `, ${contact.role}` : ""}${contact.company ? ` at ${contact.company}` : ""}`);
       lines.push(`Warmth: ${contact.warmth || "unknown"}. Last contacted: ${contact.last_contacted_at ? formatDate(contact.last_contacted_at) : "never logged"}.`);
@@ -2375,7 +2392,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         const d = a.deal_id ? deals.find((x) => x.id === a.deal_id) : null;
         const e = a.enabler_id ? enablers.find((x) => x.id === a.enabler_id) : null;
         const who = d?.company || e?.name || "General";
-        return `- [${formatDate(a.created_at)}] ${who}: ${firstLine(stripFathomMarker(a.description))}`;
+        return `- [${formatDate(a.created_at)}] ${who}: ${firstLine(cleanActivityText(a.description))}`;
       }).join("\n")}`);
     }
 
@@ -2446,7 +2463,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // "Prep Brief" from a Today's Agenda meeting: reuse an existing brief for the
   // same title on the same day instead of regenerating.
   const prepBriefForMeeting = (a) => {
-    const title = firstLine(stripFathomMarker(a.description)) || "Meeting";
+    const title = firstLine(cleanActivityText(a.description)) || "Meeting";
     const existing = meetingBriefs.find((b) => b.meeting_title === title && b.meeting_date && new Date(b.meeting_date).toDateString() === new Date(a.created_at).toDateString());
     if (existing) { setBriefViewId(existing.id); return; }
     generateBrief({ meeting_title: title, meeting_date: a.created_at, contact_id: a.contact_id, deal_id: a.deal_id, enabler_id: a.enabler_id, organization_id: a.organization_id });
@@ -2474,6 +2491,238 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       setCalendarEvents((prev) => prev.map((e) => (e.id === eventId ? { ...e, ...patch } : e)));
       savedToast();
     } catch { showToast("Error linking event"); }
+  };
+
+  // CALENDAR EVENT WORKING OBJECTS: tagging, prep notes, prep briefs, and
+  // outcome logging. event_institutions/event_contacts are annotation tables
+  // separate from the synced calendar_events row, so the hourly Google
+  // Calendar sync never touches them.
+  const openCalendarEventDetail = (id) => setEventDetailId(id);
+  const closeCalendarEventDetail = () => setEventDetailId(null);
+
+  // pick: { type: "deal"|"enabler"|"organization", id }. One row per tag, like
+  // material_links: exactly one of the three FKs is set.
+  const tagEventInstitution = async (eventId, pick) => {
+    const already = eventInstitutions.some((r) => r.calendar_event_id === eventId && r[`${pick.type}_id`] === pick.id);
+    if (already) return;
+    try {
+      const clean = { calendar_event_id: eventId, [`${pick.type}_id`]: pick.id };
+      const rows = await api("event_institutions", "POST", clean);
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setEventInstitutions((prev) => [...prev, row]);
+    } catch (e) {
+      if (e?.status !== 409) showToast("Error tagging institution");
+    }
+  };
+  const untagEventInstitution = async (id) => {
+    try {
+      await api("event_institutions", "DELETE", null, `?id=eq.${id}`);
+      setEventInstitutions((prev) => prev.filter((r) => r.id !== id));
+    } catch { showToast("Error removing tag"); }
+  };
+  const tagEventPerson = async (eventId, contactId) => {
+    if (eventContacts.some((r) => r.calendar_event_id === eventId && r.contact_id === contactId)) return;
+    try {
+      const rows = await api("event_contacts", "POST", { calendar_event_id: eventId, contact_id: contactId });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setEventContacts((prev) => [...prev, row]);
+    } catch (e) {
+      if (e?.status !== 409) showToast("Error tagging person");
+    }
+  };
+  const untagEventPerson = async (id) => {
+    try {
+      await api("event_contacts", "DELETE", null, `?id=eq.${id}`);
+      setEventContacts((prev) => prev.filter((r) => r.id !== id));
+    } catch { showToast("Error removing tag"); }
+  };
+  const saveEventPrepNotes = async (eventId, text) => {
+    try {
+      await api("calendar_events", "PATCH", { prep_notes: text || null }, `?id=eq.${eventId}`);
+      setCalendarEvents((prev) => prev.map((e) => (e.id === eventId ? { ...e, prep_notes: text || null } : e)));
+    } catch { showToast("Error saving prep notes"); }
+  };
+  const saveEventOutcomeNotes = async (eventId, text) => {
+    try {
+      await api("calendar_events", "PATCH", { outcome_notes: text || null }, `?id=eq.${eventId}`);
+      setCalendarEvents((prev) => prev.map((e) => (e.id === eventId ? { ...e, outcome_notes: text || null } : e)));
+    } catch { showToast("Error saving outcome notes"); }
+  };
+
+  // Brief context built from an event's TAGGED institutions and people (which
+  // may differ from the auto-matched attendee), so the brief is accurate even
+  // for a meeting about entities not on the calendar invite (Section 5).
+  const gatherBriefContextForEntities = (taggedContacts, taggedInstEntities) => {
+    const lines = [];
+    const actLine = (a) => `[${formatDate(a.created_at)}] ${a.type}: ${firstLine(cleanActivityText(a.description))}`;
+    taggedContacts.forEach((contact) => {
+      lines.push(`PERSON: ${contact.name}${contact.role ? `, ${contact.role}` : ""}${contact.company ? ` at ${contact.company}` : ""}`);
+      lines.push(`Warmth: ${contact.warmth || "unknown"}. Last contacted: ${contact.last_contacted_at ? formatDate(contact.last_contacted_at) : "never logged"}.`);
+      const roles = resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles });
+      if (roles.length) lines.push(`Roles: ${roles.map((r) => `${r.role_title ? `${r.role_title} at ` : ""}${r.institutionName}`).join("; ")}`);
+      if (contact.notes) lines.push(`Notes on this person: ${contact.notes}`);
+      if (contact.ai_summary) lines.push(`Person summary: ${contact.ai_summary}`);
+      const acts = activities.filter((a) => a.contact_id === contact.id).slice(0, 8);
+      if (acts.length) lines.push(`Last interactions with ${contact.name}:\n${acts.map(actLine).join("\n")}`);
+    });
+    taggedInstEntities.forEach(({ deal, enabler, org }) => {
+      const entity = deal || enabler || org;
+      const eName = deal ? deal.company : entity.name;
+      lines.push(`INSTITUTION/DEAL: ${eName}${deal ? ` (pipeline stage: ${deal.stage}${deal.tier ? `, ${deal.tier}` : ""})` : ""}`);
+      if (entity.ai_summary) lines.push(`Institution summary: ${entity.ai_summary}`);
+      if (entity.notes) lines.push(`Institution notes: ${entity.notes}`);
+      const acts = activities.filter((a) => (deal && a.deal_id === deal.id) || (enabler && a.enabler_id === enabler.id) || (org && a.organization_id === org.id)).slice(0, 8);
+      if (acts.length) lines.push(`Recent activity on ${eName}:\n${acts.map(actLine).join("\n")}`);
+    });
+    const openTasks = todos.filter((t) => t.status === "open" && (
+      taggedContacts.some((c) => t.contact_id === c.id) ||
+      taggedInstEntities.some(({ deal, enabler, org }) => (deal && t.deal_id === deal.id) || (enabler && t.enabler_id === enabler.id) || (org && t.organization_id === org.id))));
+    if (openTasks.length) lines.push(`Open tasks:\n${openTasks.map((t) => `- ${t.title}${t.due_date ? ` (due ${formatDate(t.due_date)})` : ""} [${t.priority}]`).join("\n")}`);
+    return lines.join("\n\n") || "No history on file yet.";
+  };
+
+  // "Generate Prep Brief" from the event detail panel: uses the TAGGED
+  // institutions/people, falling back to the auto-matched attendee when
+  // nothing has been tagged yet (Section 5).
+  const generateEventBrief = (ev) => {
+    if (briefGenerating) return;
+    const title = ev.title || "Meeting";
+    const day = ev.start_time ? new Date(ev.start_time).toDateString() : null;
+    const existing = meetingBriefs.find((b) => b.meeting_title === title && b.meeting_date && new Date(b.meeting_date).toDateString() === day);
+    if (existing) { setBriefViewId(existing.id); return; }
+    const taggedContactIds = eventContacts.filter((r) => r.calendar_event_id === ev.id).map((r) => r.contact_id);
+    const taggedInstRows = eventInstitutions.filter((r) => r.calendar_event_id === ev.id);
+    if (taggedContactIds.length === 0 && taggedInstRows.length === 0) {
+      generateBrief({ meeting_title: title, meeting_date: ev.start_time, contact_id: ev.matched_contact_id, deal_id: ev.matched_deal_id, enabler_id: ev.matched_enabler_id, organization_id: ev.matched_organization_id, brief_type: detectBriefType(ev) });
+      return;
+    }
+    const briefType = detectBriefType(ev);
+    setBriefGenerating(title);
+    (async () => {
+      try {
+        let content;
+        if (briefType === "internal") {
+          content = await generateInternalBrief(title, gatherInternalBriefContext());
+        } else {
+          const taggedContactObjs = taggedContactIds.map((id) => contacts.find((c) => c.id === id)).filter(Boolean);
+          const taggedInstObjs = taggedInstRows.map((r) => ({
+            deal: r.deal_id ? deals.find((d) => d.id === r.deal_id) : null,
+            enabler: r.enabler_id ? enablers.find((e) => e.id === r.enabler_id) : null,
+            org: r.organization_id ? organizations.find((o) => o.id === r.organization_id) : null,
+          })).filter((x) => x.deal || x.enabler || x.org);
+          content = await generateMeetingBrief(gatherBriefContextForEntities(taggedContactObjs, taggedInstObjs));
+        }
+        const first = taggedInstRows[0];
+        const clean = {
+          meeting_title: title, brief_content: content, brief_type: briefType, meeting_date: ev.start_time,
+          contact_id: taggedContactIds[0] || ev.matched_contact_id || null,
+          deal_id: first?.deal_id || ev.matched_deal_id || null,
+          enabler_id: first?.enabler_id || ev.matched_enabler_id || null,
+          organization_id: first?.organization_id || ev.matched_organization_id || null,
+        };
+        const rows = await api("meeting_briefs", "POST", clean);
+        const row = Array.isArray(rows) ? rows[0] : rows;
+        if (row) { setMeetingBriefs((prev) => [row, ...prev]); setBriefViewId(row.id); }
+      } catch (e) { showToast(`Error generating brief: ${e.message || "unknown error"}`); }
+      setBriefGenerating(null);
+    })();
+  };
+
+  // Builds the description for a logged outcome, prefixed with a marker (like
+  // the Fathom recap marker) carrying the event id so the timeline can link
+  // back to the calendar event (Section 9) without a new activities column.
+  const buildOutcomeDescription = (ev, text) => `${CALEVENT_MARKER_PREFIX}${ev.id}${CALEVENT_MARKER_SUFFIX}Meeting:\n${ev.title || "Meeting"}\n\nOutcome:\n${text.trim()}`;
+
+  // "Log Outcome" (Section 6): creates one activity per tagged person (with
+  // their resolved primary institution, same rule addActivity already uses),
+  // plus one direct activity for any tagged institution not already reached
+  // through a tagged person. This is what dedupes the same meeting rather than
+  // writing one row per (person x institution) pair.
+  const logEventOutcome = async (ev, outcomeText) => {
+    const text = (outcomeText || "").trim();
+    if (!text) { showToast("Outcome is empty"); return null; }
+    const description = buildOutcomeDescription(ev, text);
+    // Guard against a double-click (or an accidental re-submit) creating a
+    // second round of activities for the same outcome. These activities are
+    // dated to the meeting's own start time rather than "now" (Section 6), so
+    // an exact-content match is the dedupe key rather than addActivity's usual
+    // 2-minute recency window.
+    if (activities.some((a) => a.description === description)) {
+      showToast("This outcome is already logged");
+      return null;
+    }
+    const taggedContacts = eventContacts.filter((r) => r.calendar_event_id === ev.id).map((r) => contacts.find((c) => c.id === r.contact_id)).filter(Boolean);
+    const taggedInstRows = eventInstitutions.filter((r) => r.calendar_event_id === ev.id);
+    const createdAt = ev.start_time || new Date().toISOString();
+    const now = new Date().toISOString();
+    const newRows = [];
+    const touchedDealIds = new Set(), touchedEnablerIds = new Set(), touchedContactIds = new Set();
+    const coveredInstKeys = new Set();
+
+    try {
+      for (const contact of taggedContacts) {
+        const roles = resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles });
+        const primary = roles.find((r) => r.is_primary) || roles[0];
+        const fk = { deal_id: null, enabler_id: null, organization_id: null };
+        if (primary?.entity_type === "deal") { fk.deal_id = primary.entity_id; coveredInstKeys.add(`deal:${primary.entity_id}`); }
+        else if (primary?.entity_type === "enabler") { fk.enabler_id = primary.entity_id; coveredInstKeys.add(`enabler:${primary.entity_id}`); }
+        else if (primary?.entity_type === "organization") { fk.organization_id = primary.entity_id; coveredInstKeys.add(`organization:${primary.entity_id}`); }
+        const rows = await api("activities", "POST", { type: "meeting", description, contact_id: contact.id, created_at: createdAt, ...fk });
+        const row = Array.isArray(rows) ? rows[0] : rows;
+        if (row) newRows.push(row);
+        if (fk.deal_id) touchedDealIds.add(fk.deal_id);
+        if (fk.enabler_id) touchedEnablerIds.add(fk.enabler_id);
+        touchedContactIds.add(contact.id);
+      }
+      for (const r of taggedInstRows) {
+        const key = r.deal_id ? `deal:${r.deal_id}` : r.enabler_id ? `enabler:${r.enabler_id}` : r.organization_id ? `organization:${r.organization_id}` : null;
+        if (!key || coveredInstKeys.has(key)) continue;
+        const fk = { deal_id: r.deal_id || null, enabler_id: r.enabler_id || null, organization_id: r.organization_id || null };
+        const rows = await api("activities", "POST", { type: "meeting", description, created_at: createdAt, ...fk });
+        const row = Array.isArray(rows) ? rows[0] : rows;
+        if (row) newRows.push(row);
+        if (fk.deal_id) touchedDealIds.add(fk.deal_id);
+        if (fk.enabler_id) touchedEnablerIds.add(fk.enabler_id);
+      }
+
+      if (newRows.length) setActivities((prev) => [...newRows, ...prev]);
+      if (touchedDealIds.size) { await Promise.all([...touchedDealIds].map((id) => api("deals", "PATCH", { last_activity_at: now }, `?id=eq.${id}`))); setDeals((prev) => prev.map((d) => (touchedDealIds.has(d.id) ? { ...d, last_activity_at: now } : d))); }
+      if (touchedEnablerIds.size) { await Promise.all([...touchedEnablerIds].map((id) => api("enablers", "PATCH", { last_activity_at: now }, `?id=eq.${id}`))); setEnablers((prev) => prev.map((e) => (touchedEnablerIds.has(e.id) ? { ...e, last_activity_at: now } : e))); }
+      if (touchedContactIds.size) { await Promise.all([...touchedContactIds].map((id) => api("contacts", "PATCH", { last_contacted_at: now }, `?id=eq.${id}`))); setContacts((prev) => prev.map((c) => (touchedContactIds.has(c.id) ? { ...c, last_contacted_at: now } : c))); }
+
+      await saveEventOutcomeNotes(ev.id, text);
+      const peopleCount = taggedContacts.length;
+      const instCount = new Set(taggedInstRows.map((r) => (r.deal_id ? `deal:${r.deal_id}` : r.enabler_id ? `enabler:${r.enabler_id}` : r.organization_id ? `organization:${r.organization_id}` : null)).filter(Boolean)).size;
+      showToast(`Outcome logged to ${peopleCount} ${peopleCount === 1 ? "person" : "people"} and ${instCount} ${instCount === 1 ? "institution" : "institutions"}.`);
+      return { peopleCount, instCount };
+    } catch { showToast("Error logging outcome"); return null; }
+  };
+
+  // "Extract tasks from outcome" (Section 6): reuses the voice-note digest
+  // prompt (it already returns {summary, action_items}) on typed outcome text,
+  // then creates one todo per action item, linked to every tagged person and
+  // the first tagged institution (a todo only carries one institution FK).
+  const extractTasksFromOutcome = async (ev, outcomeText) => {
+    const text = (outcomeText || "").trim();
+    if (!text) { showToast("Outcome is empty"); return; }
+    try {
+      const { action_items } = await digestVoiceNote(text);
+      const items = (action_items || []).filter((a) => (a.title || "").trim());
+      if (!items.length) { showToast("No action items found"); return; }
+      const taggedContactIds = eventContacts.filter((r) => r.calendar_event_id === ev.id).map((r) => r.contact_id);
+      const firstInst = eventInstitutions.find((r) => r.calendar_event_id === ev.id);
+      for (const item of items) {
+        const hint = (item.due_date_hint || "").trim();
+        const due = parseDueHint(hint);
+        const title = (!due && hint) ? `${item.title.trim()} (${hint})` : item.title.trim();
+        await saveTodo({
+          title, priority: ["high", "medium", "low"].includes(item.priority) ? item.priority : "medium", due_date: due || undefined,
+          contact_ids: taggedContactIds,
+          deal_id: firstInst?.deal_id || null, enabler_id: firstInst?.enabler_id || null, organization_id: firstInst?.organization_id || null,
+        });
+      }
+      showToast(`${items.length} task${items.length === 1 ? "" : "s"} created`);
+    } catch { showToast("Error extracting tasks"); }
   };
 
   const updateBriefGoal = async (id, goal) => {
@@ -2919,6 +3168,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             showToast={showToast}
             onOpenInstitution={openInstitution}
             onOpenPerson={openPerson}
+            onOpenCalendarEvent={openCalendarEventDetail}
             backLabel={backLabel}
             onBack={goBack}
             bossNotesSlot={(() => {
@@ -2976,6 +3226,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             showToast={showToast}
             onOpenInstitution={openInstitution}
             onOpenPerson={openPerson}
+            onOpenCalendarEvent={openCalendarEventDetail}
             onBack={goBack}
             backLabel={backLabel}
           />
@@ -2992,6 +3243,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           meetings={homeMeetings}
           eventEntityRow={eventEntityRow}
           onPrepBriefEvent={prepBriefForEvent}
+          onOpenCalendarEvent={openCalendarEventDetail}
           onOpenCalendar={() => navigateTab("calendar")}
           urgentTasks={urgentTasks}
           onToggleTodo={toggleTodo}
@@ -3039,6 +3291,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           entityName={entityName}
           eventEntityRow={eventEntityRow}
           onOpenEntity={openEntity}
+          onOpenDetail={openCalendarEventDetail}
           onPrepBrief={prepBriefForEvent}
           onLink={linkCalendarEvent}
           linkOptions={calendarLinkOptions}
@@ -3048,6 +3301,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onRefresh={refreshCalendar}
           lastSynced={calendarLastSynced}
           briefGenerating={briefGenerating}
+          eventInstitutions={eventInstitutions}
+          eventContacts={eventContacts}
+          activities={activities}
         />
       )}
 
@@ -3408,6 +3664,39 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         />
       )}
 
+      {/* CALENDAR EVENT DETAIL PANEL: a global overlay so a "📅 Meeting" activity
+          pill anywhere in the app can reopen the same event it came from. */}
+      {eventDetailId && (() => {
+        const ev = calendarEvents.find((e) => e.id === eventDetailId);
+        if (!ev) return null;
+        return (
+          <EventDetailPanel
+            ev={ev}
+            contacts={contacts}
+            deals={deals}
+            enablers={enablers}
+            organizations={organizations}
+            eventInstitutions={eventInstitutions}
+            eventContacts={eventContacts}
+            customOptions={customOptions}
+            onAddCustomOption={addCustomOption}
+            onCreateInstitution={createInstitutionInline}
+            onTagInstitution={tagEventInstitution}
+            onUntagInstitution={untagEventInstitution}
+            onTagPerson={tagEventPerson}
+            onUntagPerson={untagEventPerson}
+            onSavePrepNotes={saveEventPrepNotes}
+            onSaveOutcomeNotes={saveEventOutcomeNotes}
+            onGenerateBrief={generateEventBrief}
+            briefGenerating={briefGenerating}
+            onLogOutcome={logEventOutcome}
+            onExtractTasks={extractTasksFromOutcome}
+            onClose={closeCalendarEventDetail}
+            showToast={showToast}
+          />
+        );
+      })()}
+
       {/* OUTREACH compose panel (Feature 2) */}
       {compose && !bossMode && (() => {
         const composeContact = contacts.find((c) => c.id === compose.contactId);
@@ -3438,7 +3727,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, onPrepBriefEvent, onOpenCalendar, urgentTasks, onToggleTodo, onNavigateTask, recentActivities, deals, enablers, organizations, contacts, todoContacts = [], dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, onPrepBriefEvent, onOpenCalendarEvent, onOpenCalendar, urgentTasks, onToggleTodo, onNavigateTask, recentActivities, deals, enablers, organizations, contacts, todoContacts = [], dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
@@ -3508,13 +3797,13 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
               // contact) or a detected internal-only meeting with no match.
               const canPrepBrief = !!ent || isInternalMeeting(ev, contacts);
               return (
-                <div key={ev.id} className={`home-card home-meeting ${ent ? "home-task-clickable" : ""}`} onClick={ent ? () => onOpenEntity(entRow) : undefined}>
+                <div key={ev.id} className={`home-card home-meeting ${onOpenCalendarEvent ? "home-task-clickable" : ""}`} onClick={onOpenCalendarEvent ? () => onOpenCalendarEvent(ev.id) : undefined}>
                   <div className="home-meeting-time">{formatTime(ev.start_time)}</div>
                   <div className="home-meeting-main">
                     <div className="home-meeting-title">{ev.title || "Untitled event"}</div>
                     <div className="home-meeting-sub">
                       {ev.location && <span>{ev.location}</span>}
-                      {ent && <span className="home-meeting-entity">{ent}</span>}
+                      {ent && <button type="button" className="home-meeting-entity home-meeting-entity-btn" onClick={(e) => { e.stopPropagation(); onOpenEntity(entRow); }}>{ent}</button>}
                     </div>
                   </div>
                   {!bossMode && onPrepBriefEvent && canPrepBrief && (
@@ -3609,11 +3898,11 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
                 <div className="home-act-main">
                   <div className="home-act-desc">
                     {isFathomActivity(a) && <span className="fathom-badge sm" title="Auto-imported from Fathom">Fathom</span>}
-                    {isFathomActivity(a) ? firstLine(stripFathomMarker(a.description)) : a.description}
+                    {firstLine(cleanActivityText(a.description))}
                   </div>
                   <div className="home-act-meta" onClick={(e) => e.stopPropagation()}>
                     {entityName(a) ? (
-                      <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} dealContacts={dealContacts} enablerContacts={enablerContacts} networkEdges={networkEdges} contactRoles={contactRoles} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} />
+                      <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} dealContacts={dealContacts} enablerContacts={enablerContacts} networkEdges={networkEdges} contactRoles={contactRoles} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} onOpenCalendarEvent={onOpenCalendarEvent} />
                     ) : <span>General</span>}
                     <span>{formatDateTime(a.created_at)}</span>
                   </div>
@@ -3843,7 +4132,17 @@ const startOfWeek = (d) => { const x = startOfDay(d); const day = (x.getDay() + 
 
 // One event row shared by Agenda and the Week popover: time, title, location,
 // attendees, matched-entity pill, and a Prep Brief / Link action.
-function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, briefGenerating, readOnly, contacts = [], compact = false }) {
+// Whether an event has any tagged institutions/people, any prep or outcome
+// notes, or a logged outcome (an activity carrying its CALEVENT marker) -
+// drives the small at-a-glance indicators on the row (Section 8).
+function eventIndicators(ev, { eventInstitutions = [], eventContacts = [], activities = [] }) {
+  const tagged = eventInstitutions.some((r) => r.calendar_event_id === ev.id) || eventContacts.some((r) => r.calendar_event_id === ev.id);
+  const hasNotes = !!(ev.prep_notes || "").trim() || !!(ev.outcome_notes || "").trim();
+  const outcomeLogged = activities.some((a) => calendarEventIdFromActivity(a.description) === ev.id);
+  return { tagged, hasNotes, outcomeLogged };
+}
+
+function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onOpenDetail, onPrepBrief, onLink, linkOptions, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, briefGenerating, readOnly, contacts = [], eventInstitutions = [], eventContacts = [], activities = [], compact = false }) {
   const [linking, setLinking] = useState(false);
   const entRow = eventEntityRow(ev);
   const ent = entityName(entRow);
@@ -3854,14 +4153,24 @@ function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onPrep
   // "Link to entity" when there is truly no match and no internal signal.
   const canPrepBrief = (matched && ent) || internalMeeting;
   const attendees = Array.isArray(ev.attendees) ? ev.attendees.filter(Boolean) : [];
+  const { tagged, hasNotes, outcomeLogged } = eventIndicators(ev, { eventInstitutions, eventContacts, activities });
   return (
-    <div className={`cal-event ${compact ? "cal-event-compact" : ""}`}>
+    <div className={`cal-event ${compact ? "cal-event-compact" : ""} ${onOpenDetail ? "cal-event-click" : ""}`} onClick={onOpenDetail ? () => onOpenDetail(ev.id) : undefined}>
       <div className="cal-event-time">{formatTime(ev.start_time)}{ev.end_time ? ` - ${formatTime(ev.end_time)}` : ""}</div>
       <div className="cal-event-body">
-        <div className="cal-event-title">{ev.title || "Untitled event"}</div>
+        <div className="cal-event-title">
+          {ev.title || "Untitled event"}
+          {(tagged || hasNotes || outcomeLogged) && (
+            <span className="cal-event-indicators">
+              {tagged && <span title="Has tagged institutions or people">🏷️</span>}
+              {hasNotes && <span title="Has prep or outcome notes">📝</span>}
+              {outcomeLogged && <span title="Outcome logged">✅</span>}
+            </span>
+          )}
+        </div>
         {ev.location && <div className="cal-event-loc">📍 {ev.location}</div>}
         {attendees.length > 0 && <div className="cal-event-attendees">{attendees.slice(0, 5).join(", ")}{attendees.length > 5 ? ` +${attendees.length - 5}` : ""}</div>}
-        <div className="cal-event-actions">
+        <div className="cal-event-actions" onClick={(e) => e.stopPropagation()}>
           {matched && ent && (
             <button className={`task-pill ${eventMatchClass(ev)}`} onClick={() => onOpenEntity(entRow)} title={`Open ${ent}`}>{ent}</button>
           )}
@@ -3887,11 +4196,10 @@ function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onPrep
 }
 
 // Full-screen Calendar view: Agenda (default) or Week, plus a refresh + last-synced.
-function CalendarTab({ events, contacts = [], entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, onRefresh, lastSynced, briefGenerating }) {
+function CalendarTab({ events, contacts = [], entityName, eventEntityRow, onOpenEntity, onOpenDetail, onPrepBrief, onLink, linkOptions, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, onRefresh, lastSynced, briefGenerating, eventInstitutions = [], eventContacts = [], activities = [] }) {
   const readOnly = useReadOnly();
   const [mode, setMode] = useState("agenda");
   const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
-  const [popoverEvent, setPopoverEvent] = useState(null);
 
   const today0 = startOfDay(new Date());
   const twoDaysAgo = new Date(today0); twoDaysAgo.setDate(today0.getDate() - 2);
@@ -3909,7 +4217,7 @@ function CalendarTab({ events, contacts = [], entityName, eventEntityRow, onOpen
   });
 
   const [recentOpen, setRecentOpen] = useState(false);
-  const rowProps = { entityName, eventEntityRow, onOpenEntity, onPrepBrief, onLink, linkOptions, onCreateInstitution, customOptions, onAddCustomOption, briefGenerating, readOnly, contacts };
+  const rowProps = { entityName, eventEntityRow, onOpenEntity, onOpenDetail, onPrepBrief, onLink, linkOptions, onCreateInstitution, customOptions, onAddCustomOption, briefGenerating, readOnly, contacts, eventInstitutions, eventContacts, activities };
 
   // Week grid days and their events.
   const weekDays = Array.from({ length: 7 }, (_, i) => { const d = new Date(weekStart); d.setDate(weekStart.getDate() + i); return d; });
@@ -3970,12 +4278,22 @@ function CalendarTab({ events, contacts = [], entityName, eventEntityRow, onOpen
                     <div className="cal-week-date">{d.getDate()}</div>
                   </div>
                   <div className="cal-week-slots">
-                    {dayEvents.length === 0 ? <div className="cal-week-empty" /> : dayEvents.map((e) => (
-                      <button key={e.id} className={`cal-week-block ${eventMatchClass(e) || "cal-block-none"}`} onClick={() => setPopoverEvent(e)} title={e.title}>
-                        <span className="cal-week-block-time">{formatTime(e.start_time)}</span>
-                        <span className="cal-week-block-title">{e.title || "Untitled"}</span>
-                      </button>
-                    ))}
+                    {dayEvents.length === 0 ? <div className="cal-week-empty" /> : dayEvents.map((e) => {
+                      const { tagged, hasNotes, outcomeLogged } = eventIndicators(e, { eventInstitutions, eventContacts, activities });
+                      return (
+                        <button key={e.id} className={`cal-week-block ${eventMatchClass(e) || "cal-block-none"}`} onClick={() => onOpenDetail(e.id)} title={e.title}>
+                          <span className="cal-week-block-time">{formatTime(e.start_time)}</span>
+                          <span className="cal-week-block-title">{e.title || "Untitled"}</span>
+                          {(tagged || hasNotes || outcomeLogged) && (
+                            <span className="cal-event-indicators cal-week-block-indicators">
+                              {tagged && <span title="Has tagged institutions or people">🏷️</span>}
+                              {hasNotes && <span title="Has prep or outcome notes">📝</span>}
+                              {outcomeLogged && <span title="Outcome logged">✅</span>}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               );
@@ -3983,20 +4301,212 @@ function CalendarTab({ events, contacts = [], entityName, eventEntityRow, onOpen
           </div>
         </div>
       )}
+    </div>
+  );
+}
 
-      {popoverEvent && (
-        <div className="overlay" onClick={() => setPopoverEvent(null)}>
-          <div className="modal cal-popover" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <div className="modal-title">{popoverEvent.title || "Untitled event"}</div>
-              <button className="close-btn" onClick={() => setPopoverEvent(null)}>✕</button>
-            </div>
-            <div className="cal-popover-time">{formatFull(popoverEvent.start_time)} . {formatTime(popoverEvent.start_time)}{popoverEvent.end_time ? ` - ${formatTime(popoverEvent.end_time)}` : ""}</div>
-            <CalendarEventRow ev={popoverEvent} {...rowProps} compact />
-            {popoverEvent.description && <div className="cal-popover-desc">{popoverEvent.description}</div>}
+// Calendar event detail panel (a global overlay: side panel on desktop, a
+// full-screen sheet on mobile via CSS): tag institutions and people, prep
+// notes, a Generate Prep Brief that uses the tags, and an Outcome section
+// (typed or voice) that fans out as activities to every tagged entity.
+function EventDetailPanel({
+  ev, contacts, deals, enablers, organizations,
+  eventInstitutions, eventContacts, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution,
+  onTagInstitution, onUntagInstitution, onTagPerson, onUntagPerson,
+  onSavePrepNotes, onSaveOutcomeNotes, onGenerateBrief, briefGenerating,
+  onLogOutcome, onExtractTasks, onClose, showToast,
+}) {
+  const readOnly = useReadOnly();
+  const [prepDraft, setPrepDraft] = useState(ev.prep_notes || "");
+  const [outcomeDraft, setOutcomeDraft] = useState(ev.outcome_notes || "");
+  const [extracting, setExtracting] = useState(false);
+  const [logging, setLogging] = useState(false);
+  const autoTaggedRef = useRef(new Set());
+
+  useEffect(() => { setPrepDraft(ev.prep_notes || ""); setOutcomeDraft(ev.outcome_notes || ""); }, [ev.id, ev.prep_notes, ev.outcome_notes]);
+
+  // Pre-populate People with any attendee that matches an existing contact by
+  // email, once, and only the first time this event is ever opened (a later
+  // deliberate removal should not silently come back).
+  useEffect(() => {
+    if (readOnly || autoTaggedRef.current.has(ev.id)) return;
+    autoTaggedRef.current.add(ev.id);
+    if (eventContacts.some((r) => r.calendar_event_id === ev.id)) return;
+    const emails = Array.isArray(ev.attendee_emails) ? ev.attendee_emails.filter(Boolean).map((e) => e.toLowerCase()) : [];
+    if (!emails.length) return;
+    contacts.filter((c) => c.email && emails.includes(c.email.toLowerCase())).forEach((c) => onTagPerson(ev.id, c.id));
+  }, [ev.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const instKey = (r) => (r.deal_id ? `deal:${r.deal_id}` : r.enabler_id ? `enabler:${r.enabler_id}` : `organization:${r.organization_id}`);
+  const taggedInstRows = eventInstitutions.filter((r) => r.calendar_event_id === ev.id);
+  const instOptions = dedupeInstitutionOptions({ deals, enablers, organizations, prefer: ["deal", "enabler", "organization"] });
+  const taggedInstValues = taggedInstRows.map(instKey);
+  const handleInstChange = (vals) => {
+    vals.filter((v) => !taggedInstValues.includes(v)).forEach((v) => { const i = v.indexOf(":"); onTagInstitution(ev.id, { type: v.slice(0, i), id: v.slice(i + 1) }); });
+    taggedInstRows.filter((r) => !vals.includes(instKey(r))).forEach((r) => onUntagInstitution(r.id));
+  };
+
+  const taggedContactRows = eventContacts.filter((r) => r.calendar_event_id === ev.id);
+  const contactOptions = contacts.map((c) => ({ value: c.id, label: c.name })).filter((o) => o.label);
+  const taggedContactValues = taggedContactRows.map((r) => r.contact_id);
+  const handleContactChange = (vals) => {
+    vals.filter((v) => !taggedContactValues.includes(v)).forEach((v) => onTagPerson(ev.id, v));
+    taggedContactRows.filter((r) => !vals.includes(r.contact_id)).forEach((r) => onUntagPerson(r.id));
+  };
+
+  const attendees = Array.isArray(ev.attendees) ? ev.attendees.filter(Boolean) : [];
+  const savePrep = () => { if ((ev.prep_notes || "") !== prepDraft) onSavePrepNotes(ev.id, prepDraft); };
+  const saveOutcomeDraft = () => { if ((ev.outcome_notes || "") !== outcomeDraft) onSaveOutcomeNotes(ev.id, outcomeDraft); };
+
+  const doLogOutcome = async () => {
+    if (logging) return;
+    setLogging(true);
+    try { await onLogOutcome(ev, outcomeDraft); } finally { setLogging(false); }
+  };
+  const doExtractTasks = async () => {
+    if (extracting) return;
+    setExtracting(true);
+    try { await onExtractTasks(ev, outcomeDraft); } finally { setExtracting(false); }
+  };
+
+  // Voice outcome (Section 7): same Web Speech API + digestVoiceNote pattern
+  // as QuickAdd's voice notes, but the clean summary lands in the Outcome
+  // textarea (and is saved right away) instead of its own save button, so
+  // "Log Outcome" afterward is the one action that fans it out to everyone.
+  const [recording, setRecording] = useState(false);
+  const [voiceProcessing, setVoiceProcessing] = useState(false);
+  const [voiceUnsupported, setVoiceUnsupported] = useState(false);
+  const transcriptRef = useRef("");
+  const recognitionRef = useRef(null);
+
+  useEffect(() => () => { if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch { /* already stopped */ } } }, []);
+
+  const startRecording = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { setVoiceUnsupported(true); return; }
+    setVoiceUnsupported(false);
+    transcriptRef.current = "";
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.continuous = true;
+    rec.interimResults = false;
+    rec.onresult = (e) => { for (let i = e.resultIndex; i < e.results.length; i++) { if (e.results[i].isFinal) transcriptRef.current += e.results[i][0].transcript + " "; } };
+    rec.onerror = () => { /* ignore; the user can retry */ };
+    recognitionRef.current = rec;
+    try { rec.start(); } catch { setVoiceUnsupported(true); return; }
+    setRecording(true);
+  };
+  const stopRecording = async () => {
+    setRecording(false);
+    if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch { /* already stopped */ } }
+    await new Promise((r) => setTimeout(r, 400));
+    const raw = transcriptRef.current.trim();
+    if (!raw) { showToast("No speech detected. Try again."); return; }
+    setVoiceProcessing(true);
+    try {
+      const result = await digestVoiceNote(raw);
+      const summary = (result.summary || raw).trim();
+      const newText = outcomeDraft.trim() ? `${outcomeDraft.trim()}\n\n${summary}` : summary;
+      setOutcomeDraft(newText);
+      onSaveOutcomeNotes(ev.id, newText);
+    } catch { showToast("Error processing voice note"); }
+    setVoiceProcessing(false);
+  };
+  const micTap = () => { if (recording) stopRecording(); else startRecording(); };
+
+  return (
+    <div className="overlay event-detail-overlay" onClick={onClose}>
+      <div className="modal event-detail-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <div className="modal-title">{ev.title || "Untitled event"}</div>
+            <div className="brief-sub">{formatFull(ev.start_time)} . {formatTime(ev.start_time)}{ev.end_time ? ` - ${formatTime(ev.end_time)}` : ""}</div>
           </div>
+          <button className="close-btn" onClick={onClose}>✕</button>
         </div>
-      )}
+
+        {ev.location && <div className="event-detail-loc">📍 {ev.location}</div>}
+
+        {attendees.length > 0 && (
+          <div className="event-detail-section">
+            <div className="section-label">Attendees</div>
+            <div className="event-detail-attendees">{attendees.join(", ")}</div>
+          </div>
+        )}
+
+        <div className="event-detail-section">
+          <div className="section-label">Institutions</div>
+          {readOnly ? (
+            taggedInstRows.length === 0 ? <div className="empty-small">No institutions tagged.</div> : (
+              <div className="multi-contact-pills">{taggedInstRows.map((r) => <span key={r.id} className="entity-picker-chip">{instOptions.find((o) => o.value === instKey(r))?.label || "Unknown"}</span>)}</div>
+            )
+          ) : (
+            <MultiContactPicker
+              options={instOptions}
+              value={taggedInstValues}
+              onChange={handleInstChange}
+              placeholder="+ Tag institution..."
+              onCreateInstitution={onCreateInstitution}
+              customOptions={customOptions}
+              onAddCustomOption={onAddCustomOption}
+            />
+          )}
+        </div>
+
+        <div className="event-detail-section">
+          <div className="section-label">People</div>
+          {readOnly ? (
+            taggedContactRows.length === 0 ? <div className="empty-small">No people tagged.</div> : (
+              <div className="multi-contact-pills">{taggedContactRows.map((r) => <span key={r.id} className="entity-picker-chip">{contacts.find((c) => c.id === r.contact_id)?.name || "Unknown"}</span>)}</div>
+            )
+          ) : (
+            <MultiContactPicker options={contactOptions} value={taggedContactValues} onChange={handleContactChange} placeholder="+ Tag person..." />
+          )}
+        </div>
+
+        <div className="event-detail-section">
+          <div className="section-label">Prep Notes</div>
+          <textarea
+            className="input textarea event-detail-textarea"
+            placeholder="Notes before the meeting..."
+            value={prepDraft}
+            onChange={(e) => setPrepDraft(e.target.value)}
+            onBlur={savePrep}
+            disabled={readOnly}
+          />
+          {!readOnly && (
+            <button className="btn-sec event-detail-brief-btn" disabled={!!briefGenerating} onClick={() => onGenerateBrief(ev)}>
+              {briefGenerating ? "Generating..." : "Generate Prep Brief"}
+            </button>
+          )}
+        </div>
+
+        <div className="event-detail-section event-detail-outcome">
+          <div className="section-label">Outcome</div>
+          <div className="event-detail-outcome-row">
+            <textarea
+              className="input textarea event-detail-textarea"
+              placeholder="What happened, decisions made, next steps..."
+              value={outcomeDraft}
+              onChange={(e) => setOutcomeDraft(e.target.value)}
+              onBlur={saveOutcomeDraft}
+              disabled={readOnly}
+            />
+            {!readOnly && (
+              <button type="button" className={`event-detail-mic ${recording ? "recording" : ""}`} onClick={micTap} disabled={voiceProcessing} title={recording ? "Stop recording" : "Record outcome by voice"}>
+                {voiceProcessing ? "..." : recording ? "⏹" : "🎙"}
+              </button>
+            )}
+          </div>
+          {voiceUnsupported && <div className="empty-small">Voice notes not supported in this browser. Try Chrome or Safari.</div>}
+          {!readOnly && (
+            <div className="event-detail-outcome-actions">
+              <button className="btn-sec" disabled={extracting || !outcomeDraft.trim()} onClick={doExtractTasks}>{extracting ? "Extracting..." : "Extract tasks from outcome"}</button>
+              <button className="btn-primary" disabled={logging || !outcomeDraft.trim()} onClick={doLogOutcome}>{logging ? "Logging..." : "Log Outcome"}</button>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -4289,7 +4799,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
     r += `COMING UP NEXT WEEK\n`;
     if (upcomingEvents.length === 0 && upcomingScheduled.length === 0 && upcomingTasks.length === 0) r += `. Nothing scheduled yet.\n`;
     upcomingEvents.forEach((e) => { r += `. ${formatDate(e.start_time)}: ${e.title || "Untitled event"}\n`; });
-    upcomingScheduled.forEach((a) => { r += `. ${formatDate(a.scheduled_for)}: ${firstLine(stripFathomMarker(a.description)) || "Scheduled meeting"}\n`; });
+    upcomingScheduled.forEach((a) => { r += `. ${formatDate(a.scheduled_for)}: ${firstLine(cleanActivityText(a.description)) || "Scheduled meeting"}\n`; });
     if (upcomingTasks.length > 0) { r += `Tasks:\n`; upcomingTasks.forEach((t) => { r += `. ${t.title}${t.due_date ? ` (due ${formatDate(t.due_date)})` : ""}\n`; }); }
     r += `\n`;
 
@@ -4337,7 +4847,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
     else {
       h += `<ul>`;
       upcomingEvents.forEach((e) => { h += `<li>${esc(formatDate(e.start_time))}: ${esc(e.title || "Untitled event")}</li>`; });
-      upcomingScheduled.forEach((a) => { h += `<li>${esc(formatDate(a.scheduled_for))}: ${esc(firstLine(stripFathomMarker(a.description)) || "Scheduled meeting")}</li>`; });
+      upcomingScheduled.forEach((a) => { h += `<li>${esc(formatDate(a.scheduled_for))}: ${esc(firstLine(cleanActivityText(a.description)) || "Scheduled meeting")}</li>`; });
       h += `</ul>`;
       if (upcomingTasks.length > 0) { h += `<p><b>Tasks</b></p><ul>`; upcomingTasks.forEach((t) => { h += `<li>${esc(t.title)}${t.due_date ? ` (due ${esc(formatDate(t.due_date))})` : ""}</li>`; }); h += `</ul>`; }
     }
@@ -4552,7 +5062,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
             })}
             {upcomingScheduled.map((a) => (
               <div key={`sm-${a.id}`} className="wir-row">
-                <span className="wir-row-name">{firstLine(stripFathomMarker(a.description)) || "Scheduled meeting"}</span>
+                <span className="wir-row-name">{firstLine(cleanActivityText(a.description)) || "Scheduled meeting"}</span>
                 <span className="wir-row-detail">{formatDateTime(a.scheduled_for)}</span>
               </div>
             ))}
@@ -5310,7 +5820,7 @@ function ComposeModal({ contact, roles, templates, initialTemplateId, initialCha
   const [body, setBody] = useState(initial ? fillTemplate(initial.body, contact, roles) : "");
   const [addingLinkedin, setAddingLinkedin] = useState(false);
   const [linkedinDraft, setLinkedinDraft] = useState("");
-  const recentContext = activities.filter((a) => a.contact_id === contact.id).slice(0, 3).map((a) => firstLine(stripFathomMarker(a.description))).filter(Boolean).join("\n");
+  const recentContext = activities.filter((a) => a.contact_id === contact.id).slice(0, 3).map((a) => firstLine(cleanActivityText(a.description))).filter(Boolean).join("\n");
   const [talkingPoints, setTalkingPoints] = useState((contact.ai_summary || recentContext || "").trim());
   const [callOutcome, setCallOutcome] = useState("");
   const [logging, setLogging] = useState(false);
@@ -6000,7 +6510,7 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -6302,7 +6812,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
               <div>
                 <ActivityDescription activity={a} onSummarizeEmail={onSummarizeEmail} summarizingId={summarizingActivityId} />
                 <div className="act-date">
-                  <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} dealContacts={dealContacts} enablerContacts={enablerContacts} networkEdges={networkEdges} contactRoles={contactRoles} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} hidePerson />
+                  <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} dealContacts={dealContacts} enablerContacts={enablerContacts} networkEdges={networkEdges} contactRoles={contactRoles} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} onOpenCalendarEvent={onOpenCalendarEvent} hidePerson />
                   {formatDateTime(a.created_at)}
                 </div>
               </div>
@@ -6862,9 +7372,14 @@ function EntityPicker({ placeholder, options, value, onChange, onCreateInstituti
 // Multi-select over a list of {value, label} options: already-picked entries
 // show as removable chips, with a search box below to add more. Used for a
 // task's contacts, where any number of people can be linked.
-function MultiContactPicker({ options, value = [], onChange, placeholder = "Search contacts..." }) {
+// Generic multi-select over {value, label} options: already-picked entries
+// show as removable pills, with a search box below to add more. Used for a
+// task's contacts, and (with onCreateInstitution) for tagging institutions on
+// a calendar event, where "+ Add new institution" creates one inline.
+function MultiContactPicker({ options, value = [], onChange, placeholder = "Search contacts...", onCreateInstitution, customOptions = [], onAddCustomOption = () => {} }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
   const selected = value.map((id) => options.find((o) => o.value === id)).filter(Boolean);
   const query = q.trim().toLowerCase();
   const available = options.filter((o) => !value.includes(o.value));
@@ -6883,20 +7398,38 @@ function MultiContactPicker({ options, value = [], onChange, placeholder = "Sear
           ))}
         </div>
       )}
-      <input
-        className="input entity-picker-input"
-        placeholder={placeholder}
-        value={q}
-        onChange={(e) => { setQ(e.target.value); setOpen(true); }}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
-      />
-      {open && (
-        <div className="entity-picker-options">
-          {filtered.length === 0 ? <div className="empty-small entity-picker-empty">No matches.</div> : filtered.map((o) => (
-            <button type="button" key={o.value} className="entity-picker-option" onMouseDown={() => add(o.value)}>{o.label}</button>
-          ))}
-        </div>
+      {creating ? (
+        <InstitutionCreateForm
+          customOptions={customOptions}
+          onAddCustomOption={onAddCustomOption}
+          onCancel={() => setCreating(false)}
+          onCreate={async (form) => {
+            const created = await onCreateInstitution(form);
+            if (created?.preferred) { add(`${created.preferred.type}:${created.preferred.id}`); setCreating(false); return true; }
+            return false;
+          }}
+        />
+      ) : (
+        <>
+          <input
+            className="input entity-picker-input"
+            placeholder={placeholder}
+            value={q}
+            onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+            onFocus={() => setOpen(true)}
+            onBlur={() => setTimeout(() => setOpen(false), 150)}
+          />
+          {open && (
+            <div className="entity-picker-options">
+              {filtered.length === 0 ? <div className="empty-small entity-picker-empty">No matches.</div> : filtered.map((o) => (
+                <button type="button" key={o.value} className="entity-picker-option" onMouseDown={() => add(o.value)}>{o.label}</button>
+              ))}
+              {onCreateInstitution && (
+                <button type="button" className="entity-picker-option entity-picker-create" onMouseDown={() => setCreating(true)}>+ Add new institution</button>
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -7250,7 +7783,7 @@ function InstitutionSheet({
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
   onChangeStage, onChangeTier, onUpdateDeal, todos = [], todoContacts = [], taskInitial = {}, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
   materials = [], materialLinks = [], onAttachMaterial, onRemoveMaterialLink, onDownloadMaterial,
-  onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onBack, backLabel = "Back to Ecosystem", bossNotesSlot,
+  onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot,
 }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
@@ -7698,7 +8231,7 @@ function InstitutionSheet({
               <div>
                 <ActivityDescription activity={a} onSummarizeEmail={onSummarizeEmail} summarizingId={summarizingActivityId} />
                 <div className="act-date">
-                  <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} hideInstitution />
+                  <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} onOpenCalendarEvent={onOpenCalendarEvent} hideInstitution />
                   {formatDateTime(a.created_at)}
                 </div>
               </div>
@@ -8282,7 +8815,7 @@ function GlobalSearch({ institutions, contacts, deals, enablers, organizations, 
     {
       label: "Activities",
       items: activities.filter((a) => hit(a.description)).slice(0, CAP).map((a) => ({
-        key: `a-${a.id}`, title: firstLine(stripFathomMarker(a.description)),
+        key: `a-${a.id}`, title: firstLine(cleanActivityText(a.description)),
         sub: [entityName(a) || "General", formatDate(a.created_at)].join(" . "),
         go: () => onOpenEntity(a),
       })),
