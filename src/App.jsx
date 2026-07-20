@@ -1690,7 +1690,7 @@ export default function App() {
   // Each role's institutionKey is "type:id" (an institution created inline via
   // InstitutionSelect is already a real row by the time this saves). Also
   // writes the optional "connected through" and "can help us reach" edges.
-  const addPersonWithRoles = async ({ name, company, role, email, phone, linkedin, warmth, notes, roles, connectedThrough, canReach, relationship }) => {
+  const addPersonWithRoles = async ({ name, company, role, email, phone, linkedin, warmth, notes, roles, introducedBy, introNotes, canReach, relationship }) => {
     try {
       // company/role, when supplied (e.g. adding a new person from an institution
       // sheet), populate the contact's own company/role fields in the same save.
@@ -1705,17 +1705,46 @@ export default function App() {
         await persistPersonRole({ contactId: created.id, entityType, entityId, roleTitle: r.role, isPrimary: !primaryAssigned });
         primaryAssigned = true;
       }
-      const rel = relationship || "knows";
-      if (connectedThrough) {
-        await api("network_edges", "POST", { source_type: "contact", source_id: created.id, target_type: "contact", target_id: connectedThrough, relationship: rel, strength: "medium", direction: "bidirectional" }).catch(() => {});
+      // "Introduced by / reachable through": the existing person is the
+      // connector, so the directional edge runs introducer -> new person (they
+      // can introduce us onward to this new contact). Same canonical shape as
+      // the Connect form's "can introduce" and the Path Finder narration.
+      if (introducedBy) {
+        const clean = { source_type: "contact", source_id: introducedBy, target_type: "contact", target_id: created.id, relationship: "can_introduce", strength: "medium", direction: "one_way" };
+        if ((introNotes || "").trim()) clean.notes = introNotes.trim();
+        await api("network_edges", "POST", clean).catch(() => {});
       }
       if (canReach) {
         const idx = canReach.indexOf(":");
-        await api("network_edges", "POST", { source_type: "contact", source_id: created.id, target_type: canReach.slice(0, idx), target_id: canReach.slice(idx + 1), relationship: rel, strength: "medium", direction: "directed" }).catch(() => {});
+        await api("network_edges", "POST", { source_type: "contact", source_id: created.id, target_type: canReach.slice(0, idx), target_id: canReach.slice(idx + 1), relationship: relationship || "can_introduce", strength: "medium", direction: "one_way" }).catch(() => {});
       }
       const n = validRoles.length;
       await loadData(); showToast(`${created.name} added${n > 0 ? ` with ${n} role${n === 1 ? "" : "s"}` : ""}.`);
-    } catch { showToast("Error adding person"); }
+      return created;
+    } catch { showToast("Error adding person"); return null; }
+  };
+
+  // Creates a new person and, in the same step, the directional "can introduce"
+  // edge from an existing introducer to that new person. Powers the Person
+  // Sheet's "+ Someone they can introduce me to" shortcut (introducerId = the
+  // card owner) and the Connect form's inline "add new person" option. Returns
+  // the created contact so the caller can select it.
+  const addPersonIntroducedBy = async ({ introducerId, name, role, institutionKey, notes }) => {
+    try {
+      const created = await persistContact({ name });
+      if (!created) throw new Error("Could not create contact");
+      if (institutionKey) {
+        const idx = institutionKey.indexOf(":");
+        await persistPersonRole({ contactId: created.id, entityType: institutionKey.slice(0, idx), entityId: institutionKey.slice(idx + 1), roleTitle: role || "", isPrimary: true });
+      }
+      if (introducerId) {
+        const clean = { source_type: "contact", source_id: introducerId, target_type: "contact", target_id: created.id, relationship: "can_introduce", strength: "medium", direction: "one_way" };
+        if ((notes || "").trim()) clean.notes = notes.trim();
+        await api("network_edges", "POST", clean).catch(() => {});
+      }
+      await loadData(); showToast(`${created.name} added.`);
+      return created;
+    } catch { showToast("Error adding person"); return null; }
   };
 
   // INSTITUTIONS (organizations rows, plus optional linked deal/enabler)
@@ -3225,7 +3254,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onOpenNote={openNote}
             onAddRole={addPersonRole}
             onRemoveRole={removePersonRole}
-            onConnectPerson={(sourceId, targetId, relationship) => addNetworkEdge({ source_type: "contact", source_id: sourceId, target_type: "contact", target_id: targetId, relationship, strength: "medium", direction: "bidirectional" })}
+            onConnectPerson={({ sourceId, targetId, relationship, direction, notes }) => addNetworkEdge({ source_type: "contact", source_id: sourceId, target_type: "contact", target_id: targetId, relationship, strength: "medium", direction: direction || "bidirectional", notes })}
+            onAddIntroducedPerson={({ name, role, institutionKey, notes }) => addPersonIntroducedBy({ introducerId: sheetContact.id, name, role, institutionKey, notes })}
+            onCreateBareContact={(name) => addPersonIntroducedBy({ name })}
             onRemoveConnection={removeNetworkEdge}
             onGenerateSummary={generateContactSummary}
             onSaveSummary={saveContactSummary}
@@ -6499,7 +6530,111 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
+// Directional person-to-person relationship options for the Connect form,
+// phrased from the current person A's perspective toward the picked person B,
+// with both names filled in live so the label reads as a full sentence.
+// `orientation` decides which node is the stored edge source: "forward" =
+// A -> B, "reverse" = B -> A (used for "introduced by", the inverse of a
+// can_introduce). `rel` is the canonical relationship stored in network_edges,
+// `direction` its one_way/bidirectional flag.
+const PERSON_CONNECTION_OPTIONS = [
+  { id: "can_introduce", rel: "can_introduce", direction: "one_way", orientation: "forward", label: (a, b) => `${a} can introduce me to ${b}` },
+  { id: "introduced_by", rel: "can_introduce", direction: "one_way", orientation: "reverse", label: (a, b) => `${a} was introduced to me by ${b}` },
+  { id: "reports_to", rel: "reports_to", direction: "one_way", orientation: "forward", label: (a, b) => `${a} reports to ${b}` },
+  { id: "colleague", rel: "colleague", direction: "bidirectional", orientation: "forward", label: (a, b) => `${a} is a colleague of ${b}` },
+  { id: "knows", rel: "knows", direction: "bidirectional", orientation: "forward", label: (a, b) => `${a} knows ${b}` },
+  { id: "friend", rel: "friend", direction: "bidirectional", orientation: "forward", label: (a, b) => `${a} is a friend of ${b}` },
+];
+
+// Wording of an existing person-to-person edge from the perspective of the
+// person whose sheet is open (`viewingId`), with `otherName` already resolved.
+// Directional edges read differently on each side (item 2); symmetric ones
+// read the same both ways.
+function personConnectionSentence(ne, viewingId, otherName) {
+  const rel = (ne.relationship || "").toLowerCase();
+  const viewerIsSource = ne.source_id === viewingId;
+  if (rel === "can_introduce") {
+    return viewerIsSource
+      ? `Can introduce you to ${otherName}`
+      : `Reachable through ${otherName}, who can introduce you`;
+  }
+  if (rel === "reports_to") {
+    return viewerIsSource ? `Reports to ${otherName}` : `${otherName} reports to them`;
+  }
+  if (rel === "colleague") return `Colleague of ${otherName}`;
+  if (rel === "knows") return `Knows ${otherName}`;
+  if (rel === "friend") return `Friend of ${otherName}`;
+  if (rel === "works_with") return `Works with ${otherName}`;
+  if (rel === "family") return `Family of ${otherName}`;
+  const label = PERSON_CONNECTION_RELATIONSHIPS.find((r) => r.id === rel)?.label
+    || NETWORK_EDGE_RELATIONSHIPS.find((r) => r.id === rel)?.label
+    || (rel ? rel.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) : "Connected to");
+  return `${label} ${otherName}`;
+}
+
+// Searchable single-select over contacts, with an inline "+ Add new person"
+// option that creates a bare contact and selects it. Used by the Connect form.
+function ContactConnectPicker({ contacts, value, onChange, onCreateContact, placeholder = "Search people..." }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const [creating, setCreating] = useState(false);
+  const selected = contacts.find((c) => c.id === value);
+  const query = q.trim().toLowerCase();
+  const filtered = (query ? contacts.filter((c) => (c.name || "").toLowerCase().includes(query) || (c.company || "").toLowerCase().includes(query)) : contacts).slice(0, 8);
+  if (selected) {
+    return (
+      <div className="entity-picker">
+        <span className="entity-picker-chip">
+          {selected.name}
+          <button type="button" className="entity-picker-clear" onClick={() => onChange("")} title="Clear">✕</button>
+        </span>
+      </div>
+    );
+  }
+  if (creating) {
+    return (
+      <div className="entity-picker conn-create-inline">
+        <input
+          className="input" placeholder="New person's name" autoFocus
+          onKeyDown={async (e) => {
+            if (e.key === "Enter") {
+              const name = e.currentTarget.value.trim();
+              if (!name) return;
+              const created = await onCreateContact(name);
+              if (created?.id) { onChange(created.id); setCreating(false); setOpen(false); }
+            }
+            if (e.key === "Escape") setCreating(false);
+          }}
+        />
+        <button type="button" className="btn-sec" onMouseDown={() => setCreating(false)}>Cancel</button>
+      </div>
+    );
+  }
+  return (
+    <div className="entity-picker">
+      <input
+        className="input entity-picker-input"
+        placeholder={placeholder}
+        value={q}
+        onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+      />
+      {open && (
+        <div className="entity-picker-options">
+          {filtered.length === 0 ? <div className="empty-small entity-picker-empty">No matches.</div> : filtered.map((c) => (
+            <button type="button" key={c.id} className="entity-picker-option" onMouseDown={() => { onChange(c.id); setQ(""); setOpen(false); }}>{c.name}{c.company ? ` (${c.company})` : ""}</button>
+          ))}
+          {onCreateContact && (
+            <button type="button" className="entity-picker-option entity-picker-create" onMouseDown={() => setCreating(true)}>+ Add new person</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onAddIntroducedPerson, onCreateBareContact, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -6508,8 +6643,16 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
   const [savingRole, setSavingRole] = useState(false);
   const [addingConn, setAddingConn] = useState(false);
   const [connContactId, setConnContactId] = useState("");
-  const [connRel, setConnRel] = useState("knows");
+  const [connOpt, setConnOpt] = useState("can_introduce");
+  const [connNotes, setConnNotes] = useState("");
   const [savingConn, setSavingConn] = useState(false);
+  // "+ Someone they can introduce me to" streamlined shortcut (item 4).
+  const [addingIntro, setAddingIntro] = useState(false);
+  const [introName, setIntroName] = useState("");
+  const [introRole, setIntroRole] = useState("");
+  const [introInst, setIntroInst] = useState("");
+  const [introNotes, setIntroNotes] = useState("");
+  const [savingIntro, setSavingIntro] = useState(false);
   const [editingTags, setEditingTags] = useState(false);
   const filtered = activities.filter(a => filter === "all" || a.type === filter).slice().reverse();
   const warmth = WARMTH_LEVELS.find(w => w.id === (contact.warmth || "unknown"));
@@ -6583,7 +6726,8 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
     return parts.join(", ");
   };
 
-  // Connections: every network_edge touching this contact, resolved to the other end.
+  // Connections: every network_edge touching this contact, resolved to the
+  // other end and worded correctly from THIS person's perspective (item 2).
   const connectedContactIds = new Set();
   const connections = networkEdges
     .filter(ne => (ne.source_type === "contact" && ne.source_id === contact.id) || (ne.target_type === "contact" && ne.target_id === contact.id))
@@ -6591,31 +6735,50 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
       const isSource = ne.source_type === "contact" && ne.source_id === contact.id;
       const otherType = isSource ? ne.target_type : ne.source_type;
       const otherId = isSource ? ne.target_id : ne.source_id;
-      const rel = relLabel(ne.relationship);
       if (otherType === "contact") {
         const other = contacts.find(c => c.id === otherId);
         if (!other) return null;
         connectedContactIds.add(otherId);
         const detail = personDetail(other);
-        return { id: ne.id, label: other.name, detail, rel, onClick: () => onOpenPerson(other.id) };
+        const sentence = personConnectionSentence(ne, contact.id, other.name);
+        return { id: ne.id, sentence, detail, notes: ne.notes || "", onClick: () => onOpenPerson(other.id) };
       }
       const other = otherType === "deal" ? deals.find(d => d.id === otherId) : otherType === "enabler" ? enablers.find(e => e.id === otherId) : organizations.find(o => o.id === otherId);
       if (!other) return null;
       const name = otherType === "deal" ? other.company : other.name;
-      return { id: ne.id, label: name, detail: "", rel, onClick: () => onOpenInstitution(name) };
+      return { id: ne.id, sentence: `${relLabel(ne.relationship)} ${name}`, detail: "", notes: ne.notes || "", onClick: () => onOpenInstitution(name) };
     })
     .filter(Boolean);
 
   const connectableContacts = contacts.filter(c => c.id !== contact.id && !connectedContactIds.has(c.id));
-  const relOpts = optionsWithCustom(PERSON_CONNECTION_RELATIONSHIPS, customOptions, "relationship");
+  // The Connect form's directional options, with both names filled in live
+  // (item 1). Until Person B is picked, use a placeholder for the second name.
+  const connOtherName = contacts.find(c => c.id === connContactId)?.name || "the other person";
+  const connOpts = PERSON_CONNECTION_OPTIONS.map(o => ({ id: o.id, label: o.label(contact.name, connOtherName) }));
 
   const submitConn = async () => {
     if (!connContactId || !onConnectPerson || savingConn) return;
+    const opt = PERSON_CONNECTION_OPTIONS.find(o => o.id === connOpt) || PERSON_CONNECTION_OPTIONS[0];
+    // orientation "reverse" (introduced by) flips who the edge source is, so
+    // the canonical "introducer -> introducee" direction is always preserved.
+    const sourceId = opt.orientation === "reverse" ? connContactId : contact.id;
+    const targetId = opt.orientation === "reverse" ? contact.id : connContactId;
     setSavingConn(true);
     try {
-      await onConnectPerson(contact.id, connContactId, connRel);
-      setAddingConn(false); setConnContactId(""); setConnRel("knows");
+      await onConnectPerson({ sourceId, targetId, relationship: opt.rel, direction: opt.direction, notes: connNotes });
+      setAddingConn(false); setConnContactId(""); setConnOpt("can_introduce"); setConnNotes("");
     } finally { setSavingConn(false); }
+  };
+
+  const createBareContactForConn = onCreateBareContact ? async (name) => await onCreateBareContact(name) : null;
+
+  const submitIntro = async () => {
+    if (!introName.trim() || !onAddIntroducedPerson || savingIntro) return;
+    setSavingIntro(true);
+    try {
+      await onAddIntroducedPerson({ name: introName.trim(), role: introRole.trim(), institutionKey: introInst || null, notes: introNotes.trim() });
+      setAddingIntro(false); setIntroName(""); setIntroRole(""); setIntroInst(""); setIntroNotes("");
+    } finally { setSavingIntro(false); }
   };
 
   return (
@@ -6734,16 +6897,46 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
       <div className="people-section">
         <div className="ai-summary-header">
           <div className="section-label">Connections</div>
-          {!readOnly && <button onClick={() => setAddingConn(v => !v)} className="btn-copy">{addingConn ? "Cancel" : "+ Connect to Person"}</button>}
+          {!readOnly && (
+            <div className="conn-header-actions">
+              {onAddIntroducedPerson && <button onClick={() => { setAddingIntro(v => !v); setAddingConn(false); }} className="btn-primary conn-intro-btn">{addingIntro ? "Cancel" : "+ Someone they can introduce me to"}</button>}
+              <button onClick={() => { setAddingConn(v => !v); setAddingIntro(false); }} className="btn-copy">{addingConn ? "Cancel" : "+ Connect to Person"}</button>
+            </div>
+          )}
         </div>
+        {addingIntro && (
+          <div className="conn-form">
+            <div className="conn-form-hint">Add someone {contact.name} can introduce you to. This creates the person and the introduction link in one step.</div>
+            <input className="input" placeholder="Their name (required)" value={introName} onChange={e => setIntroName(e.target.value)} autoFocus onKeyDown={e => { if (e.key === "Enter") submitIntro(); }} />
+            <div className="conn-form-row">
+              <input className="input" placeholder="Role (optional, e.g. Head of Oncology)" value={introRole} onChange={e => setIntroRole(e.target.value)} />
+              <InstitutionSelect
+                options={instOptions} value={introInst} onChange={setIntroInst} optKey="key" placeholder="Institution (optional)"
+                onCreateInstitution={onCreateInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+              />
+            </div>
+            <input className="input" placeholder="Notes (optional, e.g. offered at the July 15 meeting)" value={introNotes} onChange={e => setIntroNotes(e.target.value)} />
+            <div className="conn-form-actions">
+              <button onClick={submitIntro} className="btn-primary" disabled={!introName.trim() || savingIntro}>{savingIntro ? "Adding..." : "Add and link"}</button>
+            </div>
+          </div>
+        )}
         {addingConn && (
-          <div className="quickadd-inline-row mb-sm">
-            <select className="input" value={connContactId} onChange={e => setConnContactId(e.target.value)}>
-              <option value="">Select a person...</option>
-              {connectableContacts.map(c => <option key={c.id} value={c.id}>{c.name}{c.company ? ` (${c.company})` : ""}</option>)}
-            </select>
-            <SelectWithCustom options={relOpts} value={connRel} onChange={(v) => { setConnRel(v); trackCustom("relationship", relOpts, onAddCustomOption)(v); }} />
-            <button onClick={submitConn} className="btn-primary" disabled={!connContactId || savingConn}>{savingConn ? "Connecting..." : "Connect"}</button>
+          <div className="conn-form">
+            <div className="conn-form-field">
+              <span className="conn-form-label">Who?</span>
+              <ContactConnectPicker contacts={connectableContacts} value={connContactId} onChange={setConnContactId} onCreateContact={createBareContactForConn} />
+            </div>
+            <div className="conn-form-field">
+              <span className="conn-form-label">Relationship</span>
+              <select className="input" value={connOpt} onChange={e => setConnOpt(e.target.value)}>
+                {connOpts.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+              </select>
+            </div>
+            <input className="input" placeholder="Notes (optional, e.g. offered at the July 15 meeting)" value={connNotes} onChange={e => setConnNotes(e.target.value)} />
+            <div className="conn-form-actions">
+              <button onClick={submitConn} className="btn-primary" disabled={!connContactId || savingConn}>{savingConn ? "Connecting..." : "Connect"}</button>
+            </div>
           </div>
         )}
         {connections.length === 0 ? (
@@ -6753,7 +6946,8 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
             {connections.map(c => (
               <div key={c.id} className="path-row">
                 <div onClick={c.onClick} style={{ cursor: "pointer", flex: 1 }}>
-                  <div className="path-chain">{c.rel} {c.label}{c.detail ? ` (${c.detail})` : ""}</div>
+                  <div className="path-chain">{c.sentence}{c.detail ? ` (${c.detail})` : ""}</div>
+                  {c.notes && <div className="conn-notes">{c.notes}</div>}
                 </div>
                 {!readOnly && onRemoveConnection && <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this connection?")) onRemoveConnection(c.id); }} className="person-remove" title="Remove">✕</button>}
               </div>
@@ -8266,7 +8460,8 @@ function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOpt
   const [notes, setNotes] = useState("");
   const [roles, setRoles] = useState([{ institutionKey: "", role: "", primary: true }]);
   const [showConn, setShowConn] = useState(false);
-  const [connectedThrough, setConnectedThrough] = useState("");
+  const [introducedBy, setIntroducedBy] = useState("");
+  const [introNotes, setIntroNotes] = useState("");
   const [canReach, setCanReach] = useState("");
   const [relationship, setRelationship] = useState("can_introduce");
   const [saving, setSaving] = useState(false);
@@ -8282,7 +8477,7 @@ function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOpt
     try {
       const ordered = [...roles].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0));
       const payload = ordered.map(r => ({ institutionKey: r.institutionKey, role: r.role }));
-      await onSave({ name, email, phone, linkedin, warmth, notes, roles: payload, connectedThrough: connectedThrough || null, canReach: canReach || null, relationship });
+      await onSave({ name, email, phone, linkedin, warmth, notes, roles: payload, introducedBy: introducedBy || null, introNotes: introNotes || null, canReach: canReach || null, relationship });
     } finally { setSaving(false); }
   };
 
@@ -8311,19 +8506,26 @@ function PersonForm({ institutions, contacts, customOptions = [], onAddCustomOpt
       </div>
       {showConn && (
         <div className="form-grid">
-          <div className="field"><label className="label">Connected through</label>
-            <select className="input" value={connectedThrough} onChange={e => setConnectedThrough(e.target.value)}>
+          <div className="field"><label className="label">Introduced by / reachable through</label>
+            <select className="input" value={introducedBy} onChange={e => setIntroducedBy(e.target.value)}>
               <option value="">No one specific</option>
               {contacts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
-          <div className="field"><label className="label">Can help us reach</label>
+          {introducedBy && (
+            <div className="field"><label className="label">Introduction notes</label>
+              <input className="input" value={introNotes} onChange={e => setIntroNotes(e.target.value)} placeholder="e.g. offered at the July 15 meeting" />
+            </div>
+          )}
+          <div className="field"><label className="label">Can help us reach (institution)</label>
             <InstitutionSelect
               options={instOptions} value={canReach} onChange={setCanReach} optKey="key" placeholder="Nothing specific"
               onCreateInstitution={onCreateInstitution} customOptions={customOptions} onAddCustomOption={onAddCustomOption}
             />
           </div>
-          <div className="field-full"><label className="label">Relationship</label><SelectWithCustom options={relOpts} value={relationship} onChange={(v) => { setRelationship(v); trackCustom("relationship", relOpts, onAddCustomOption)(v); }} /></div>
+          {canReach && (
+            <div className="field-full"><label className="label">Relationship to that institution</label><SelectWithCustom options={relOpts} value={relationship} onChange={(v) => { setRelationship(v); trackCustom("relationship", relOpts, onAddCustomOption)(v); }} /></div>
+          )}
         </div>
       )}
 

@@ -93,13 +93,18 @@ export const DEAL_TIERS = [
   { id: "Untiered", label: "Untiered", color: "#8A8072", bg: "#F1EADD", fg: "#8A8072" },
 ];
 
-// Relationship vocabulary for person-to-person connections created from the
-// Person Sheet "Connect to Person" picker. Field name for custom_options is
-// "relationship" (shared with the other relationship pickers).
+// Relationship vocabulary for person-to-person connections. Used as the label
+// source for rendering an existing edge; the Connect form builds its own
+// directional, name-templated option list (PERSON_CONNECTION_OPTIONS in
+// App.jsx). Field name for custom_options is "relationship" (shared with the
+// other relationship pickers).
 export const PERSON_CONNECTION_RELATIONSHIPS = [
-  { id: "knows", label: "Knows" },
   { id: "can_introduce", label: "Can Introduce" },
+  { id: "introduced_by", label: "Introduced By" },
   { id: "reports_to", label: "Reports To" },
+  { id: "colleague", label: "Colleague" },
+  { id: "knows", label: "Knows" },
+  { id: "friend", label: "Friend" },
   { id: "works_with", label: "Works With" },
   { id: "family", label: "Family" },
 ];
@@ -117,6 +122,8 @@ export const NETWORK_EDGE_RELATIONSHIPS = [
   { id: "knows", label: "Knows" },
   { id: "can_introduce", label: "Can Introduce" },
   { id: "reports_to", label: "Reports To" },
+  { id: "colleague", label: "Colleague" },
+  { id: "friend", label: "Friend" },
   { id: "subsidiary", label: "Subsidiary" },
   { id: "parent", label: "Parent" },
   { id: "board_overlap", label: "Board Overlap" },
