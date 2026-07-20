@@ -4,6 +4,9 @@ import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, FATHOM_MARKER, isFathomActivity, stripFathomMarker, calendarEventIdFromActivity, cleanActivityText, CALEVENT_MARKER_PREFIX, CALEVENT_MARKER_SUFFIX } from "./utils";
 import MapTab from "./MapTab";
+import VoiceRecorder from "./VoiceRecorder";
+import RichTextEditor, { RichTextView } from "./RichTextEditor";
+import { stripHtmlToText, isContentEmpty } from "./richtext";
 import "./styles.css";
 
 // Boss View (?view=boss) renders the full app in read-only mode: same layout and
@@ -374,9 +377,6 @@ function useIsMobile(bp = 768) {
   return m;
 }
 
-// mm:ss for the voice-note recording timer.
-const formatSeconds = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-
 // Best-effort conversion of a natural-language due-date hint ("tomorrow", "next
 // Thursday", "end of week") into an ISO date. Returns null when nothing matches,
 // in which case the caller keeps the hint text in the task title instead.
@@ -622,21 +622,28 @@ function InlineText({ value, onSave, placeholder = "Add...", className = "", mul
   );
 }
 
-// Always-visible scratchpad textarea. Saves on blur, never behind an edit button.
-function NotesEditor({ value, onSave, placeholder = "Add notes..." }) {
+// Always-visible scratchpad. Saves on blur, never behind an edit button. A
+// "mini" rich editor (Part 2e): line breaks, bold, and a bullet list, plus
+// plain-dictation voice input, kept deliberately simpler than the Notes tab.
+function NotesEditor({ value, onSave, placeholder = "Add notes...", showToast = () => {} }) {
   const readOnly = useReadOnly();
   const [draft, setDraft] = useState(value || "");
   useEffect(() => { setDraft(value || ""); }, [value]);
   const commit = () => { if ((draft || "") !== (value || "")) onSave(draft); };
-  if (readOnly) return <div className="notes-readonly">{value ? value : <span className="empty-small">No notes.</span>}</div>;
+  const onVoiceText = (text) => {
+    const clean = (text || "").trim();
+    if (!clean) return;
+    const esc = clean.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const appended = isContentEmpty(draft) ? `<div>${esc}</div>` : `${draft}<div>${esc}</div>`;
+    setDraft(appended);
+    onSave(appended);
+  };
+  if (readOnly) return isContentEmpty(value) ? <div className="notes-readonly empty-small">No notes.</div> : <RichTextView value={value} className="notes-readonly" />;
   return (
-    <textarea
-      className="input notes-editor"
-      value={draft}
-      placeholder={placeholder}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-    />
+    <div className="notes-editor-wrap">
+      <RichTextEditor value={draft} onChange={setDraft} onBlur={commit} placeholder={placeholder} mini />
+      <VoiceRecorder mode="plain" onPlainText={onVoiceText} showToast={showToast} compact title="Dictate notes" />
+    </div>
   );
 }
 
@@ -3436,7 +3443,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           </div>
           {!bossMode && (
             <div className="tasks-quickadd">
-              <TaskForm deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onCreateInstitution={createInstitutionInline} onSave={saveTodo} submitLabel="Add Task" />
+              <TaskForm deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onCreateInstitution={createInstitutionInline} onSave={saveTodo} submitLabel="Add Task" showToast={showToast} />
             </div>
           )}
           <div className="timeline-tabs mb">
@@ -3519,6 +3526,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           contacts={contacts}
           isMobile={isMobile}
           bossMode={bossMode}
+          showToast={showToast}
         />
       )}
 
@@ -4369,50 +4377,24 @@ function EventDetailPanel({
     try { await onExtractTasks(ev, outcomeDraft); } finally { setExtracting(false); }
   };
 
-  // Voice outcome (Section 7): same Web Speech API + digestVoiceNote pattern
-  // as QuickAdd's voice notes, but the clean summary lands in the Outcome
-  // textarea (and is saved right away) instead of its own save button, so
-  // "Log Outcome" afterward is the one action that fans it out to everyone.
-  const [recording, setRecording] = useState(false);
-  const [voiceProcessing, setVoiceProcessing] = useState(false);
-  const [voiceUnsupported, setVoiceUnsupported] = useState(false);
-  const transcriptRef = useRef("");
-  const recognitionRef = useRef(null);
-
-  useEffect(() => () => { if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch { /* already stopped */ } } }, []);
-
-  const startRecording = () => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { setVoiceUnsupported(true); return; }
-    setVoiceUnsupported(false);
-    transcriptRef.current = "";
-    const rec = new SR();
-    rec.lang = "en-US";
-    rec.continuous = true;
-    rec.interimResults = false;
-    rec.onresult = (e) => { for (let i = e.resultIndex; i < e.results.length; i++) { if (e.results[i].isFinal) transcriptRef.current += e.results[i][0].transcript + " "; } };
-    rec.onerror = () => { /* ignore; the user can retry */ };
-    recognitionRef.current = rec;
-    try { rec.start(); } catch { setVoiceUnsupported(true); return; }
-    setRecording(true);
+  // Voice outcome (Section 7): VoiceRecorder captures and transcribes real
+  // audio, then the digest summary lands in the Outcome textarea (and is
+  // saved right away) instead of its own save button, so "Log Outcome"
+  // afterward is the one action that fans it out to everyone.
+  const onOutcomeVoiceDigest = ({ summary }) => {
+    const clean = (summary || "").trim();
+    if (!clean) return;
+    const newText = outcomeDraft.trim() ? `${outcomeDraft.trim()}\n\n${clean}` : clean;
+    setOutcomeDraft(newText);
+    onSaveOutcomeNotes(ev.id, newText);
   };
-  const stopRecording = async () => {
-    setRecording(false);
-    if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch { /* already stopped */ } }
-    await new Promise((r) => setTimeout(r, 400));
-    const raw = transcriptRef.current.trim();
-    if (!raw) { showToast("No speech detected. Try again."); return; }
-    setVoiceProcessing(true);
-    try {
-      const result = await digestVoiceNote(raw);
-      const summary = (result.summary || raw).trim();
-      const newText = outcomeDraft.trim() ? `${outcomeDraft.trim()}\n\n${summary}` : summary;
-      setOutcomeDraft(newText);
-      onSaveOutcomeNotes(ev.id, newText);
-    } catch { showToast("Error processing voice note"); }
-    setVoiceProcessing(false);
+  const onPrepVoiceText = (text) => {
+    const clean = (text || "").trim();
+    if (!clean) return;
+    const newText = prepDraft.trim() ? `${prepDraft.trim()}\n\n${clean}` : clean;
+    setPrepDraft(newText);
+    onSavePrepNotes(ev.id, newText);
   };
-  const micTap = () => { if (recording) stopRecording(); else startRecording(); };
 
   return (
     <div className="overlay event-detail-overlay" onClick={onClose}>
@@ -4466,14 +4448,17 @@ function EventDetailPanel({
 
         <div className="event-detail-section">
           <div className="section-label">Prep Notes</div>
-          <textarea
-            className="input textarea event-detail-textarea"
-            placeholder="Notes before the meeting..."
-            value={prepDraft}
-            onChange={(e) => setPrepDraft(e.target.value)}
-            onBlur={savePrep}
-            disabled={readOnly}
-          />
+          <div className="event-detail-outcome-row">
+            <textarea
+              className="input textarea event-detail-textarea"
+              placeholder="Notes before the meeting..."
+              value={prepDraft}
+              onChange={(e) => setPrepDraft(e.target.value)}
+              onBlur={savePrep}
+              disabled={readOnly}
+            />
+            {!readOnly && <VoiceRecorder mode="plain" onPlainText={onPrepVoiceText} showToast={showToast} compact title="Dictate prep notes" />}
+          </div>
           {!readOnly && (
             <button className="btn-sec event-detail-brief-btn" disabled={!!briefGenerating} onClick={() => onGenerateBrief(ev)}>
               {briefGenerating ? "Generating..." : "Generate Prep Brief"}
@@ -4492,13 +4477,8 @@ function EventDetailPanel({
               onBlur={saveOutcomeDraft}
               disabled={readOnly}
             />
-            {!readOnly && (
-              <button type="button" className={`event-detail-mic ${recording ? "recording" : ""}`} onClick={micTap} disabled={voiceProcessing} title={recording ? "Stop recording" : "Record outcome by voice"}>
-                {voiceProcessing ? "..." : recording ? "⏹" : "🎙"}
-              </button>
-            )}
+            {!readOnly && <VoiceRecorder mode="digest" onDigest={onOutcomeVoiceDigest} showToast={showToast} title="Record outcome by voice" />}
           </div>
-          {voiceUnsupported && <div className="empty-small">Voice notes not supported in this browser. Try Chrome or Safari.</div>}
           {!readOnly && (
             <div className="event-detail-outcome-actions">
               <button className="btn-sec" disabled={extracting || !outcomeDraft.trim()} onClick={doExtractTasks}>{extracting ? "Extracting..." : "Extract tasks from outcome"}</button>
@@ -6060,7 +6040,7 @@ function flattenFolders(folders, parentId = null, depth = 0) {
 // Notes tab: a folder-tree list panel (pinned at top, then folders, then an
 // Unfiled section) beside a distraction-free editor. On mobile the two are
 // separate full-screen views (list, then editor).
-function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, onTogglePin, onLink, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, folders = [], onCreateFolder, onRenameFolder, onDeleteFolder, onMoveNote, deals, enablers, organizations, contacts, isMobile, bossMode }) {
+function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, onTogglePin, onLink, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, folders = [], onCreateFolder, onRenameFolder, onDeleteFolder, onMoveNote, deals, enablers, organizations, contacts, isMobile, bossMode, showToast }) {
   const readOnly = useReadOnly();
   const [search, setSearch] = useState("");
   const [focusNew, setFocusNew] = useState(null);
@@ -6230,6 +6210,7 @@ function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, o
             folders={folders}
             onMoveNote={onMoveNote}
             isMobile={isMobile}
+            showToast={showToast}
           />
         ) : (
           <div className="notes-editor-empty">Select a note, or create a new one to start writing.</div>
@@ -6252,7 +6233,7 @@ function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, o
 
 function NoteListItem({ note, active, onSelect, entityCtx, indent = 0, draggable = false, onDragStart }) {
   const ent = noteLinkedEntity(note, entityCtx);
-  const preview = (note.content || "").split("\n").map((l) => l.trim()).find(Boolean) || "";
+  const preview = stripHtmlToText(note.content).slice(0, 140);
   return (
     <button className={`note-list-item ${active ? "active" : ""}`} style={indent ? { paddingLeft: indent } : undefined} draggable={draggable} onDragStart={onDragStart} onClick={() => onSelect(note.id)}>
       <div className="note-item-top">
@@ -6268,7 +6249,7 @@ function NoteListItem({ note, active, onSelect, entityCtx, indent = 0, draggable
   );
 }
 
-function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate, onDelete, onTogglePin, onLink, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, onBack, entityCtx, folders = [], onMoveNote, isMobile }) {
+function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate, onDelete, onTogglePin, onLink, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, onBack, entityCtx, folders = [], onMoveNote, isMobile, showToast = () => {} }) {
   const [title, setTitle] = useState(note.title || "");
   const [content, setContent] = useState(note.content || "");
   const [saved, setSaved] = useState(false);
@@ -6308,6 +6289,15 @@ function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate
     if (debounceRef.current) { clearTimeout(debounceRef.current); debounceRef.current = null; }
     if (content !== (note.content || "")) { onUpdate(note.id, { content }); flashSaved(); }
   };
+  // Plain dictation (Part 1d): appended as a new paragraph, which the user
+  // can then format with the toolbar like anything else they typed.
+  const onVoiceText = (text) => {
+    const clean = (text || "").trim();
+    if (!clean) return;
+    const esc = clean.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const appended = isContentEmpty(content) ? `<div>${esc}</div>` : `${content}<div>${esc}</div>`;
+    onContentChange(appended);
+  };
 
   const linked = noteLinkedEntity(note, entityCtx);
   const options = buildNoteEntityOptions(entityCtx, linkQuery).slice(0, 8);
@@ -6334,15 +6324,14 @@ function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate
         />
       )}
       {readOnly ? (
-        <div className="note-content-static">{note.content || ""}</div>
+        <RichTextView value={note.content} className="note-content-static" />
       ) : (
-        <textarea
-          className="note-content-input"
-          placeholder="Start writing..."
-          value={content}
-          onChange={(e) => onContentChange(e.target.value)}
-          onBlur={flushContent}
-        />
+        <>
+          <RichTextEditor value={content} onChange={onContentChange} onBlur={flushContent} placeholder="Start writing..." />
+          <div className="note-voice-row">
+            <VoiceRecorder mode="plain" onPlainText={onVoiceText} showToast={showToast} compact title="Dictate into this note" />
+          </div>
+        </>
       )}
 
       {!readOnly && (
@@ -6697,7 +6686,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
 
       <div className="people-section">
         <div className="section-label">Notes</div>
-        <NotesEditor value={contact.notes} onSave={(v) => onUpdate({ notes: v })} />
+        <NotesEditor value={contact.notes} onSave={(v) => onUpdate({ notes: v })} showToast={showToast} />
       </div>
 
       <div className="people-section">
@@ -6924,66 +6913,15 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
   const [photoLoading, setPhotoLoading] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Voice notes (Section 9): record via the Web Speech API, then send the raw
-  // transcription (never shown) to Claude for a clean summary + action items.
-  const [recording, setRecording] = useState(false);
-  const [recSeconds, setRecSeconds] = useState(0);
-  const [voiceProcessing, setVoiceProcessing] = useState(false);
+  // Voice notes (Section 9): VoiceRecorder captures real audio and uploads it
+  // to /api/transcribe (Whisper); the transcript is then sent to Claude here
+  // for a clean summary + action items, same as before.
   const [voiceResult, setVoiceResult] = useState(null); // { summary, action_items: [{title, priority, due_date_hint, checked}] }
-  const [voiceUnsupported, setVoiceUnsupported] = useState(false);
   const [savingVoice, setSavingVoice] = useState(false);
-  const recognitionRef = useRef(null);
-  const transcriptRef = useRef("");
-  const recTimerRef = useRef(null);
 
-  useEffect(() => () => {
-    if (recTimerRef.current) clearInterval(recTimerRef.current);
-    if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch { /* already stopped */ } }
-  }, []);
-
-  const startRecording = () => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { setVoiceUnsupported(true); return; }
-    setVoiceUnsupported(false);
-    setVoiceResult(null);
-    transcriptRef.current = "";
-    const rec = new SR();
-    rec.lang = "en-US";
-    rec.continuous = true;
-    rec.interimResults = false;
-    rec.onresult = (e) => {
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) transcriptRef.current += e.results[i][0].transcript + " ";
-      }
-    };
-    rec.onerror = () => { /* ignore; the user can retry */ };
-    recognitionRef.current = rec;
-    try { rec.start(); } catch { setVoiceUnsupported(true); return; }
-    setRecording(true);
-    setRecSeconds(0);
-    recTimerRef.current = setInterval(() => setRecSeconds((s) => s + 1), 1000);
+  const onVoiceDigest = ({ summary, action_items }) => {
+    setVoiceResult({ summary, action_items: (action_items || []).map((a) => ({ ...a, checked: true })) });
   };
-
-  const stopRecording = async () => {
-    if (recTimerRef.current) { clearInterval(recTimerRef.current); recTimerRef.current = null; }
-    setRecording(false);
-    if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch { /* already stopped */ } }
-    // Give recognition a moment to flush its final results.
-    await new Promise((r) => setTimeout(r, 400));
-    const raw = transcriptRef.current.trim();
-    if (!raw) { showToast("No speech detected. Try again."); return; }
-    setVoiceProcessing(true);
-    try {
-      const result = await digestVoiceNote(raw);
-      setVoiceResult({ summary: result.summary || raw, action_items: (result.action_items || []).map((a) => ({ ...a, checked: true })) });
-    } catch {
-      showToast("Error processing voice note");
-      setVoiceResult({ summary: raw, action_items: [] });
-    }
-    setVoiceProcessing(false);
-  };
-
-  const micTap = () => { if (recording) stopRecording(); else startRecording(); };
 
   const setActionItem = (i, patch) => setVoiceResult((r) => {
     const items = r.action_items.map((a, j) => (j === i ? { ...a, ...patch } : a));
@@ -7109,7 +7047,7 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
         )}
         <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" className="photo-input-hidden" onChange={pickPhoto} />
         <button type="button" onClick={() => fileInputRef.current?.click()} className="btn-sec photo-btn" title="Upload photo of notes">📷</button>
-        <button type="button" onClick={micTap} className={`btn-sec voice-mic-btn ${recording ? "recording" : ""}`} title="Record a voice note" disabled={voiceProcessing}>{recording ? "⏹" : "🎤"}</button>
+        <VoiceRecorder mode="digest" onDigest={onVoiceDigest} showToast={showToast} title="Record a voice note" />
         <button onClick={submit} className="btn-primary" disabled={!qDesc.trim() || posting}>Add</button>
       </div>
 
@@ -7121,16 +7059,6 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
           onChange={(e) => setLinkedinUrl(e.target.value)}
         />
       )}
-
-      {recording && (
-        <div className="voice-recording-bar">
-          <span className="voice-rec-dot" />
-          <span className="voice-rec-label">Recording... {formatSeconds(recSeconds)}</span>
-          <button type="button" onClick={stopRecording} className="btn-primary voice-stop-btn">Stop</button>
-        </div>
-      )}
-      {voiceProcessing && <div className="voice-processing">Processing...</div>}
-      {voiceUnsupported && <div className="voice-unsupported">Voice notes not supported in this browser. Try Chrome or Safari.</div>}
 
       {voiceResult && (
         <div className="voice-result-card">
@@ -7441,7 +7369,7 @@ function MultiContactPicker({ options, value = [], onChange, placeholder = "Sear
 // pre-fills from context (its `contact_ids` array, falling back to a single
 // `contact_id`); when there is no onCancel it behaves as a persistent quick-add
 // and resets after each save.
-function TaskForm({ deals = [], enablers = [], organizations = [], contacts = [], customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, initial = {}, onSave, onCancel, submitLabel = "Add Task" }) {
+function TaskForm({ deals = [], enablers = [], organizations = [], contacts = [], customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, initial = {}, onSave, onCancel, submitLabel = "Add Task", showToast = () => {} }) {
   const [title, setTitle] = useState(initial.title || "");
   const [priority, setPriority] = useState(initial.priority || "medium");
   const [dueDate, setDueDate] = useState(initial.due_date || "");
@@ -7475,7 +7403,10 @@ function TaskForm({ deals = [], enablers = [], organizations = [], contacts = []
 
   return (
     <div className="task-form">
-      <input className="input task-form-title" placeholder="Task title..." value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(); }} />
+      <div className="task-form-title-row">
+        <input className="input task-form-title" placeholder="Task title..." value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(); }} />
+        <VoiceRecorder mode="plain" onPlainText={(t) => setTitle((v) => (v.trim() ? `${v.trim()} ${t}` : t))} showToast={showToast} compact title="Dictate task title" />
+      </div>
       <div className="task-form-row">
         <SelectWithCustom className="input task-form-priority" options={priorityOpts} value={priority} onChange={(v) => { setPriority(v); trackCustom("priority", priorityOpts, onAddCustomOption)(v); }} />
         <input className="input task-form-date" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
@@ -8005,12 +7936,12 @@ function InstitutionSheet({
           <div className="section-label">Description</div>
           {researching && <span className="empty-small">AI researching...</span>}
         </div>
-        <NotesEditor value={inst.description} onSave={(v) => onUpdate({ description: v })} placeholder="What does this institution do? Click Auto-fill with AI to research." />
+        <NotesEditor value={inst.description} onSave={(v) => onUpdate({ description: v })} placeholder="What does this institution do? Click Auto-fill with AI to research." showToast={showToast} />
       </div>
 
       <div className="people-section">
         <div className="section-label">Notes</div>
-        <NotesEditor value={inst.notes} onSave={(v) => onUpdate({ notes: v })} />
+        <NotesEditor value={inst.notes} onSave={(v) => onUpdate({ notes: v })} showToast={showToast} />
       </div>
 
       <div className="people-section">
