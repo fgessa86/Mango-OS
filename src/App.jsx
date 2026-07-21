@@ -1928,6 +1928,20 @@ export default function App() {
     } catch { showToast("Error removing connection"); }
   };
 
+  // Flip a directional edge's source and target in place (e.g. a "can introduce"
+  // recorded backwards): the same single edge now reads the other way on both
+  // people's cards. Patches local state directly (targeted update).
+  const swapNetworkEdge = async (id) => {
+    try {
+      const edge = networkEdges.find((ne) => ne.id === id);
+      if (!edge) return;
+      const swapped = { source_type: edge.target_type, source_id: edge.target_id, target_type: edge.source_type, target_id: edge.source_id };
+      await api("network_edges", "PATCH", swapped, `?id=eq.${id}`);
+      setNetworkEdges((prev) => prev.map((ne) => (ne.id === id ? { ...ne, ...swapped } : ne)));
+      showToast("Direction swapped");
+    } catch { showToast("Error swapping direction"); }
+  };
+
   // DEAL <-> ENABLER CONNECTIONS
   const addDealEnabler = async (form) => {
     try {
@@ -3258,6 +3272,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onAddIntroducedPerson={({ name, role, institutionKey, notes }) => addPersonIntroducedBy({ introducerId: sheetContact.id, name, role, institutionKey, notes })}
             onCreateBareContact={(name) => addPersonIntroducedBy({ name })}
             onRemoveConnection={removeNetworkEdge}
+            onSwapConnection={swapNetworkEdge}
             onGenerateSummary={generateContactSummary}
             onSaveSummary={saveContactSummary}
             summarizing={summarizing}
@@ -6530,33 +6545,37 @@ function resolveContactRoles(contact, { deals, enablers, organizations, dealCont
     .map(r => ({ ...r, institutionName: r.entity_type === "deal" ? r.institution.company : r.institution.name }));
 }
 
-// Directional person-to-person relationship options for the Connect form,
-// phrased from the current person A's perspective toward the picked person B,
-// with both names filled in live so the label reads as a full sentence.
-// `orientation` decides which node is the stored edge source: "forward" =
-// A -> B, "reverse" = B -> A (used for "introduced by", the inverse of a
-// can_introduce). `rel` is the canonical relationship stored in network_edges,
-// `direction` its one_way/bidirectional flag.
-const PERSON_CONNECTION_OPTIONS = [
-  { id: "can_introduce", rel: "can_introduce", direction: "one_way", orientation: "forward", label: (a, b) => `${a} can introduce me to ${b}` },
-  { id: "introduced_by", rel: "can_introduce", direction: "one_way", orientation: "reverse", label: (a, b) => `${a} was introduced to me by ${b}` },
-  { id: "reports_to", rel: "reports_to", direction: "one_way", orientation: "forward", label: (a, b) => `${a} reports to ${b}` },
-  { id: "colleague", rel: "colleague", direction: "bidirectional", orientation: "forward", label: (a, b) => `${a} is a colleague of ${b}` },
-  { id: "knows", rel: "knows", direction: "bidirectional", orientation: "forward", label: (a, b) => `${a} knows ${b}` },
-  { id: "friend", rel: "friend", direction: "bidirectional", orientation: "forward", label: (a, b) => `${a} is a friend of ${b}` },
+// Base person-to-person relationship types for the Connect form. `can_introduce`
+// is directional and gets an explicit two-way direction chooser (either person
+// can be the introducer, see the Connect form); `reports_to` is directional
+// (the source reports to the target); colleague/knows/friend are symmetric.
+// `rel` is the canonical relationship stored in network_edges, `direction` its
+// one_way/bidirectional flag. `preview` renders a live sentence with both names
+// filled in; for the directional-but-not-chooser types it shows what will save.
+const PERSON_CONNECTION_TYPES = [
+  { id: "can_introduce", rel: "can_introduce", direction: "one_way", directional: true, short: "Can introduce" },
+  { id: "reports_to", rel: "reports_to", direction: "one_way", short: "Reports to", preview: (a, b) => `${a} reports to ${b}` },
+  { id: "colleague", rel: "colleague", direction: "bidirectional", short: "Colleague", preview: (a, b) => `${a} is a colleague of ${b}` },
+  { id: "knows", rel: "knows", direction: "bidirectional", short: "Knows", preview: (a, b) => `${a} knows ${b}` },
+  { id: "friend", rel: "friend", direction: "bidirectional", short: "Friend", preview: (a, b) => `${a} is a friend of ${b}` },
 ];
+
+// Whether a person-to-person relationship is directional (has a meaningful
+// source/target order), so an existing edge can be flipped with the swap
+// control on the Connections list.
+const isDirectionalPersonRel = (r) => ["can_introduce", "reports_to"].includes((r || "").toLowerCase());
 
 // Wording of an existing person-to-person edge from the perspective of the
 // person whose sheet is open (`viewingId`), with `otherName` already resolved.
-// Directional edges read differently on each side (item 2); symmetric ones
-// read the same both ways.
+// Directional edges read differently on each side; symmetric ones read the
+// same both ways. It is ONE edge shown from two perspectives, never duplicated.
 function personConnectionSentence(ne, viewingId, otherName) {
   const rel = (ne.relationship || "").toLowerCase();
   const viewerIsSource = ne.source_id === viewingId;
   if (rel === "can_introduce") {
     return viewerIsSource
       ? `Can introduce you to ${otherName}`
-      : `Reachable through ${otherName}, who can introduce you`;
+      : `Reachable through ${otherName} (can introduce you)`;
   }
   if (rel === "reports_to") {
     return viewerIsSource ? `Reports to ${otherName}` : `${otherName} reports to them`;
@@ -6634,7 +6653,7 @@ function ContactConnectPicker({ contacts, value, onChange, onCreateContact, plac
   );
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onAddIntroducedPerson, onCreateBareContact, onRemoveConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onAddIntroducedPerson, onCreateBareContact, onRemoveConnection, onSwapConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -6643,7 +6662,10 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
   const [savingRole, setSavingRole] = useState(false);
   const [addingConn, setAddingConn] = useState(false);
   const [connContactId, setConnContactId] = useState("");
-  const [connOpt, setConnOpt] = useState("can_introduce");
+  const [connType, setConnType] = useState("can_introduce");
+  // For "can introduce", which way the introduction flows: "forward" = this
+  // person (A) is the introducer; "reverse" = the picked person (B) is.
+  const [connDir, setConnDir] = useState("forward");
   const [connNotes, setConnNotes] = useState("");
   const [savingConn, setSavingConn] = useState(false);
   // "+ Someone they can introduce me to" streamlined shortcut (item 4).
@@ -6741,32 +6763,35 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
         connectedContactIds.add(otherId);
         const detail = personDetail(other);
         const sentence = personConnectionSentence(ne, contact.id, other.name);
-        return { id: ne.id, sentence, detail, notes: ne.notes || "", onClick: () => onOpenPerson(other.id) };
+        return { id: ne.id, sentence, detail, notes: ne.notes || "", swappable: isDirectionalPersonRel(ne.relationship), onClick: () => onOpenPerson(other.id) };
       }
       const other = otherType === "deal" ? deals.find(d => d.id === otherId) : otherType === "enabler" ? enablers.find(e => e.id === otherId) : organizations.find(o => o.id === otherId);
       if (!other) return null;
       const name = otherType === "deal" ? other.company : other.name;
-      return { id: ne.id, sentence: `${relLabel(ne.relationship)} ${name}`, detail: "", notes: ne.notes || "", onClick: () => onOpenInstitution(name) };
+      return { id: ne.id, sentence: `${relLabel(ne.relationship)} ${name}`, detail: "", notes: ne.notes || "", swappable: false, onClick: () => onOpenInstitution(name) };
     })
     .filter(Boolean);
 
   const connectableContacts = contacts.filter(c => c.id !== contact.id && !connectedContactIds.has(c.id));
-  // The Connect form's directional options, with both names filled in live
-  // (item 1). Until Person B is picked, use a placeholder for the second name.
+  // The Connect form uses the picked person's real name live in the direction
+  // labels. Until Person B is picked, use a placeholder for the second name.
   const connOtherName = contacts.find(c => c.id === connContactId)?.name || "the other person";
-  const connOpts = PERSON_CONNECTION_OPTIONS.map(o => ({ id: o.id, label: o.label(contact.name, connOtherName) }));
+  const connTypeObj = PERSON_CONNECTION_TYPES.find(t => t.id === connType) || PERSON_CONNECTION_TYPES[0];
 
   const submitConn = async () => {
     if (!connContactId || !onConnectPerson || savingConn) return;
-    const opt = PERSON_CONNECTION_OPTIONS.find(o => o.id === connOpt) || PERSON_CONNECTION_OPTIONS[0];
-    // orientation "reverse" (introduced by) flips who the edge source is, so
-    // the canonical "introducer -> introducee" direction is always preserved.
-    const sourceId = opt.orientation === "reverse" ? connContactId : contact.id;
-    const targetId = opt.orientation === "reverse" ? contact.id : connContactId;
+    const type = connTypeObj;
+    // For "can introduce", the direction radio decides who is the introducer;
+    // the introducer is ALWAYS the edge source. Everything else keeps its own
+    // fixed direction (reports_to: source reports to target; symmetric ones
+    // source/target order is immaterial).
+    const reverse = type.id === "can_introduce" && connDir === "reverse";
+    const sourceId = reverse ? connContactId : contact.id;
+    const targetId = reverse ? contact.id : connContactId;
     setSavingConn(true);
     try {
-      await onConnectPerson({ sourceId, targetId, relationship: opt.rel, direction: opt.direction, notes: connNotes });
-      setAddingConn(false); setConnContactId(""); setConnOpt("can_introduce"); setConnNotes("");
+      await onConnectPerson({ sourceId, targetId, relationship: type.rel, direction: type.direction, notes: connNotes });
+      setAddingConn(false); setConnContactId(""); setConnType("can_introduce"); setConnDir("forward"); setConnNotes("");
     } finally { setSavingConn(false); }
   };
 
@@ -6929,10 +6954,27 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
             </div>
             <div className="conn-form-field">
               <span className="conn-form-label">Relationship</span>
-              <select className="input" value={connOpt} onChange={e => setConnOpt(e.target.value)}>
-                {connOpts.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+              <select className="input" value={connType} onChange={e => setConnType(e.target.value)}>
+                {PERSON_CONNECTION_TYPES.map(t => <option key={t.id} value={t.id}>{t.short}</option>)}
               </select>
             </div>
+            {connTypeObj.directional ? (
+              <div className="conn-form-field">
+                <span className="conn-form-label">Which way does the introduction go?</span>
+                <div className="conn-dir-choice">
+                  <label className="conn-dir-option">
+                    <input type="radio" name="conn-dir" checked={connDir === "forward"} onChange={() => setConnDir("forward")} />
+                    <span>{contact.name} can introduce me to {connOtherName}</span>
+                  </label>
+                  <label className="conn-dir-option">
+                    <input type="radio" name="conn-dir" checked={connDir === "reverse"} onChange={() => setConnDir("reverse")} />
+                    <span>{connOtherName} can introduce me to {contact.name}</span>
+                  </label>
+                </div>
+              </div>
+            ) : (
+              <div className="conn-form-preview">{connTypeObj.preview(contact.name, connOtherName)}</div>
+            )}
             <input className="input" placeholder="Notes (optional, e.g. offered at the July 15 meeting)" value={connNotes} onChange={e => setConnNotes(e.target.value)} />
             <div className="conn-form-actions">
               <button onClick={submitConn} className="btn-primary" disabled={!connContactId || savingConn}>{savingConn ? "Connecting..." : "Connect"}</button>
@@ -6949,6 +6991,7 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
                   <div className="path-chain">{c.sentence}{c.detail ? ` (${c.detail})` : ""}</div>
                   {c.notes && <div className="conn-notes">{c.notes}</div>}
                 </div>
+                {!readOnly && c.swappable && onSwapConnection && <button onClick={(e) => { e.stopPropagation(); onSwapConnection(c.id); }} className="conn-swap-btn" title="Swap direction (flip who introduces whom)">⇄</button>}
                 {!readOnly && onRemoveConnection && <button onClick={(e) => { e.stopPropagation(); if (confirm("Remove this connection?")) onRemoveConnection(c.id); }} className="person-remove" title="Remove">✕</button>}
               </div>
             ))}
