@@ -356,11 +356,30 @@ function parseFathomDueDate_(text) {
   return null;
 }
 
-// Dedup helper: does a Fathom meeting activity for this title + date already exist?
+// Dedup helper: should this recap be skipped? True when a matching activity
+// already exists, OR when the user deliberately deleted (or edited) the one we
+// logged before. The React app records that in sync_dismissals so a manual
+// delete is not undone by the next run, which would otherwise recreate the row
+// forever since this pass dedupes on the description prefix.
 function fathomActivityExists_(config, title, dateLabel) {
-  const prefix = `${FATHOM_MARKER} ${title} (${dateLabel})`.replace(/[%_]/g, " ");
-  const query = `type=eq.meeting&select=id&limit=1&description=like.${encodeURIComponent(prefix)}*`;
+  const prefix = `${FATHOM_MARKER} ${title} (${dateLabel})`;
+  if (syncDismissed_(config, prefix)) return true;
+  const query = `type=eq.meeting&select=id&limit=1&description=like.${encodeURIComponent(prefix.replace(/[%_]/g, " "))}*`;
   const res = UrlFetchApp.fetch(`${config.supabaseUrl}/rest/v1/activities?${query}`, {
+    method: "get",
+    headers: supabaseHeaders_(config),
+    muteHttpExceptions: true,
+  });
+  if (res.getResponseCode() >= 300) return false;
+  return JSON.parse(res.getContentText()).length > 0;
+}
+
+// Has the user dismissed this synced item in the app (deleted or edited the
+// activity it produced)? sync_key matches the activity's first line, which is
+// the same prefix this script builds.
+function syncDismissed_(config, syncKey) {
+  const query = `select=id&limit=1&sync_key=eq.${encodeURIComponent(syncKey)}`;
+  const res = UrlFetchApp.fetch(`${config.supabaseUrl}/rest/v1/sync_dismissals?${query}`, {
     method: "get",
     headers: supabaseHeaders_(config),
     muteHttpExceptions: true,

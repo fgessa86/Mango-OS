@@ -21,6 +21,23 @@ export const isOverdue = (d) => {
   return due < today;
 };
 
+// <input type="datetime-local"> speaks local wall-clock time with no zone, so
+// an ISO timestamp has to be shifted into local time to display and shifted
+// back out on save. Used by the activity timeline's editable date, which is
+// what makes back-dating an entry to when it actually happened possible.
+export const toDateTimeLocal = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+export const fromDateTimeLocal = (value) => {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+};
+
 // Fathom recap marker: the Apps Script prefixes auto-imported meeting recaps
 // with this token (kept in sync with FATHOM_MARKER in gmail-sync-updated.js).
 // Shared so any surface that renders a raw description can strip it (M11).
@@ -43,6 +60,11 @@ export const calendarEventIdFromActivity = (desc) => {
   const end = d.indexOf(CALEVENT_MARKER_SUFFIX);
   return end === -1 ? null : d.slice(CALEVENT_MARKER_PREFIX.length, end);
 };
+// The calendar event an activity belongs to. activities.calendar_event_id is
+// the source of truth (it survives the user editing the description text, and
+// is what re-logging an outcome matches on); the description marker is only a
+// fallback for any row written before the column was populated.
+export const activityCalendarEventId = (a) => a?.calendar_event_id || calendarEventIdFromActivity(a?.description);
 export const stripCalendarEventMarker = (desc) => {
   const d = desc || "";
   if (!d.startsWith(CALEVENT_MARKER_PREFIX)) return d;

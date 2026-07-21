@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, createContext, useContext } f
 import { api } from "./supabase";
 import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
-import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, FATHOM_MARKER, isFathomActivity, stripFathomMarker, calendarEventIdFromActivity, cleanActivityText, CALEVENT_MARKER_PREFIX, CALEVENT_MARKER_SUFFIX } from "./utils";
+import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, toDateTimeLocal, fromDateTimeLocal, FATHOM_MARKER, isFathomActivity, stripFathomMarker, activityCalendarEventId, cleanActivityText, CALEVENT_MARKER_PREFIX, CALEVENT_MARKER_SUFFIX } from "./utils";
 import MapTab from "./MapTab";
 import VoiceRecorder from "./VoiceRecorder";
 import RichTextEditor, { RichTextView } from "./RichTextEditor";
@@ -170,13 +170,249 @@ function activityPersonInfo(a, contacts) {
 function ActivityEntityPills({ activity, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, hidePerson = false, hideInstitution = false }) {
   const inst = hideInstitution ? null : activityInstitutionInfo(activity, { deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles });
   const person = hidePerson ? null : activityPersonInfo(activity, contacts);
-  const calEventId = onOpenCalendarEvent ? calendarEventIdFromActivity(activity.description) : null;
+  const calEventId = onOpenCalendarEvent ? activityCalendarEventId(activity) : null;
   if (!inst && !person && !calEventId) return null;
   return (
     <div className="act-pills">
       {person && <button type="button" className="act-pill act-pill-person" onClick={() => onOpenPerson(person.id)} title={`Open ${person.name}`}>{person.name}</button>}
       {inst && <button type="button" className={`act-pill act-pill-${inst.kind}`} onClick={() => onOpenInstitution(inst.name)} title={`Open ${inst.name}`}>{inst.name}</button>}
       {calEventId && <button type="button" className="act-pill act-pill-calendar" onClick={() => onOpenCalendarEvent(calEventId)} title="Open this meeting on the calendar">📅 Meeting</button>}
+    </div>
+  );
+}
+
+// The one inline editor behind both "edit this activity" and "+ Add to
+// timeline": description, type, date/time (freely editable, so an entry can be
+// back-dated to when it actually happened), and the linked person and
+// institution. Deliberately inline rather than a modal, matching the
+// click-to-edit pattern every other field in the app uses. Escape cancels.
+function ActivityEditForm({ initial = {}, linkOptions = {}, customOptions = [], onAddCustomOption = () => {}, onSave, onCancel, submitLabel = "Save", autoFocus = true }) {
+  const [description, setDescription] = useState(cleanActivityText(initial.description || ""));
+  const [type, setType] = useState(initial.type || "note");
+  const [when, setWhen] = useState(toDateTimeLocal(initial.created_at || new Date().toISOString()));
+  const [person, setPerson] = useState(initial.contact_id ? `contact:${initial.contact_id}` : "");
+  const [institution, setInstitution] = useState(
+    initial.deal_id ? `deal:${initial.deal_id}` :
+    initial.enabler_id ? `enabler:${initial.enabler_id}` :
+    initial.organization_id ? `organization:${initial.organization_id}` : ""
+  );
+  const [saving, setSaving] = useState(false);
+  const textRef = useRef(null);
+  useEffect(() => { if (autoFocus) textRef.current?.focus(); }, [autoFocus]);
+
+  const typeOptions = optionsWithCustom(ACT_TYPES.map((t) => ({ id: t.id, label: t.label })), customOptions, "activity_type");
+
+  const submit = async () => {
+    const text = description.trim();
+    if (!text || saving) return;
+    const [instKind, instId] = institution ? institution.split(":") : [null, null];
+    setSaving(true);
+    try {
+      await onSave({
+        description: text,
+        type,
+        created_at: fromDateTimeLocal(when) || new Date().toISOString(),
+        contact_id: person ? person.split(":")[1] : null,
+        deal_id: instKind === "deal" ? instId : null,
+        enabler_id: instKind === "enabler" ? instId : null,
+        organization_id: instKind === "organization" ? instId : null,
+      });
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="act-edit" onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); onCancel(); } }}>
+      <textarea
+        ref={textRef}
+        className="input act-edit-text"
+        rows={3}
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        placeholder="What happened?"
+      />
+      <div className="act-edit-row">
+        <label className="act-edit-field">
+          <span className="act-edit-label">Type</span>
+          <SelectWithCustom
+            options={typeOptions}
+            value={type}
+            onChange={(v) => { setType(v); trackCustom("activity_type", typeOptions, onAddCustomOption)(v); }}
+            className="input act-edit-select"
+          />
+        </label>
+        <label className="act-edit-field">
+          <span className="act-edit-label">Date and time</span>
+          <input type="datetime-local" className="input act-edit-select" value={when} onChange={(e) => setWhen(e.target.value)} />
+        </label>
+      </div>
+      <div className="act-edit-row">
+        <div className="act-edit-field">
+          <span className="act-edit-label">Person</span>
+          <EntityPicker placeholder="Link a person..." options={linkOptions.people || []} value={person} onChange={setPerson} />
+        </div>
+        <div className="act-edit-field">
+          <span className="act-edit-label">Institution</span>
+          <EntityPicker placeholder="Link an institution..." options={linkOptions.institutions || []} value={institution} onChange={setInstitution} />
+        </div>
+      </div>
+      <div className="act-edit-actions">
+        <button type="button" className="btn-primary" disabled={saving || !description.trim()} onClick={submit}>{saving ? "Saving..." : submitLabel}</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+        <span className="act-edit-hint">Esc to cancel</span>
+      </div>
+    </div>
+  );
+}
+
+// The three-dot Edit / Delete menu on an activity. Shared by the full
+// timeline row and Home's compact recent-activity card so both behave
+// identically. Hidden entirely in Boss View (read-only).
+function ActivityRowActions({ activity, onEdit, onDeleteActivity }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const remove = async () => {
+    if (deleting) return;
+    if (!window.confirm("Delete this activity? This cannot be undone.")) return;
+    setDeleting(true);
+    setMenuOpen(false);
+    try { await onDeleteActivity(activity); } finally { setDeleting(false); }
+  };
+  return (
+    <div className="act-row-actions" onClick={(e) => e.stopPropagation()}>
+      <button type="button" className="act-menu-btn" onClick={() => setMenuOpen((v) => !v)} title="Activity actions" aria-label="Activity actions">⋯</button>
+      {menuOpen && (
+        <>
+          <div className="act-menu-backdrop" onClick={() => setMenuOpen(false)} />
+          <div className="act-menu">
+            <button type="button" onClick={() => { setMenuOpen(false); onEdit(); }}>Edit</button>
+            <button type="button" className="act-menu-danger" onClick={remove} disabled={deleting}>{deleting ? "Deleting..." : "Delete"}</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// One activity in any timeline (Home recent activity, Institution Sheet,
+// Person Sheet). Read mode shows the glyph, description, pills and timestamp;
+// the hover menu swaps it for ActivityEditForm in place. Works the same for
+// every activity regardless of origin (manual, Gmail sync, calendar outcome,
+// voice note), since edit and delete just act on the row.
+function ActivityRow({
+  activity, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onSummarizeEmail, summarizingId,
+  onUpdateActivity, onDeleteActivity, linkOptions = {}, customOptions = [], onAddCustomOption = () => {},
+  deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles,
+  hidePerson = false, hideInstitution = false, className = "timeline-item",
+}) {
+  const readOnly = useReadOnly();
+  const [editing, setEditing] = useState(false);
+  const canEdit = !readOnly && !!onUpdateActivity;
+
+  const save = async (patch) => {
+    const ok = await onUpdateActivity(activity, patch);
+    if (ok !== false) setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className={`${className} act-row-editing`}>
+        <ActivityEditForm
+          initial={activity}
+          linkOptions={linkOptions}
+          customOptions={customOptions}
+          onAddCustomOption={onAddCustomOption}
+          onSave={save}
+          onCancel={() => setEditing(false)}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className={`${className} act-row`}>
+      <ActivityGlyph type={activity.type} />
+      <div className="act-row-main">
+        <ActivityDescription activity={activity} onSummarizeEmail={onSummarizeEmail} summarizingId={summarizingId} />
+        <div className="act-date">
+          <ActivityEntityPills
+            activity={activity} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts}
+            dealContacts={dealContacts} enablerContacts={enablerContacts} networkEdges={networkEdges} contactRoles={contactRoles}
+            onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} onOpenCalendarEvent={onOpenCalendarEvent}
+            hidePerson={hidePerson} hideInstitution={hideInstitution}
+          />
+          {formatDateTime(activity.created_at)}
+        </div>
+      </div>
+      {canEdit && <ActivityRowActions activity={activity} onEdit={() => setEditing(true)} onDeleteActivity={onDeleteActivity} />}
+    </div>
+  );
+}
+
+// Home's compact recent-activity card: one line of description plus pills,
+// clickable through to the entity, with the same Edit / Delete menu and the
+// same inline editor as a full timeline row.
+function HomeActivityRow({ activity, entityName, onOpenEntity, onUpdateActivity, onDeleteActivity, linkOptions, customOptions, onAddCustomOption, pillProps }) {
+  const readOnly = useReadOnly();
+  const [editing, setEditing] = useState(false);
+  const canEdit = !readOnly && !!onUpdateActivity;
+
+  if (editing) {
+    return (
+      <div className="home-card home-act act-row-editing">
+        <ActivityEditForm
+          initial={activity}
+          linkOptions={linkOptions}
+          customOptions={customOptions}
+          onAddCustomOption={onAddCustomOption}
+          onSave={async (patch) => { const ok = await onUpdateActivity(activity, patch); if (ok !== false) setEditing(false); }}
+          onCancel={() => setEditing(false)}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="home-card home-act" onClick={() => onOpenEntity(activity)}>
+      <ActivityGlyph type={activity.type} />
+      <div className="home-act-main">
+        <div className="home-act-desc">
+          {isFathomActivity(activity) && <span className="fathom-badge sm" title="Auto-imported from Fathom">Fathom</span>}
+          {firstLine(cleanActivityText(activity.description))}
+        </div>
+        <div className="home-act-meta" onClick={(e) => e.stopPropagation()}>
+          {entityName(activity) ? <ActivityEntityPills activity={activity} {...pillProps} /> : <span>General</span>}
+          <span>{formatDateTime(activity.created_at)}</span>
+        </div>
+      </div>
+      {canEdit && <ActivityRowActions activity={activity} onEdit={() => setEditing(true)} onDeleteActivity={onDeleteActivity} />}
+    </div>
+  );
+}
+
+// "+ Add to timeline" (Section 3): a freeform entry logged straight onto a
+// timeline, separate from the structured Quick Add. The date defaults to now
+// but is editable, which is the point: it exists for writing up something that
+// happened last week with its real date so it sorts correctly.
+function TimelineAddEntry({ initial, linkOptions, customOptions, onAddCustomOption, onSave }) {
+  const readOnly = useReadOnly();
+  const [open, setOpen] = useState(false);
+  if (readOnly) return null;
+  if (!open) {
+    return (
+      <button type="button" className="link-btn timeline-add-btn" onClick={() => setOpen(true)}>+ Add to timeline</button>
+    );
+  }
+  return (
+    <div className="timeline-add">
+      <ActivityEditForm
+        initial={{ ...initial, description: "", created_at: new Date().toISOString() }}
+        linkOptions={linkOptions}
+        customOptions={customOptions}
+        onAddCustomOption={onAddCustomOption}
+        submitLabel="Add entry"
+        onSave={async (fields) => { const ok = await onSave(fields); if (ok !== false) setOpen(false); }}
+        onCancel={() => setOpen(false)}
+      />
     </div>
   );
 }
@@ -1069,6 +1305,8 @@ export default function App() {
   const [contactRoles, setContactRoles] = useState([]);
   const [summarizing, setSummarizing] = useState(false);
   const [summarizingActivityId, setSummarizingActivityId] = useState(null);
+  // In-flight guard for an inline activity edit, so a double-submit saves once.
+  const [savingActivityId, setSavingActivityId] = useState(null);
   const [researchingInst, setResearchingInst] = useState(null);
   // Institution keys we've already auto-researched this session, so opening a
   // sheet with an empty description does not re-hit the API on every render.
@@ -2683,31 +2921,64 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // back to the calendar event (Section 9) without a new activities column.
   const buildOutcomeDescription = (ev, text) => `${CALEVENT_MARKER_PREFIX}${ev.id}${CALEVENT_MARKER_SUFFIX}Meeting:\n${ev.title || "Meeting"}\n\nOutcome:\n${text.trim()}`;
 
-  // "Log Outcome" (Section 6): creates one activity per tagged person (with
-  // their resolved primary institution, same rule addActivity already uses),
-  // plus one direct activity for any tagged institution not already reached
-  // through a tagged person. This is what dedupes the same meeting rather than
-  // writing one row per (person x institution) pair.
+  // Identity of one outcome activity: the person it is logged against (or
+  // none, for a direct institution row) plus the institution FK it carries.
+  // Re-logging matches existing rows on this key so an edited outcome updates
+  // the same rows instead of creating a second set.
+  const outcomeRowKey = (r) => `${r.contact_id || "-"}|${r.deal_id || "-"}|${r.enabler_id || "-"}|${r.organization_id || "-"}`;
+
+  // "Log Outcome" (Section 6): one activity per tagged person (with their
+  // resolved primary institution, same rule addActivity already uses), plus
+  // one direct activity for any tagged institution not already reached through
+  // a tagged person. This is what dedupes the same meeting rather than writing
+  // one row per (person x institution) pair.
+  //
+  // Re-logging an EDITED outcome updates in place (Section 1): every row this
+  // event has already produced is found by activities.calendar_event_id and
+  // reconciled against the currently tagged entities. Rows that still apply
+  // are PATCHed to the new text, newly tagged entities get a new row, and rows
+  // for entities that have since been untagged are removed. Nothing is ever
+  // duplicated, so the user can keep editing the outcome and re-logging.
   const logEventOutcome = async (ev, outcomeText) => {
     const text = (outcomeText || "").trim();
     if (!text) { showToast("Outcome is empty"); return null; }
     const description = buildOutcomeDescription(ev, text);
-    // Guard against a double-click (or an accidental re-submit) creating a
-    // second round of activities for the same outcome. These activities are
-    // dated to the meeting's own start time rather than "now" (Section 6), so
-    // an exact-content match is the dedupe key rather than addActivity's usual
-    // 2-minute recency window.
-    if (activities.some((a) => a.description === description)) {
-      showToast("This outcome is already logged");
-      return null;
+    const existingRows = activities.filter((a) => activityCalendarEventId(a) === ev.id);
+    // Nothing changed at all (same text, same tags): treat a repeat click as a
+    // no-op rather than a pointless round of PATCHes.
+    if (existingRows.length && existingRows.every((a) => a.description === description)) {
+      const stillTagged = eventContacts.filter((r) => r.calendar_event_id === ev.id).length + eventInstitutions.filter((r) => r.calendar_event_id === ev.id).length;
+      if (stillTagged && existingRows.length >= 1) { showToast("This outcome is already logged"); return null; }
     }
     const taggedContacts = eventContacts.filter((r) => r.calendar_event_id === ev.id).map((r) => contacts.find((c) => c.id === r.contact_id)).filter(Boolean);
     const taggedInstRows = eventInstitutions.filter((r) => r.calendar_event_id === ev.id);
     const createdAt = ev.start_time || new Date().toISOString();
     const now = new Date().toISOString();
     const newRows = [];
+    const updatedIds = [];
     const touchedDealIds = new Set(), touchedEnablerIds = new Set(), touchedContactIds = new Set();
     const coveredInstKeys = new Set();
+    // Existing rows for this event, indexed by identity so each desired row
+    // either updates its match or inserts fresh.
+    const existingByKey = new Map(existingRows.map((a) => [outcomeRowKey(a), a]));
+    const keepKeys = new Set();
+
+    // Writes one desired outcome row: PATCH when this event already produced
+    // a row for the same person/institution, POST otherwise.
+    const upsertOutcomeRow = async (fields) => {
+      const key = outcomeRowKey(fields);
+      keepKeys.add(key);
+      const existing = existingByKey.get(key);
+      if (existing) {
+        if (existing.description === description && existing.created_at === createdAt) return;
+        await api("activities", "PATCH", { description, created_at: createdAt }, `?id=eq.${existing.id}`);
+        updatedIds.push(existing.id);
+        return;
+      }
+      const rows = await api("activities", "POST", { type: "meeting", description, created_at: createdAt, calendar_event_id: ev.id, ...fields });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) newRows.push(row);
+    };
 
     try {
       for (const contact of taggedContacts) {
@@ -2717,9 +2988,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         if (primary?.entity_type === "deal") { fk.deal_id = primary.entity_id; coveredInstKeys.add(`deal:${primary.entity_id}`); }
         else if (primary?.entity_type === "enabler") { fk.enabler_id = primary.entity_id; coveredInstKeys.add(`enabler:${primary.entity_id}`); }
         else if (primary?.entity_type === "organization") { fk.organization_id = primary.entity_id; coveredInstKeys.add(`organization:${primary.entity_id}`); }
-        const rows = await api("activities", "POST", { type: "meeting", description, contact_id: contact.id, created_at: createdAt, ...fk });
-        const row = Array.isArray(rows) ? rows[0] : rows;
-        if (row) newRows.push(row);
+        await upsertOutcomeRow({ contact_id: contact.id, ...fk });
         if (fk.deal_id) touchedDealIds.add(fk.deal_id);
         if (fk.enabler_id) touchedEnablerIds.add(fk.enabler_id);
         touchedContactIds.add(contact.id);
@@ -2728,14 +2997,24 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         const key = r.deal_id ? `deal:${r.deal_id}` : r.enabler_id ? `enabler:${r.enabler_id}` : r.organization_id ? `organization:${r.organization_id}` : null;
         if (!key || coveredInstKeys.has(key)) continue;
         const fk = { deal_id: r.deal_id || null, enabler_id: r.enabler_id || null, organization_id: r.organization_id || null };
-        const rows = await api("activities", "POST", { type: "meeting", description, created_at: createdAt, ...fk });
-        const row = Array.isArray(rows) ? rows[0] : rows;
-        if (row) newRows.push(row);
+        await upsertOutcomeRow({ contact_id: null, ...fk });
         if (fk.deal_id) touchedDealIds.add(fk.deal_id);
         if (fk.enabler_id) touchedEnablerIds.add(fk.enabler_id);
       }
 
-      if (newRows.length) setActivities((prev) => [...newRows, ...prev]);
+      // Entities untagged since the last log: drop their now-orphaned rows so
+      // the outcome does not linger on a timeline it no longer belongs to.
+      const staleRows = existingRows.filter((a) => !keepKeys.has(outcomeRowKey(a)));
+      for (const a of staleRows) await api("activities", "DELETE", null, `?id=eq.${a.id}`);
+      const staleIds = new Set(staleRows.map((a) => a.id));
+
+      if (newRows.length || updatedIds.length || staleIds.size) {
+        const updated = new Set(updatedIds);
+        setActivities((prev) => [
+          ...newRows,
+          ...prev.filter((a) => !staleIds.has(a.id)).map((a) => (updated.has(a.id) ? { ...a, description, created_at: createdAt } : a)),
+        ]);
+      }
       if (touchedDealIds.size) { await Promise.all([...touchedDealIds].map((id) => api("deals", "PATCH", { last_activity_at: now }, `?id=eq.${id}`))); setDeals((prev) => prev.map((d) => (touchedDealIds.has(d.id) ? { ...d, last_activity_at: now } : d))); }
       if (touchedEnablerIds.size) { await Promise.all([...touchedEnablerIds].map((id) => api("enablers", "PATCH", { last_activity_at: now }, `?id=eq.${id}`))); setEnablers((prev) => prev.map((e) => (touchedEnablerIds.has(e.id) ? { ...e, last_activity_at: now } : e))); }
       if (touchedContactIds.size) { await Promise.all([...touchedContactIds].map((id) => api("contacts", "PATCH", { last_contacted_at: now }, `?id=eq.${id}`))); setContacts((prev) => prev.map((c) => (touchedContactIds.has(c.id) ? { ...c, last_contacted_at: now } : c))); }
@@ -2743,8 +3022,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       await saveEventOutcomeNotes(ev.id, text);
       const peopleCount = taggedContacts.length;
       const instCount = new Set(taggedInstRows.map((r) => (r.deal_id ? `deal:${r.deal_id}` : r.enabler_id ? `enabler:${r.enabler_id}` : r.organization_id ? `organization:${r.organization_id}` : null)).filter(Boolean)).size;
-      showToast(`Outcome logged to ${peopleCount} ${peopleCount === 1 ? "person" : "people"} and ${instCount} ${instCount === 1 ? "institution" : "institutions"}.`);
-      return { peopleCount, instCount };
+      // An edit says "updated" rather than "logged", so it is obvious the
+      // existing entries changed instead of a second set being created.
+      const verb = existingRows.length ? "updated on" : "logged to";
+      showToast(`Outcome ${verb} ${peopleCount} ${peopleCount === 1 ? "person" : "people"} and ${instCount} ${instCount === 1 ? "institution" : "institutions"}.`);
+      return { peopleCount, instCount, updated: existingRows.length > 0 };
     } catch { showToast("Error logging outcome"); return null; }
   };
 
@@ -2945,6 +3227,80 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       if (fkEnabler) setEnablers((prev) => prev.map((e) => (e.id === fkEnabler ? { ...e, last_activity_at: now } : e)));
       setModal(null); showToast("Activity logged");
     } catch { showToast("Error logging activity"); }
+  };
+
+  // A synced activity carries a stable key the Gmail Apps Script dedupes on.
+  // Right now only Fathom recaps dedupe by content (the generic email pass
+  // dedupes by Gmail label, so a deleted email activity is never re-added);
+  // returns null for anything the sync would not recreate.
+  const syncDismissalKey = (activity) => {
+    if (!isFathomActivity(activity)) return null;
+    // Mirrors fathomActivityExists_ in gmail-sync-updated.js: the marker plus
+    // the "Title (Mon d)" first line is the prefix it searches for.
+    const first = firstLine(activity.description || "");
+    return first ? { source: "fathom", sync_key: first } : null;
+  };
+
+  // Records that the user deliberately removed a synced item, so the next sync
+  // run does not helpfully recreate it (Section 2).
+  const recordSyncDismissal = async (activity) => {
+    const key = syncDismissalKey(activity);
+    if (!key) return;
+    // A repeat dismissal is a no-op: sync_key is unique, so a 409 just means
+    // it was already recorded.
+    await api("sync_dismissals", "POST", key).catch((e) => { if (e?.status !== 409) throw e; });
+  };
+
+  // Inline timeline edit (Section 2): PATCH the row and patch local state, per
+  // the targeted-updates convention. A description the user edits is written
+  // back with whatever marker prefix the original carried (Fathom recap or
+  // calendar-event outcome) still intact, since ActivityEditForm shows and
+  // takes the clean text but those markers are how the row stays linked.
+  const updateActivity = async (activity, patch) => {
+    if (savingActivityId) return false;
+    setSavingActivityId(activity.id);
+    try {
+      const original = activity.description || "";
+      const calId = activityCalendarEventId(activity);
+      let description = patch.description;
+      if (original.startsWith(FATHOM_MARKER)) description = `${FATHOM_MARKER} ${description}`;
+      else if (original.startsWith(CALEVENT_MARKER_PREFIX) && calId) description = `${CALEVENT_MARKER_PREFIX}${calId}${CALEVENT_MARKER_SUFFIX}${description}`;
+      const body = { ...patch, description };
+      await api("activities", "PATCH", body, `?id=eq.${activity.id}`);
+      setActivities((prev) => prev.map((a) => (a.id === activity.id ? { ...a, ...body } : a)));
+      // A manual edit of a synced row is fine, but the sync dedupes Fathom
+      // recaps by the description prefix the user may have just changed. Record
+      // the ORIGINAL key so the next run recognizes it as already handled.
+      if (isFathomActivity(activity) && description !== original) await recordSyncDismissal(activity).catch(() => {});
+      savedToast();
+      return true;
+    } catch { showToast("Error saving activity"); return false; }
+    finally { setSavingActivityId(null); }
+  };
+
+  const deleteActivity = async (activity) => {
+    try {
+      await recordSyncDismissal(activity).catch(() => {});
+      await api("activities", "DELETE", null, `?id=eq.${activity.id}`);
+      setActivities((prev) => prev.filter((a) => a.id !== activity.id));
+      showToast("Activity deleted");
+      return true;
+    } catch { showToast("Error deleting activity"); return false; }
+  };
+
+  // "+ Add to timeline" (Section 3): a freeform, back-datable entry. Goes
+  // through addActivity so it picks up the same institution resolution,
+  // last_activity_at bumps and duplicate guard as every other logged activity.
+  const addTimelineEntry = async (fields) => {
+    const { deal_id, enabler_id, organization_id, contact_id, ...rest } = fields;
+    await addActivity(deal_id, contact_id, rest, enabler_id, organization_id);
+    return true;
+  };
+
+  // Option lists for the activity editor's person and institution pickers.
+  const activityLinkOptions = {
+    people: contacts.map((c) => ({ value: `contact:${c.id}`, label: c.name })).filter((o) => o.label),
+    institutions: dedupeInstitutionOptions({ deals, enablers, organizations, prefer: ["deal", "enabler", "organization"] }),
   };
 
   // On-demand AI summary for an email activity's body_snippet (the Gmail sync
@@ -3157,6 +3513,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         return (
           <InstitutionSheet
             institution={inst}
+            onUpdateActivity={updateActivity}
+            onDeleteActivity={deleteActivity}
+            onAddTimelineEntry={addTimelineEntry}
+            activityLinkOptions={activityLinkOptions}
             summaryEntity={inst.org || inst.deal || inst.enabler}
             activities={instActivities}
             allActivities={activities}
@@ -3238,6 +3598,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         return sheetContact ? (
           <PersonSheet
             contact={sheetContact}
+            onUpdateActivity={updateActivity}
+            onDeleteActivity={deleteActivity}
+            onAddTimelineEntry={addTimelineEntry}
+            activityLinkOptions={activityLinkOptions}
             activities={activities.filter((a) => a.contact_id === sheetContact.id)}
             deals={deals}
             enablers={enablers}
@@ -3293,6 +3657,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           unreadComments={unreadBossComments}
           onMarkRead={markCommentRead}
           commentTargetName={commentTargetName}
+          onUpdateActivity={updateActivity}
+          onDeleteActivity={deleteActivity}
+          activityLinkOptions={activityLinkOptions}
+          customOptions={customOptions}
+          onAddCustomOption={addCustomOption}
           meetings={homeMeetings}
           eventEntityRow={eventEntityRow}
           onPrepBriefEvent={prepBriefForEvent}
@@ -3781,7 +4150,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, onPrepBriefEvent, onOpenCalendarEvent, onOpenCalendar, urgentTasks, onToggleTodo, onNavigateTask, recentActivities, deals, enablers, organizations, contacts, todoContacts = [], dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, onPrepBriefEvent, onOpenCalendarEvent, onOpenCalendar, urgentTasks, onToggleTodo, onNavigateTask, recentActivities, onUpdateActivity, onDeleteActivity, activityLinkOptions = {}, customOptions = [], onAddCustomOption = () => {}, deals, enablers, organizations, contacts, todoContacts = [], dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
@@ -3947,21 +4316,18 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
         ) : (
           <div className="home-list">
             {recentActivities.map((a) => (
-              <div key={a.id} className="home-card home-act" onClick={() => onOpenEntity(a)}>
-                <ActivityGlyph type={a.type} />
-                <div className="home-act-main">
-                  <div className="home-act-desc">
-                    {isFathomActivity(a) && <span className="fathom-badge sm" title="Auto-imported from Fathom">Fathom</span>}
-                    {firstLine(cleanActivityText(a.description))}
-                  </div>
-                  <div className="home-act-meta" onClick={(e) => e.stopPropagation()}>
-                    {entityName(a) ? (
-                      <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} dealContacts={dealContacts} enablerContacts={enablerContacts} networkEdges={networkEdges} contactRoles={contactRoles} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} onOpenCalendarEvent={onOpenCalendarEvent} />
-                    ) : <span>General</span>}
-                    <span>{formatDateTime(a.created_at)}</span>
-                  </div>
-                </div>
-              </div>
+              <HomeActivityRow
+                key={a.id}
+                activity={a}
+                entityName={entityName}
+                onOpenEntity={onOpenEntity}
+                onUpdateActivity={onUpdateActivity}
+                onDeleteActivity={onDeleteActivity}
+                linkOptions={activityLinkOptions}
+                customOptions={customOptions}
+                onAddCustomOption={onAddCustomOption}
+                pillProps={{ deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, onOpenCalendarEvent }}
+              />
             ))}
           </div>
         )}
@@ -4192,7 +4558,7 @@ const startOfWeek = (d) => { const x = startOfDay(d); const day = (x.getDay() + 
 function eventIndicators(ev, { eventInstitutions = [], eventContacts = [], activities = [] }) {
   const tagged = eventInstitutions.some((r) => r.calendar_event_id === ev.id) || eventContacts.some((r) => r.calendar_event_id === ev.id);
   const hasNotes = !!(ev.prep_notes || "").trim() || !!(ev.outcome_notes || "").trim();
-  const outcomeLogged = activities.some((a) => calendarEventIdFromActivity(a.description) === ev.id);
+  const outcomeLogged = activities.some((a) => activityCalendarEventId(a) === ev.id);
   return { tagged, hasNotes, outcomeLogged };
 }
 
@@ -6653,7 +7019,7 @@ function ContactConnectPicker({ contacts, value, onChange, onCreateContact, plac
   );
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onAddIntroducedPerson, onCreateBareContact, onRemoveConnection, onSwapConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onUpdateActivity, onDeleteActivity, onAddTimelineEntry, activityLinkOptions = {}, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onAddIntroducedPerson, onCreateBareContact, onRemoveConnection, onSwapConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -7030,19 +7396,32 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
             <button key={t.id} onClick={() => setFilter(t.id)} className={`tag-btn ${filter === t.id ? "active" : ""}`}>{t.label}</button>
           ))}
         </div>
+        <TimelineAddEntry
+          initial={{
+            contact_id: contact.id,
+            deal_id: primaryInstitution?.dealId || null,
+            enabler_id: primaryInstitution?.enablerId || null,
+            organization_id: primaryInstitution?.organizationId || null,
+          }}
+          linkOptions={activityLinkOptions}
+          customOptions={customOptions}
+          onAddCustomOption={onAddCustomOption}
+          onSave={onAddTimelineEntry}
+        />
         <div className="timeline-list">
           {filtered.length === 0 && <div className="empty-small">No activities yet</div>}
           {filtered.map(a => (
-            <div key={a.id} className="timeline-item">
-              <ActivityGlyph type={a.type} />
-              <div>
-                <ActivityDescription activity={a} onSummarizeEmail={onSummarizeEmail} summarizingId={summarizingActivityId} />
-                <div className="act-date">
-                  <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} dealContacts={dealContacts} enablerContacts={enablerContacts} networkEdges={networkEdges} contactRoles={contactRoles} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} onOpenCalendarEvent={onOpenCalendarEvent} hidePerson />
-                  {formatDateTime(a.created_at)}
-                </div>
-              </div>
-            </div>
+            <ActivityRow
+              key={a.id}
+              activity={a}
+              deals={deals} enablers={enablers} organizations={organizations} contacts={contacts}
+              dealContacts={dealContacts} enablerContacts={enablerContacts} networkEdges={networkEdges} contactRoles={contactRoles}
+              onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} onOpenCalendarEvent={onOpenCalendarEvent}
+              onSummarizeEmail={onSummarizeEmail} summarizingId={summarizingActivityId}
+              onUpdateActivity={onUpdateActivity} onDeleteActivity={onDeleteActivity}
+              linkOptions={activityLinkOptions} customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+              hidePerson
+            />
           ))}
         </div>
       </div>
@@ -7947,7 +8326,7 @@ function institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, 
 function InstitutionSheet({
   institution: inst, summaryEntity, activities, allActivities, contacts, deals, enablers, organizations,
   dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution,
-  onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, onSummarizeEmail, summarizingActivityId, linkedNotes = [], onOpenNote, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
+  onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, onSummarizeEmail, summarizingActivityId, onUpdateActivity, onDeleteActivity, onAddTimelineEntry, activityLinkOptions = {}, linkedNotes = [], onOpenNote, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
   onChangeStage, onChangeTier, onUpdateDeal, todos = [], todoContacts = [], taskInitial = {}, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
   materials = [], materialLinks = [], onAttachMaterial, onRemoveMaterialLink, onDownloadMaterial,
@@ -8391,19 +8770,26 @@ function InstitutionSheet({
         <div className="timeline-tabs">
           {TIMELINE_TABS.map(tb => <button key={tb.id} onClick={() => setFilter(tb.id)} className={`tag-btn ${filter === tb.id ? "active" : ""}`}>{tb.label}</button>)}
         </div>
+        <TimelineAddEntry
+          initial={{ deal_id: inst.dealId || null, enabler_id: inst.enablerId || null, organization_id: inst.orgId || null, contact_id: null }}
+          linkOptions={activityLinkOptions}
+          customOptions={customOptions}
+          onAddCustomOption={onAddCustomOption}
+          onSave={onAddTimelineEntry}
+        />
         <div className="timeline-list">
           {filtered.length === 0 && <div className="empty-small">No activities yet</div>}
           {filtered.map(a => (
-            <div key={a.id} className="timeline-item">
-              <ActivityGlyph type={a.type} />
-              <div>
-                <ActivityDescription activity={a} onSummarizeEmail={onSummarizeEmail} summarizingId={summarizingActivityId} />
-                <div className="act-date">
-                  <ActivityEntityPills activity={a} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} onOpenCalendarEvent={onOpenCalendarEvent} hideInstitution />
-                  {formatDateTime(a.created_at)}
-                </div>
-              </div>
-            </div>
+            <ActivityRow
+              key={a.id}
+              activity={a}
+              deals={deals} enablers={enablers} organizations={organizations} contacts={contacts}
+              onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} onOpenCalendarEvent={onOpenCalendarEvent}
+              onSummarizeEmail={onSummarizeEmail} summarizingId={summarizingActivityId}
+              onUpdateActivity={onUpdateActivity} onDeleteActivity={onDeleteActivity}
+              linkOptions={activityLinkOptions} customOptions={customOptions} onAddCustomOption={onAddCustomOption}
+              hideInstitution
+            />
           ))}
         </div>
       </div>
