@@ -1506,6 +1506,20 @@ select.inline-select, .inline-select-wrap .input { width: auto; min-width: 130px
 .rte-mini .rte-body { min-height: 70px; }
 .rte-view { background: none; border: none; padding: 0; }
 .rte-view .rt-check input[type="checkbox"] { pointer-events: none; }
+
+/* Notes editor scrolling (desktop): inside the fixed-height two-panel Notes
+   view, the RichTextEditor fills the available space and its body is the
+   scroll region, so a long note is fully reachable. The formatting toolbar
+   (top) and the note actions toolbar (bottom) stay pinned while only the body
+   scrolls. On mobile (<=768px) the panel grows and the PAGE scrolls instead
+   (the base .rte-body/.note-content-input rules with no height cap), which is
+   why this is scoped to wider viewports. */
+@media (min-width: 769px) {
+  .note-editor .rte { flex: 1; min-height: 0; }
+  .note-editor .rte .rte-toolbar { flex-shrink: 0; position: sticky; top: 0; z-index: 2; background: var(--bg); padding-bottom: 4px; }
+  .note-editor .rte .rte-body { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .note-editor .note-content-static { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+}
 .note-voice-row { display: flex; margin-top: 4px; }
 .notes-editor-wrap { display: flex; flex-direction: column; gap: 8px; }
 .task-form-title-row { display: flex; gap: 8px; align-items: center; }
