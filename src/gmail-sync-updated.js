@@ -85,6 +85,10 @@ function syncGmailToMango() {
     MAX_THREADS_PER_RUN
   );
 
+  // Captured BEFORE any work, so anything that arrives mid-run is still picked
+  // up next time rather than being skipped by its own run's mark.
+  const runStartedAt = new Date();
+
   let logged = 0;
   threads.forEach((thread) => {
     thread.getMessages().forEach((message) => {
@@ -93,6 +97,7 @@ function syncGmailToMango() {
     thread.addLabel(label);
   });
 
+  setLastSyncMark_(runStartedAt);
   Logger.log(`Sync complete: ${threads.length} thread(s) scanned, ${logged} activit(y/ies) logged.`);
 }
 
@@ -105,6 +110,8 @@ function logActivityForMessage_(config, message, deals, contacts, enablers) {
 
   const senderDomain = senderEmail.split("@")[1];
   if (!senderDomain || FREE_MAIL_DOMAINS.has(senderDomain)) return false;
+  // Already considered on a previous run: never add it again.
+  if (olderThanLastSync_(message.getDate())) return false;
 
   const contact = contacts.find((c) => (c.email || "").toLowerCase() === senderEmail);
   // Same domain-to-name matching pattern for both deals and enablers.
@@ -118,9 +125,15 @@ function logActivityForMessage_(config, message, deals, contacts, enablers) {
     || (enabler && enabler.contact_id)
     || null;
 
+  const description = `Email: "${message.getSubject()}" from ${fromHeader}`;
+  // Do not resurrect something the user deleted in the app. The thread label
+  // normally stops a re-scan, but a relabel, a restored backup, or a second
+  // message on the thread can still bring us back here.
+  if (activityDismissed_(config, "email", message.getDate(), description)) return false;
+
   postTable_(config, "activities", {
     type: "email",
-    description: `Email: "${message.getSubject()}" from ${fromHeader}`,
+    description: description,
     contact_id: contactId,
     deal_id: deal ? deal.id : null,
     enabler_id: enabler ? enabler.id : null,
@@ -166,8 +179,11 @@ function processOneFathomRecap_(config, message, subject, contacts, deals, enabl
   const sections = parseFathomSections_(notes);
   if (!sections.purpose && sections.takeaways.length === 0 && sections.actionItems.length === 0) return false;
 
-  // Step 6: skip if this recap (same title + date) was already logged.
+  // Step 6: skip if this recap (same title + date) was already logged, was
+  // dismissed by the user in the app, or predates the last successful run.
   if (fathomActivityExists_(config, title, dateLabel)) return false;
+  if (olderThanLastSync_(message.getDate())) return false;
+  if (activityDismissed_(config, "meeting", message.getDate(), `${title} (${dateLabel})`)) return false;
 
   const description = buildFathomDescription_(title, dateLabel, sections);
 
@@ -375,8 +391,9 @@ function fathomActivityExists_(config, title, dateLabel) {
 }
 
 // Has the user dismissed this synced item in the app (deleted or edited the
-// activity it produced)? sync_key matches the activity's first line, which is
-// the same prefix this script builds.
+// activity it produced)? The app writes one sync_dismissals row per deleted
+// activity; this is the tombstone check that stops a deleted item from
+// silently coming back on the next run.
 function syncDismissed_(config, syncKey) {
   const query = `select=id&limit=1&sync_key=eq.${encodeURIComponent(syncKey)}`;
   const res = UrlFetchApp.fetch(`${config.supabaseUrl}/rest/v1/sync_dismissals?${query}`, {
@@ -386,6 +403,41 @@ function syncDismissed_(config, syncKey) {
   });
   if (res.getResponseCode() >= 300) return false;
   return JSON.parse(res.getContentText()).length > 0;
+}
+
+// Tombstone key for a generic activity. MUST match syncDismissalKey in
+// src/App.jsx exactly: "type|YYYY-MM-DD|body", where body is the whole
+// description with all whitespace collapsed to single spaces and capped at
+// 180 characters. That is the contract between the two files; changing it on
+// one side silently stops deleted items from staying deleted.
+function activityDismissKey_(type, date, description) {
+  const body = String(description || "").replace(/\s+/g, " ").trim().slice(0, 180);
+  const day = Utilities.formatDate(date, "UTC", "yyyy-MM-dd");
+  return `${type}|${day}|${body}`;
+}
+
+function activityDismissed_(config, type, date, description) {
+  return syncDismissed_(config, activityDismissKey_(type, date, description));
+}
+
+// High-water mark: the timestamp of the last successful run, kept in script
+// properties. Anything older than this has already been considered once, so
+// re-adding it can only ever be a duplicate or something the user removed on
+// purpose. This is the belt to the tombstone table's braces.
+function lastSyncMark_() {
+  const raw = PropertiesService.getScriptProperties().getProperty("LAST_SYNC_AT");
+  return raw ? new Date(raw) : null;
+}
+
+function setLastSyncMark_(when) {
+  PropertiesService.getScriptProperties().setProperty("LAST_SYNC_AT", (when || new Date()).toISOString());
+}
+
+// True when this item predates the high-water mark and so must not be added.
+// The first ever run has no mark and processes the normal lookback window.
+function olderThanLastSync_(date) {
+  const mark = lastSyncMark_();
+  return !!mark && date && date.getTime() <= mark.getTime();
 }
 
 // Normalizes a company/enabler name to bare alphanumerics and checks whether

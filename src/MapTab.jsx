@@ -1,6 +1,6 @@
 import { useRef, useEffect, useMemo, useState, useCallback } from "react";
 import * as d3 from "d3";
-import { formatDate, stripFathomMarker } from "./utils";
+import { formatDate, cleanActivityText } from "./utils";
 import { ACT_TYPES, NETWORK_EDGE_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS } from "./constants";
 
 // Network Map node styling (independent of the app badge colors).
@@ -578,7 +578,7 @@ export default function MapTab({ institutions, contacts, contactRoles, dealEnabl
               {panelData.recent.length === 0 ? <div className="empty-small">No activity yet.</div> : panelData.recent.map((a) => (
                 <div key={a.id} className="map-panel-activity">
                   <span className="map-panel-act-icon">{ACT_TYPES.find((t) => t.id === a.type)?.icon || "."}</span>
-                  <div><div className="map-panel-act-desc">{stripFathomMarker(a.description)}</div><div className="map-panel-act-date">{formatDate(a.created_at)}</div></div>
+                  <div><div className="map-panel-act-desc">{cleanActivityText(a.description)}</div><div className="map-panel-act-date">{formatDate(a.created_at)}</div></div>
                 </div>
               ))}
             </div>

@@ -1555,12 +1555,16 @@ select.inline-select, .inline-select-wrap .input { width: auto; min-width: 130px
 .act-row { position: relative; }
 .act-row-main { flex: 1; min-width: 0; }
 .act-row-actions { position: relative; flex-shrink: 0; align-self: flex-start; }
+/* Always visible, never hover-gated: a hidden-until-hover control is
+   undiscoverable on desktop and unreachable on touch, which read as "delete
+   does not work". Subtle at rest, stronger on hover/focus. */
 .act-menu-btn {
   border: none; background: none; color: var(--muted); font-size: 16px; line-height: 1;
-  padding: 2px 6px; border-radius: 6px; cursor: pointer; font-family: inherit;
-  opacity: 0; transition: opacity .12s ease, background .12s ease;
+  min-width: 32px; min-height: 32px; padding: 2px 6px; border-radius: 6px;
+  cursor: pointer; font-family: inherit; opacity: .55;
+  transition: opacity .12s ease, background .12s ease;
 }
-.act-row:hover .act-menu-btn, .home-act:hover .act-menu-btn, .act-menu-btn:focus-visible { opacity: 1; }
+.act-row:hover .act-menu-btn, .home-act:hover .act-menu-btn, .act-menu-btn:hover, .act-menu-btn:focus-visible { opacity: 1; }
 .act-menu-btn:hover { background: var(--divider); color: var(--text); }
 .act-menu-backdrop { position: fixed; inset: 0; z-index: 20; }
 .act-menu {
@@ -1591,8 +1595,10 @@ select.inline-select, .inline-select-wrap .input { width: auto; min-width: 130px
   margin-bottom: 10px; background: var(--bg);
 }
 
-/* Touch has no hover, so the row menu is always visible on phones. */
+/* Touch has no hover at all, so the menu sits at full strength and a full
+   44px tap target on phones. */
 @media (max-width: 768px) {
-  .act-menu-btn { opacity: 1; min-width: 32px; min-height: 32px; }
+  .act-menu-btn { opacity: 1; min-width: 44px; min-height: 44px; }
+  .act-menu button { padding: 11px 12px; font-size: 14px; }
   .act-edit-field { min-width: 100%; }
 }

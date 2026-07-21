@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, createContext, useContext } f
 import { api } from "./supabase";
 import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
-import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, toDateTimeLocal, fromDateTimeLocal, FATHOM_MARKER, isFathomActivity, stripFathomMarker, activityCalendarEventId, cleanActivityText, CALEVENT_MARKER_PREFIX, CALEVENT_MARKER_SUFFIX } from "./utils";
+import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, toDateTimeLocal, fromDateTimeLocal, FATHOM_MARKER, isFathomActivity, stripFathomMarker, activityCalendarEventId, cleanActivityText } from "./utils";
 import MapTab from "./MapTab";
 import VoiceRecorder from "./VoiceRecorder";
 import RichTextEditor, { RichTextView } from "./RichTextEditor";
@@ -1307,6 +1307,9 @@ export default function App() {
   const [summarizingActivityId, setSummarizingActivityId] = useState(null);
   // In-flight guard for an inline activity edit, so a double-submit saves once.
   const [savingActivityId, setSavingActivityId] = useState(null);
+  // Outcome logging is a multi-request reconcile; a ref (not state) guards it
+  // because it has to block a second call synchronously, before any re-render.
+  const loggingOutcomeRef = useRef(false);
   const [researchingInst, setResearchingInst] = useState(null);
   // Institution keys we've already auto-researched this session, so opening a
   // sheet with an empty description does not re-hit the API on every render.
@@ -2919,7 +2922,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // Builds the description for a logged outcome, prefixed with a marker (like
   // the Fathom recap marker) carrying the event id so the timeline can link
   // back to the calendar event (Section 9) without a new activities column.
-  const buildOutcomeDescription = (ev, text) => `${CALEVENT_MARKER_PREFIX}${ev.id}${CALEVENT_MARKER_SUFFIX}Meeting:\n${ev.title || "Meeting"}\n\nOutcome:\n${text.trim()}`;
+  // Plain, user-facing text only. The link back to the calendar event lives in
+  // the activities.calendar_event_id column, never in the description: an
+  // internal marker embedded here leaked into the timeline, and matching on
+  // text broke the moment the user edited it.
+  const buildOutcomeDescription = (ev, text) => `Meeting:\n${ev.title || "Meeting"}\n\nOutcome:\n${text.trim()}`;
 
   // Identity of one outcome activity: the person it is logged against (or
   // none, for a direct institution row) plus the institution FK it carries.
@@ -2942,13 +2949,21 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const logEventOutcome = async (ev, outcomeText) => {
     const text = (outcomeText || "").trim();
     if (!text) { showToast("Outcome is empty"); return null; }
+    if (loggingOutcomeRef.current) return null;
+    loggingOutcomeRef.current = true;
     const description = buildOutcomeDescription(ev, text);
-    const existingRows = activities.filter((a) => activityCalendarEventId(a) === ev.id);
-    // Nothing changed at all (same text, same tags): treat a repeat click as a
-    // no-op rather than a pointless round of PATCHes.
-    if (existingRows.length && existingRows.every((a) => a.description === description)) {
-      const stillTagged = eventContacts.filter((r) => r.calendar_event_id === ev.id).length + eventInstitutions.filter((r) => r.calendar_event_id === ev.id).length;
-      if (stillTagged && existingRows.length >= 1) { showToast("This outcome is already logged"); return null; }
+    // Re-read this event's rows from the DATABASE rather than trusting React
+    // state. Local state can be stale (another tab, a sync, a failed patch, a
+    // reload mid-session), and trusting it is what allowed a second set of
+    // rows to be inserted. The database is the only reliable answer to "what
+    // has this event already produced?".
+    let existingRows = [];
+    try {
+      existingRows = (await api("activities", "GET", null, `?calendar_event_id=eq.${ev.id}&select=*`)) || [];
+    } catch {
+      loggingOutcomeRef.current = false;
+      showToast("Could not check existing outcome. Try again.");
+      return null;
     }
     const taggedContacts = eventContacts.filter((r) => r.calendar_event_id === ev.id).map((r) => contacts.find((c) => c.id === r.contact_id)).filter(Boolean);
     const taggedInstRows = eventInstitutions.filter((r) => r.calendar_event_id === ev.id);
@@ -2963,8 +2978,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     const existingByKey = new Map(existingRows.map((a) => [outcomeRowKey(a), a]));
     const keepKeys = new Set();
 
-    // Writes one desired outcome row: PATCH when this event already produced
-    // a row for the same person/institution, POST otherwise.
+    // Writes one desired outcome row: PATCH when this event already produced a
+    // row for the same person/institution, POST otherwise. A duplicate is also
+    // blocked by uniq_activity_per_calendar_event in the database, so if a POST
+    // ever races another writer it comes back 409 and is turned into an update
+    // of the row that won. Between the pre-read, the key match and the
+    // constraint, there is no path that leaves two rows for the same pairing.
     const upsertOutcomeRow = async (fields) => {
       const key = outcomeRowKey(fields);
       keepKeys.add(key);
@@ -2975,9 +2994,21 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         updatedIds.push(existing.id);
         return;
       }
-      const rows = await api("activities", "POST", { type: "meeting", description, created_at: createdAt, calendar_event_id: ev.id, ...fields });
-      const row = Array.isArray(rows) ? rows[0] : rows;
-      if (row) newRows.push(row);
+      try {
+        const rows = await api("activities", "POST", { type: "meeting", description, created_at: createdAt, calendar_event_id: ev.id, ...fields });
+        const row = Array.isArray(rows) ? rows[0] : rows;
+        if (row) newRows.push(row);
+      } catch (e) {
+        if (e?.status !== 409) throw e;
+        // The constraint caught a row we did not know about: update it instead.
+        const q = ["contact_id", "deal_id", "enabler_id", "organization_id"]
+          .map((c) => `${c}=${fields[c] ? `eq.${fields[c]}` : "is.null"}`).join("&");
+        const found = (await api("activities", "GET", null, `?calendar_event_id=eq.${ev.id}&${q}&select=id`)) || [];
+        if (found[0]) {
+          await api("activities", "PATCH", { description, created_at: createdAt }, `?id=eq.${found[0].id}`);
+          updatedIds.push(found[0].id);
+        }
+      }
     };
 
     try {
@@ -3008,13 +3039,21 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       for (const a of staleRows) await api("activities", "DELETE", null, `?id=eq.${a.id}`);
       const staleIds = new Set(staleRows.map((a) => a.id));
 
-      if (newRows.length || updatedIds.length || staleIds.size) {
-        const updated = new Set(updatedIds);
-        setActivities((prev) => [
-          ...newRows,
-          ...prev.filter((a) => !staleIds.has(a.id)).map((a) => (updated.has(a.id) ? { ...a, description, created_at: createdAt } : a)),
-        ]);
-      }
+      // Rebuild local state for this event from the definitive set of rows,
+      // rather than patching around the edges: drop every row currently held
+      // for this event and re-add exactly the ones that now exist. This keeps
+      // the UI honest even if local state had drifted before the write.
+      const updated = new Set(updatedIds);
+      const finalRows = [
+        ...newRows,
+        ...existingRows
+          .filter((a) => !staleIds.has(a.id))
+          .map((a) => (updated.has(a.id) ? { ...a, description, created_at: createdAt } : a)),
+      ];
+      setActivities((prev) => {
+        const others = prev.filter((a) => activityCalendarEventId(a) !== ev.id);
+        return [...finalRows, ...others].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      });
       if (touchedDealIds.size) { await Promise.all([...touchedDealIds].map((id) => api("deals", "PATCH", { last_activity_at: now }, `?id=eq.${id}`))); setDeals((prev) => prev.map((d) => (touchedDealIds.has(d.id) ? { ...d, last_activity_at: now } : d))); }
       if (touchedEnablerIds.size) { await Promise.all([...touchedEnablerIds].map((id) => api("enablers", "PATCH", { last_activity_at: now }, `?id=eq.${id}`))); setEnablers((prev) => prev.map((e) => (touchedEnablerIds.has(e.id) ? { ...e, last_activity_at: now } : e))); }
       if (touchedContactIds.size) { await Promise.all([...touchedContactIds].map((id) => api("contacts", "PATCH", { last_contacted_at: now }, `?id=eq.${id}`))); setContacts((prev) => prev.map((c) => (touchedContactIds.has(c.id) ? { ...c, last_contacted_at: now } : c))); }
@@ -3027,7 +3066,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       const verb = existingRows.length ? "updated on" : "logged to";
       showToast(`Outcome ${verb} ${peopleCount} ${peopleCount === 1 ? "person" : "people"} and ${instCount} ${instCount === 1 ? "institution" : "institutions"}.`);
       return { peopleCount, instCount, updated: existingRows.length > 0 };
-    } catch { showToast("Error logging outcome"); return null; }
+    } catch (e) {
+      console.error("[Outcome] log failed", e);
+      showToast("Error logging outcome");
+      return null;
+    } finally { loggingOutcomeRef.current = false; }
   };
 
   // "Extract tasks from outcome" (Section 6): reuses the voice-note digest
@@ -3229,20 +3272,28 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Error logging activity"); }
   };
 
-  // A synced activity carries a stable key the Gmail Apps Script dedupes on.
-  // Right now only Fathom recaps dedupe by content (the generic email pass
-  // dedupes by Gmail label, so a deleted email activity is never re-added);
-  // returns null for anything the sync would not recreate.
+  // A stable fingerprint for an activity, used as the tombstone key when the
+  // user deletes one. Deliberately generic (type + first line + calendar day)
+  // rather than Fathom-specific: any sync, including a calendar sync this repo
+  // does not own, can consult it before recreating a row, and the key stays
+  // stable across runs because it holds no ids or timestamps-to-the-second.
   const syncDismissalKey = (activity) => {
-    if (!isFathomActivity(activity)) return null;
-    // Mirrors fathomActivityExists_ in gmail-sync-updated.js: the marker plus
-    // the "Title (Mon d)" first line is the prefix it searches for.
-    const first = firstLine(activity.description || "");
-    return first ? { source: "fathom", sync_key: first } : null;
+    // Collapse the whole cleaned body to one line and take a generous prefix.
+    // Using only the FIRST line is too weak: every logged outcome begins
+    // "Meeting:", so distinct items would collide on one key and a single
+    // delete could suppress unrelated rows.
+    const text = cleanActivityText(activity.description || "").replace(/\s+/g, " ").trim().slice(0, 180);
+    if (!text) return null;
+    const day = (activity.created_at || "").slice(0, 10);
+    const source = isFathomActivity(activity) ? "fathom" : (activity.type || "activity");
+    return { source, sync_key: `${activity.type || "activity"}|${day}|${text}` };
   };
 
   // Records that the user deliberately removed a synced item, so the next sync
-  // run does not helpfully recreate it (Section 2).
+  // run does not helpfully recreate it. Every deleted activity gets a tombstone,
+  // not just the ones we know a sync produced, since the cost is one small row
+  // and the failure it prevents (a deleted item silently coming back) is the
+  // kind users stop trusting the app over.
   const recordSyncDismissal = async (activity) => {
     const key = syncDismissalKey(activity);
     if (!key) return;
@@ -3251,41 +3302,55 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     await api("sync_dismissals", "POST", key).catch((e) => { if (e?.status !== 409) throw e; });
   };
 
-  // Inline timeline edit (Section 2): PATCH the row and patch local state, per
-  // the targeted-updates convention. A description the user edits is written
-  // back with whatever marker prefix the original carried (Fathom recap or
-  // calendar-event outcome) still intact, since ActivityEditForm shows and
-  // takes the clean text but those markers are how the row stays linked.
+  // Inline timeline edit: PATCH the existing row (never an insert) and patch
+  // local state, per the targeted-updates convention. The Fathom marker is
+  // re-applied because the Apps Script still writes it and uses it to
+  // recognize its own rows; the calendar-event link needs no marker at all now
+  // that it lives in the calendar_event_id column.
   const updateActivity = async (activity, patch) => {
     if (savingActivityId) return false;
     setSavingActivityId(activity.id);
     try {
       const original = activity.description || "";
-      const calId = activityCalendarEventId(activity);
-      let description = patch.description;
-      if (original.startsWith(FATHOM_MARKER)) description = `${FATHOM_MARKER} ${description}`;
-      else if (original.startsWith(CALEVENT_MARKER_PREFIX) && calId) description = `${CALEVENT_MARKER_PREFIX}${calId}${CALEVENT_MARKER_SUFFIX}${description}`;
+      const description = isFathomActivity(activity) ? `${FATHOM_MARKER} ${patch.description}` : patch.description;
       const body = { ...patch, description };
       await api("activities", "PATCH", body, `?id=eq.${activity.id}`);
       setActivities((prev) => prev.map((a) => (a.id === activity.id ? { ...a, ...body } : a)));
-      // A manual edit of a synced row is fine, but the sync dedupes Fathom
-      // recaps by the description prefix the user may have just changed. Record
-      // the ORIGINAL key so the next run recognizes it as already handled.
-      if (isFathomActivity(activity) && description !== original) await recordSyncDismissal(activity).catch(() => {});
+      // A sync may dedupe on the description the user just changed, so record
+      // the ORIGINAL fingerprint as dismissed; otherwise the next run would see
+      // its row as missing and add it back alongside the edited one.
+      if (description !== original) await recordSyncDismissal(activity).catch((e) => console.warn("[Activity] dismissal record failed", e));
       savedToast();
       return true;
-    } catch { showToast("Error saving activity"); return false; }
+    } catch (e) {
+      console.error("[Activity] save failed", e);
+      showToast("Could not save activity. Please try again.");
+      return false;
+    }
     finally { setSavingActivityId(null); }
   };
 
+  // Deleting an activity never touches the calendar event it came from: only
+  // the activities row goes, and calendar_event_id is just a reference on it.
+  // The dismissal record is written FIRST and independently, so a sync cannot
+  // recreate the row even if the delete itself later fails.
   const deleteActivity = async (activity) => {
     try {
-      await recordSyncDismissal(activity).catch(() => {});
+      await recordSyncDismissal(activity).catch((e) => console.warn("[Activity] dismissal record failed", e));
       await api("activities", "DELETE", null, `?id=eq.${activity.id}`);
+      // Confirm it is actually gone rather than assuming a 2xx meant deleted:
+      // a filter that matches nothing also returns 2xx, which would leave a
+      // ghost row on screen that reappears on the next load.
+      const still = (await api("activities", "GET", null, `?id=eq.${activity.id}&select=id`)) || [];
+      if (still.length) throw new Error("row still present after delete");
       setActivities((prev) => prev.filter((a) => a.id !== activity.id));
       showToast("Activity deleted");
       return true;
-    } catch { showToast("Error deleting activity"); return false; }
+    } catch (e) {
+      console.error("[Activity] delete failed", e);
+      showToast("Could not delete activity. Please try again.");
+      return false;
+    }
   };
 
   // "+ Add to timeline" (Section 3): a freeform, back-datable entry. Goes
@@ -9376,7 +9441,7 @@ function GlobalSearch({ institutions, contacts, deals, enablers, organizations, 
     },
     {
       label: "Activities",
-      items: activities.filter((a) => hit(a.description)).slice(0, CAP).map((a) => ({
+      items: activities.filter((a) => hit(cleanActivityText(a.description))).slice(0, CAP).map((a) => ({
         key: `a-${a.id}`, title: firstLine(cleanActivityText(a.description)),
         sub: [entityName(a) || "General", formatDate(a.created_at)].join(" . "),
         go: () => onOpenEntity(a),

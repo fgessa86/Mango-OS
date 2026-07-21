@@ -48,10 +48,10 @@ export const stripFathomMarker = (desc) => {
   return d.startsWith(FATHOM_MARKER) ? d.slice(FATHOM_MARKER.length).replace(/^[ \t]+/, "") : d;
 };
 
-// Calendar-event outcome marker: logging a meeting outcome from the calendar
-// event detail panel prefixes the activity description with this token (the
-// event id it belongs to), so the timeline can link back to the event without
-// a dedicated calendar_event_id column on activities.
+// Legacy calendar-event outcome marker. Outcome activities used to embed the
+// event id in the description text; the linkage now lives ONLY in the
+// activities.calendar_event_id column and nothing writes this marker any more.
+// The reader is kept so a row written before the migration still resolves.
 export const CALEVENT_MARKER_PREFIX = "[[CALEVENT:";
 export const CALEVENT_MARKER_SUFFIX = "]]";
 export const calendarEventIdFromActivity = (desc) => {
@@ -61,18 +61,21 @@ export const calendarEventIdFromActivity = (desc) => {
   return end === -1 ? null : d.slice(CALEVENT_MARKER_PREFIX.length, end);
 };
 // The calendar event an activity belongs to. activities.calendar_event_id is
-// the source of truth (it survives the user editing the description text, and
-// is what re-logging an outcome matches on); the description marker is only a
-// fallback for any row written before the column was populated.
+// the source of truth; the legacy description marker is only a fallback for a
+// row that predates the column being populated.
 export const activityCalendarEventId = (a) => a?.calendar_event_id || calendarEventIdFromActivity(a?.description);
-export const stripCalendarEventMarker = (desc) => {
-  const d = desc || "";
-  if (!d.startsWith(CALEVENT_MARKER_PREFIX)) return d;
-  const end = d.indexOf(CALEVENT_MARKER_SUFFIX);
-  if (end === -1) return d;
-  return d.slice(end + CALEVENT_MARKER_SUFFIX.length).replace(/^[ \t\n]+/, "");
-};
-// Strips whichever known marker prefix (Fathom recap or calendar-event
-// outcome) an activity description carries, for any place that just wants the
-// human-readable content (AI prompts, plain-text previews, etc).
-export const cleanActivityText = (desc) => stripFathomMarker(stripCalendarEventMarker(desc));
+
+// Any internal double-bracket token, anywhere in the string. Internal markers
+// are plumbing ([[FATHOM]], the legacy [[CALEVENT:uuid]]) and must NEVER reach
+// the user, so display goes through a blanket strip rather than a list of
+// known prefixes: a marker that is new, repeated, or not at the start still
+// gets removed instead of leaking into the timeline.
+const INTERNAL_MARKER_RE = /\[\[[^\]]*\]\][ \t]*\n?/g;
+
+// The human-readable text of an activity description: every internal marker
+// removed, leading blank space tidied. This is the ONLY thing that should ever
+// be rendered, previewed, copied into a report, or fed to an AI prompt.
+export const cleanActivityText = (desc) => (desc || "").replace(INTERNAL_MARKER_RE, "").replace(/^[ \t\n]+/, "");
+// Back-compat aliases: both older helpers now route through the same blanket
+// strip, so any caller still reaching for one cannot reintroduce a leak.
+export const stripCalendarEventMarker = cleanActivityText;
