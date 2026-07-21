@@ -1792,3 +1792,44 @@ body.exec-presenting-body { overflow: hidden; }
   .exec-points-toggle { display: none !important; }
   .exec-points-list { display: flex !important; }
 }
+
+/* Notes surfaced away from the Notes tab render as compact openable cards
+   (calendar event panel, institution and person sheets), never as a wall of
+   text in someone else's view. */
+.note-card {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  width: 100%; text-align: left; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--surface); cursor: pointer; font-family: inherit;
+}
+.note-card:hover { border-color: var(--mango); background: var(--card); }
+.note-card-main { min-width: 0; flex: 1; }
+.note-card-title {
+  font-size: 13.5px; font-weight: 650; color: var(--text);
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.note-card-badge {
+  font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: #8B5CF6; background: #8B5CF618; border: 1px solid #8B5CF633;
+  border-radius: 5px; padding: 1px 5px;
+}
+.note-card-preview {
+  font-size: 12.5px; color: var(--muted-2); margin-top: 3px;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;
+}
+.note-card-date { font-size: 11.5px; color: var(--muted); flex-shrink: 0; white-space: nowrap; }
+
+/* Meeting Notes inside the calendar event detail panel */
+.event-detail-notes-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.event-detail-note-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.event-detail-note-status { font-size: 11.5px; color: var(--muted); }
+.event-detail-note-cards { margin-top: 10px; }
+.event-detail-note-static { font-size: 13.5px; color: var(--text-2); }
+
+/* The meeting pill in the note editor toolbar sits alongside the entity pill,
+   since a note can be both a meeting report and linked to an institution. */
+.note-link-pill-meeting { background: #8B5CF614; border-color: #8B5CF633; color: #6D28D9; }
+.note-link-open {
+  border: none; background: none; cursor: pointer; color: inherit;
+  font-size: 12px; padding: 0 2px; opacity: .75;
+}
+.note-link-open:hover { opacity: 1; }

@@ -2591,11 +2591,128 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // Single-link model: setting a link clears the other three entity FKs. entity
   // is { type: "deal"|"enabler"|"organization"|"contact", entityId } or null.
   const linkNote = (id, entity) => {
+    // A meeting link is a separate axis from the entity link: picking one sets
+    // calendar_event_id (and inherits the meeting's entity links) rather than
+    // replacing whatever entity the note already points at.
+    if (entity?.type === "calendar_event") return linkNoteToEvent(id, entity.entityId);
     const patch = { deal_id: null, enabler_id: null, organization_id: null, contact_id: null };
     if (entity) patch[`${entity.type}_id`] = entity.entityId;
     return updateNote(id, patch);
   };
   const openNote = (id) => { setSelectedNoteId(id); navigateTab("notes"); };
+
+  /* ---- Meeting notes: one note, reachable from the meeting and from Notes ----
+     A note carrying calendar_event_id IS the meeting's written report. There is
+     exactly one such note per meeting (the panel's editor binds to it and
+     upserts), so editing from either surface updates the same row and a second
+     copy is never created. */
+
+  // The meeting's report note: the oldest one tagged to this event, so the
+  // binding is stable even if more notes get linked to the meeting later.
+  const meetingNoteFor = (eventId) => notes
+    .filter((n) => n.calendar_event_id === eventId)
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))[0] || null;
+
+  const notesForEvent = (eventId) => notes.filter((n) => n.calendar_event_id === eventId);
+
+  // Entity links a meeting note inherits from the meeting's own tags, so the
+  // note surfaces on the institutions and people the meeting was about. When
+  // only a person is tagged, their primary institution is resolved the same way
+  // addActivity does it, so the note still reaches the institution timeline.
+  const meetingNoteLinks = (eventId, insts = eventInstitutions, people = eventContacts) => {
+    const links = { deal_id: null, enabler_id: null, organization_id: null, contact_id: null };
+    const inst = insts.find((r) => r.calendar_event_id === eventId);
+    const person = people.find((r) => r.calendar_event_id === eventId);
+    if (inst) {
+      links.deal_id = inst.deal_id || null;
+      links.enabler_id = inst.enabler_id || null;
+      links.organization_id = inst.organization_id || null;
+    }
+    if (person) {
+      links.contact_id = person.contact_id;
+      if (!inst) {
+        const contact = contacts.find((c) => c.id === person.contact_id);
+        const roles = contact ? resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles }) : [];
+        const primary = roles.find((r) => r.is_primary) || roles[0];
+        if (primary?.entity_type === "deal") links.deal_id = primary.entity_id;
+        else if (primary?.entity_type === "enabler") links.enabler_id = primary.entity_id;
+        else if (primary?.entity_type === "organization") links.organization_id = primary.entity_id;
+      }
+    }
+    return links;
+  };
+
+  // Upsert guard: the editor autosaves on a debounce, so without this a fast
+  // first keystroke could fire two creates before the first POST returns.
+  const creatingMeetingNoteRef = useRef(false);
+
+  // Writes the meeting's report. Updates the existing note when there is one,
+  // creates it on first real content otherwise. Never inserts a second note for
+  // the same meeting.
+  const saveMeetingNote = async (ev, content) => {
+    const existing = meetingNoteFor(ev.id);
+    if (existing) {
+      // Re-sync the inherited links on every save, so tagging an institution
+      // after the note was written still surfaces it in the right places.
+      const links = meetingNoteLinks(ev.id);
+      const changed = ["deal_id", "enabler_id", "organization_id", "contact_id"].some((k) => (existing[k] || null) !== (links[k] || null));
+      await updateNote(existing.id, changed ? { content, ...links } : { content });
+      return existing;
+    }
+    if (isContentEmpty(content) || creatingMeetingNoteRef.current) return null;
+    creatingMeetingNoteRef.current = true;
+    try {
+      // Re-read from the DATABASE before creating. Local `notes` state can be
+      // stale (an autosave debounce and a flush can both fire before the first
+      // POST lands), and trusting it is what produced a second note. The
+      // uniq_note_per_calendar_event index is the backstop: if a create still
+      // races, the 409 is caught below and turned into an update.
+      const found = (await api("notes", "GET", null, `?calendar_event_id=eq.${ev.id}&select=*&order=created_at.asc`)) || [];
+      if (found[0]) {
+        if (!notes.some((n) => n.id === found[0].id)) setNotes((prev) => [found[0], ...prev]);
+        await updateNote(found[0].id, { content });
+        return found[0];
+      }
+      const title = `Meeting Notes, ${ev.title || "Meeting"}, ${formatDate(ev.start_time)}`;
+      const rows = await api("notes", "POST", { title, content, calendar_event_id: ev.id, ...meetingNoteLinks(ev.id) });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setNotes((prev) => [row, ...prev]);
+      return row;
+    } catch (e) {
+      if (e?.status === 409) {
+        // The index caught a note we did not know about: adopt and update it.
+        const found = (await api("notes", "GET", null, `?calendar_event_id=eq.${ev.id}&select=*&order=created_at.asc`).catch(() => [])) || [];
+        if (found[0]) {
+          if (!notes.some((n) => n.id === found[0].id)) setNotes((prev) => [found[0], ...prev]);
+          await updateNote(found[0].id, { content });
+          return found[0];
+        }
+      }
+      console.error("[MeetingNote] save failed", e);
+      showToast("Could not save meeting notes. Please try again.");
+      return null;
+    }
+    finally { creatingMeetingNoteRef.current = false; }
+  };
+
+  // Keeps an existing meeting note pointed at the right entities when the
+  // meeting's tags change. Takes the post-change lists explicitly, since React
+  // state has not re-rendered yet at the call site.
+  const syncMeetingNoteLinks = async (eventId, insts, people) => {
+    const note = meetingNoteFor(eventId);
+    if (!note) return;
+    const links = meetingNoteLinks(eventId, insts, people);
+    const changed = ["deal_id", "enabler_id", "organization_id", "contact_id"].some((k) => (note[k] || null) !== (links[k] || null));
+    if (changed) await updateNote(note.id, links);
+  };
+
+  // Links an existing note to a meeting (the Notes tab "Link to" direction).
+  // Setting the meeting also pulls in that meeting's entity links, so both
+  // directions end up with the same connected note.
+  const linkNoteToEvent = async (noteId, eventId) => {
+    if (!eventId) return updateNote(noteId, { calendar_event_id: null });
+    return updateNote(noteId, { calendar_event_id: eventId, ...meetingNoteLinks(eventId) });
+  };
 
   // NOTE FOLDERS. Simple tree via parent_id; local state is patched on write.
   const createFolder = async (name = "New Folder", parent_id = null) => {
@@ -2875,15 +2992,21 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       const clean = { calendar_event_id: eventId, [`${pick.type}_id`]: pick.id };
       const rows = await api("event_institutions", "POST", clean);
       const row = Array.isArray(rows) ? rows[0] : rows;
-      if (row) setEventInstitutions((prev) => [...prev, row]);
+      if (row) {
+        setEventInstitutions((prev) => [...prev, row]);
+        await syncMeetingNoteLinks(eventId, [...eventInstitutions, row], eventContacts);
+      }
     } catch (e) {
       if (e?.status !== 409) showToast("Error tagging institution");
     }
   };
   const untagEventInstitution = async (id) => {
     try {
+      const row = eventInstitutions.find((r) => r.id === id);
       await api("event_institutions", "DELETE", null, `?id=eq.${id}`);
-      setEventInstitutions((prev) => prev.filter((r) => r.id !== id));
+      const next = eventInstitutions.filter((r) => r.id !== id);
+      setEventInstitutions(next);
+      if (row) await syncMeetingNoteLinks(row.calendar_event_id, next, eventContacts);
     } catch { showToast("Error removing tag"); }
   };
   const tagEventPerson = async (eventId, contactId) => {
@@ -2891,15 +3014,21 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     try {
       const rows = await api("event_contacts", "POST", { calendar_event_id: eventId, contact_id: contactId });
       const row = Array.isArray(rows) ? rows[0] : rows;
-      if (row) setEventContacts((prev) => [...prev, row]);
+      if (row) {
+        setEventContacts((prev) => [...prev, row]);
+        await syncMeetingNoteLinks(eventId, eventInstitutions, [...eventContacts, row]);
+      }
     } catch (e) {
       if (e?.status !== 409) showToast("Error tagging person");
     }
   };
   const untagEventPerson = async (id) => {
     try {
+      const row = eventContacts.find((r) => r.id === id);
       await api("event_contacts", "DELETE", null, `?id=eq.${id}`);
-      setEventContacts((prev) => prev.filter((r) => r.id !== id));
+      const next = eventContacts.filter((r) => r.id !== id);
+      setEventContacts(next);
+      if (row) await syncMeetingNoteLinks(row.calendar_event_id, eventInstitutions, next);
     } catch { showToast("Error removing tag"); }
   };
   const saveEventPrepNotes = async (eventId, text) => {
@@ -3862,7 +3991,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setSheetOrigin(prev.sheetOrigin);
   };
   // Tab-level navigation resets the sheet history.
-  const navigateTab = (v) => { setNavStack([]); setInstitutionSheetKey(null); setPersonSheetId(null); setView(v); };
+  const navigateTab = (v) => { setNavStack([]); setInstitutionSheetKey(null); setPersonSheetId(null); setEventDetailId(null); setView(v); };
   // Boss View's sidebar is now just Week in Review / Pipeline / Ecosystem /
   // Calendar / Tasks; if it ever lands elsewhere (deep link, stale URL) send
   // it back to the Week in Review, Andy's homepage, rather than a tab that is
@@ -4397,6 +4526,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           enablers={enablers}
           organizations={organizations}
           contacts={contacts}
+          calendarEvents={calendarEvents}
+          onOpenEvent={openCalendarEventDetail}
           isMobile={isMobile}
           bossMode={bossMode}
           showToast={showToast}
@@ -4594,6 +4725,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             briefGenerating={briefGenerating}
             onLogOutcome={logEventOutcome}
             onExtractTasks={extractTasksFromOutcome}
+            meetingNote={meetingNoteFor(ev.id)}
+            otherEventNotes={notesForEvent(ev.id).filter((n) => n.id !== meetingNoteFor(ev.id)?.id)}
+            onSaveMeetingNote={saveMeetingNote}
+            onOpenNote={(id) => { closeCalendarEventDetail(); openNote(id); }}
             onClose={closeCalendarEventDetail}
             showToast={showToast}
           />
@@ -5215,15 +5350,72 @@ function EventDetailPanel({
   onTagInstitution, onUntagInstitution, onTagPerson, onUntagPerson,
   onSavePrepNotes, onSaveOutcomeNotes, onGenerateBrief, briefGenerating,
   onLogOutcome, onExtractTasks, onClose, showToast,
+  meetingNote, otherEventNotes = [], onSaveMeetingNote, onOpenNote,
 }) {
   const readOnly = useReadOnly();
   const [prepDraft, setPrepDraft] = useState(ev.prep_notes || "");
   const [outcomeDraft, setOutcomeDraft] = useState(ev.outcome_notes || "");
+  const [noteDraft, setNoteDraft] = useState(meetingNote?.content || "");
+  const [noteSaving, setNoteSaving] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [logging, setLogging] = useState(false);
   const autoTaggedRef = useRef(new Set());
+  const noteTimer = useRef(null);
+  const noteDraftRef = useRef(noteDraft);
 
   useEffect(() => { setPrepDraft(ev.prep_notes || ""); setOutcomeDraft(ev.outcome_notes || ""); }, [ev.id, ev.prep_notes, ev.outcome_notes]);
+  // Reload the draft only when switching events, never on every keystroke's
+  // round trip, so the editor does not fight the user's cursor.
+  const noteBaselineRef = useRef(meetingNote?.content || "");
+  useEffect(() => {
+    const c = meetingNote?.content || "";
+    setNoteDraft(c); noteDraftRef.current = c; noteBaselineRef.current = c;
+  }, [ev.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The same note can be edited from the Notes tab. Adopt an external change
+  // ONLY when nothing has been typed here since the last load or save,
+  // otherwise a stale local draft would overwrite the newer content.
+  useEffect(() => {
+    const incoming = meetingNote?.content || "";
+    if (incoming === noteBaselineRef.current) return;
+    if (noteDraftRef.current !== noteBaselineRef.current) return; // local edits win
+    setNoteDraft(incoming); noteDraftRef.current = incoming; noteBaselineRef.current = incoming;
+  }, [meetingNote?.content]);
+
+  // Autosave the meeting report on a 1s debounce (same feel as the Notes tab),
+  // flushing on blur and on unmount so closing the panel never loses a keystroke.
+  useEffect(() => { noteDraftRef.current = noteDraft; }, [noteDraft]);
+  const persistNote = useCallback(async (text) => {
+    if (readOnly || !onSaveMeetingNote) return;
+    // Nothing typed since the last load or save: never write, so a re-render
+    // cannot push a stale draft over a newer edit made somewhere else.
+    if (text === noteBaselineRef.current) return;
+    if ((meetingNote?.content || "") === text) { noteBaselineRef.current = text; return; }
+    setNoteSaving(true);
+    try { await onSaveMeetingNote(ev, text); noteBaselineRef.current = text; }
+    finally { setNoteSaving(false); }
+  }, [ev, meetingNote, onSaveMeetingNote, readOnly]);
+  useEffect(() => {
+    if (readOnly) return undefined;
+    if (noteTimer.current) clearTimeout(noteTimer.current);
+    noteTimer.current = setTimeout(() => persistNote(noteDraftRef.current), 1000);
+    return () => { if (noteTimer.current) clearTimeout(noteTimer.current); };
+  }, [noteDraft, persistNote, readOnly]);
+  // Flush on REAL unmount only. A cleanup keyed on persistNote would re-run
+  // every time its identity changed, firing a save on each render and racing
+  // the debounce into creating a second note. The ref keeps the latest
+  // function without making it a dependency.
+  const persistNoteRef = useRef(persistNote);
+  useEffect(() => { persistNoteRef.current = persistNote; }, [persistNote]);
+  useEffect(() => () => { persistNoteRef.current(noteDraftRef.current); }, []);
+  const flushNote = () => { if (noteTimer.current) clearTimeout(noteTimer.current); persistNote(noteDraftRef.current); };
+  const onNoteVoiceText = (text) => {
+    const clean = (text || "").trim();
+    if (!clean) return;
+    const next = `${noteDraftRef.current || ""}<div>${clean.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>`;
+    setNoteDraft(next);
+    noteDraftRef.current = next;
+    persistNote(next);
+  };
 
   // Pre-populate People with any attendee that matches an existing contact by
   // email, once, and only the first time this event is ever opened (a later
@@ -5355,6 +5547,47 @@ function EventDetailPanel({
             <button className="btn-sec event-detail-brief-btn" disabled={!!briefGenerating} onClick={() => onGenerateBrief(ev)}>
               {briefGenerating ? "Generating..." : "Generate Prep Brief"}
             </button>
+          )}
+        </div>
+
+        {/* The meeting's written report. This is a real note (notes table,
+            calendar_event_id set), not a field on the event, so it is the same
+            record the Notes tab edits and it surfaces on every tagged entity.
+            Distinct from Outcome below, which is the short line fanned out to
+            the timelines by Log Outcome. */}
+        <div className="event-detail-section">
+          <div className="event-detail-notes-head">
+            <div className="section-label">Meeting Notes</div>
+            {meetingNote && (
+              <button type="button" className="link-btn" onClick={() => onOpenNote(meetingNote.id)}>Open in Notes</button>
+            )}
+          </div>
+          {readOnly ? (
+            meetingNote ? <RichTextView value={meetingNote.content} className="event-detail-note-static" />
+              : <div className="empty-small">No meeting notes.</div>
+          ) : (
+            <>
+              <RichTextEditor
+                key={ev.id}
+                value={noteDraft}
+                onChange={setNoteDraft}
+                onBlur={flushNote}
+                mini
+                placeholder="Write the meeting report. It saves as a note and shows on everyone tagged above."
+              />
+              <div className="event-detail-note-actions">
+                <VoiceRecorder mode="plain" onPlainText={onNoteVoiceText} showToast={showToast} compact title="Dictate meeting notes" />
+                <span className="event-detail-note-status">{noteSaving ? "Saving..." : meetingNote ? "Saved as a note" : "Starts a note when you type"}</span>
+              </div>
+            </>
+          )}
+          {/* Any OTHER note tagged to this meeting (linked from the Notes tab
+              rather than written here) shows as a card rather than being
+              silently invisible. */}
+          {otherEventNotes.length > 0 && (
+            <div className="linked-notes-list event-detail-note-cards">
+              {otherEventNotes.map((n) => <NoteCard key={n.id} note={n} onOpen={onOpenNote} />)}
+            </div>
           )}
         </div>
 
@@ -7357,14 +7590,21 @@ function dedupeInstitutionOptions({ deals = [], enablers = [], organizations = [
 }
 
 // Flat searchable list of linkable entities (deduped institutions plus people).
-function buildNoteEntityOptions({ deals, enablers, organizations, contacts }, query) {
+function buildNoteEntityOptions({ deals, enablers, organizations, contacts, calendarEvents = [] }, query) {
   const q = (query || "").trim().toLowerCase();
   const KIND = { deal: "Deal", enabler: "Enabler", organization: "Organization" };
   const instOpts = dedupeInstitutionOptions({ deals, enablers, organizations, prefer: ["deal", "enabler", "organization"] })
     .map((o) => { const i = o.value.indexOf(":"); const type = o.value.slice(0, i); return { type, entityId: o.value.slice(i + 1), name: o.label, kind: KIND[type] }; });
+  // Meetings are linkable too: picking one sets notes.calendar_event_id, which
+  // is the same connection the calendar panel's editor creates from its side.
+  const meetingOpts = calendarEvents
+    .slice()
+    .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
+    .map((e) => ({ type: "calendar_event", entityId: e.id, name: `${e.title || "Meeting"} (${formatDate(e.start_time)})`, kind: "Meeting" }));
   const opts = [
     ...instOpts,
     ...contacts.map((c) => ({ type: "contact", entityId: c.id, name: c.name, kind: "Person" })),
+    ...meetingOpts,
   ].filter((o) => o.name);
   return q ? opts.filter((o) => o.name.toLowerCase().includes(q)) : opts;
 }
@@ -7381,7 +7621,7 @@ function flattenFolders(folders, parentId = null, depth = 0) {
 // Notes tab: a folder-tree list panel (pinned at top, then folders, then an
 // Unfiled section) beside a distraction-free editor. On mobile the two are
 // separate full-screen views (list, then editor).
-function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, onTogglePin, onLink, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, folders = [], onCreateFolder, onRenameFolder, onDeleteFolder, onMoveNote, deals, enablers, organizations, contacts, isMobile, bossMode, showToast }) {
+function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, onTogglePin, onLink, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, folders = [], onCreateFolder, onRenameFolder, onDeleteFolder, onMoveNote, deals, enablers, organizations, contacts, calendarEvents = [], onOpenEvent, isMobile, bossMode, showToast }) {
   const readOnly = useReadOnly();
   const [search, setSearch] = useState("");
   const [focusNew, setFocusNew] = useState(null);
@@ -7394,7 +7634,7 @@ function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, o
   const [dragNoteId, setDragNoteId] = useState(null);
   const [dragOverTarget, setDragOverTarget] = useState(null); // folder id or "unfiled"
   const [creatingNote, setCreatingNote] = useState(false);
-  const entityCtx = { deals, enablers, organizations, contacts };
+  const entityCtx = { deals, enablers, organizations, contacts, calendarEvents };
 
   const persistExpanded = (set) => { try { localStorage.setItem("mango-note-folders-expanded", JSON.stringify([...set])); } catch { /* ignore */ } };
   const toggleExpand = (id) => setExpanded((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); persistExpanded(next); return next; });
@@ -7550,6 +7790,7 @@ function NotesTab({ notes, selectedId, onSelect, onCreate, onUpdate, onDelete, o
             entityCtx={entityCtx}
             folders={folders}
             onMoveNote={onMoveNote}
+            onOpenEvent={onOpenEvent}
             isMobile={isMobile}
             showToast={showToast}
           />
@@ -7590,13 +7831,15 @@ function NoteListItem({ note, active, onSelect, entityCtx, indent = 0, draggable
   );
 }
 
-function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate, onDelete, onTogglePin, onLink, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, onBack, entityCtx, folders = [], onMoveNote, isMobile, showToast = () => {} }) {
+function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate, onDelete, onTogglePin, onLink, onCreateInstitution, customOptions = [], onAddCustomOption = () => {}, onBack, entityCtx, folders = [], onMoveNote, onOpenEvent, isMobile, showToast = () => {} }) {
   const [title, setTitle] = useState(note.title || "");
   const [content, setContent] = useState(note.content || "");
   const [saved, setSaved] = useState(false);
   const [linking, setLinking] = useState(false);
   const [creatingInst, setCreatingInst] = useState(false);
   const [linkQuery, setLinkQuery] = useState("");
+  const [linkingEvent, setLinkingEvent] = useState(false);
+  const [eventQuery, setEventQuery] = useState("");
   const [folderPicking, setFolderPicking] = useState(false);
   const titleRef = useRef(null);
   const debounceRef = useRef(null);
@@ -7640,6 +7883,10 @@ function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate
     onContentChange(appended);
   };
 
+  const linkedEvent = note.calendar_event_id ? (entityCtx.calendarEvents || []).find((e) => e.id === note.calendar_event_id) : null;
+  const eventOptions = buildNoteEntityOptions({ ...entityCtx, deals: [], enablers: [], organizations: [], contacts: [] }, eventQuery)
+    .filter((o) => o.type === "calendar_event")
+    .slice(0, 8);
   const linked = noteLinkedEntity(note, entityCtx);
   const options = buildNoteEntityOptions(entityCtx, linkQuery).slice(0, 8);
   const flatFolders = flattenFolders(folders);
@@ -7681,6 +7928,42 @@ function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate
             📌 {note.is_pinned ? "Pinned" : "Pin"}
           </button>
 
+          {/* A note can carry BOTH a meeting link and an entity link, so the
+              meeting shows as its own pill rather than competing for the one
+              "Link to" slot. */}
+          {/* The meeting link is its own axis, with its own control. Sharing the
+              single "Link to" slot with the entity link meant a note that was
+              already linked to a person could never be attached to a meeting. */}
+          <div className="note-link-wrap">
+            {linkedEvent ? (
+              <span className="note-link-pill note-link-pill-meeting" title="This note is the report for this meeting">
+                📅 {linkedEvent.title || "Meeting"}
+                {onOpenEvent && <button className="note-link-open" onClick={() => onOpenEvent(linkedEvent.id)} title="Open the meeting">↗</button>}
+                <button className="note-link-remove" onClick={() => onLink(note.id, { type: "calendar_event", entityId: null })} title="Unlink from meeting">✕</button>
+              </span>
+            ) : linkingEvent ? (
+              <div className="note-link-picker">
+                <input
+                  autoFocus className="input note-link-search" placeholder="Search meetings..."
+                  value={eventQuery} onChange={(e) => setEventQuery(e.target.value)}
+                  onBlur={() => setTimeout(() => setLinkingEvent(false), 150)}
+                />
+                <div className="note-link-options">
+                  {eventOptions.length === 0 ? <div className="empty-small">No matches.</div> : eventOptions.map((o) => (
+                    <button
+                      key={o.entityId} className="note-link-option"
+                      onMouseDown={() => { onLink(note.id, o); setLinkingEvent(false); setEventQuery(""); }}
+                    >
+                      <span className="note-link-option-name">{o.name}</span>
+                      <span className="note-link-option-kind">Meeting</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <button className="note-tool-btn" onClick={() => { setLinkingEvent(true); setEventQuery(""); }}>📅 Link meeting...</button>
+            )}
+          </div>
           <div className="note-link-wrap">
             {linked ? (
               <span className="note-link-pill">
@@ -7746,6 +8029,26 @@ function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate
 }
 
 // Read-only "Linked Notes" section shown on Institution and Person sheets.
+// One note as a compact, openable card: title, a one-line plain-text preview,
+// and the date. Used everywhere a note is surfaced away from the Notes tab (the
+// calendar event panel, institution and person sheets), so a note never lands
+// as a wall of text in someone else's view.
+function NoteCard({ note, onOpen, badge }) {
+  const preview = stripHtmlToText(note.content || "").slice(0, 120);
+  return (
+    <button type="button" className="note-card" onClick={() => onOpen(note.id)} title={`Open ${note.title || "Untitled"}`}>
+      <div className="note-card-main">
+        <div className="note-card-title">
+          {badge && <span className="note-card-badge">{badge}</span>}
+          {note.title || "Untitled"}
+        </div>
+        {preview && <div className="note-card-preview">{preview}</div>}
+      </div>
+      <span className="note-card-date">{formatDate(note.updated_at || note.created_at)}</span>
+    </button>
+  );
+}
+
 function LinkedNotesSection({ notes, onOpenNote }) {
   if (!notes || notes.length === 0) return null;
   const sorted = [...notes].sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
@@ -7754,10 +8057,7 @@ function LinkedNotesSection({ notes, onOpenNote }) {
       <div className="section-label">Linked Notes</div>
       <div className="linked-notes-list">
         {sorted.map((n) => (
-          <button key={n.id} className="linked-note-row" onClick={() => onOpenNote(n.id)}>
-            <span className="linked-note-title">{n.title || "Untitled"}</span>
-            <span className="linked-note-date">{formatDate(n.updated_at || n.created_at)}</span>
-          </button>
+          <NoteCard key={n.id} note={n} onOpen={onOpenNote} badge={n.calendar_event_id ? "Meeting" : null} />
         ))}
       </div>
     </div>
