@@ -282,26 +282,31 @@ ${context}`;
 // app would have to parse) is what lets every bullet become its own editable
 // block with its own title and body.
 export const generateExecSummary = async (context) => {
-  const prompt = `You are preparing a biweekly update that a VP of Commercial will present to the executive team of a healthcare company operating in Saudi Arabia. Below is the raw CRM data for the last two weeks.
+  const prompt = `You are preparing a biweekly update that a VP of Commercial will present to the executive team of a healthcare company operating in Saudi Arabia. Below is the CRM data for the last two weeks.
 
-Synthesize it. Do NOT restate the log. Merge related entries, drop noise, and keep only what an executive would care about: momentum, risk, money, and relationships that open doors. If a section has nothing worth reporting, return an empty array for it rather than padding it.
+Synthesize it. Do NOT restate the log. Merge related entries, drop noise (vendor marketing emails, calendar invite acceptances, and automated notifications are never worth reporting), and keep only what an executive would care about: momentum, risk, money, and relationships that open doors. If a section has nothing worth reporting, return an empty array rather than padding it.
 
-Write for an audience with no context on individual contacts: name the institution and why it matters, not just the person.
+Lead with the strongest signal: real meetings with decision-relevant people. Write for an audience with no context on individual contacts, so name the institution and why it matters, not just the person.
 
-Return ONLY a JSON object with exactly these keys, each an array of objects with "title" and "content":
+The MEETINGS HELD list has already been deduplicated, so treat each entry as one real meeting and never split or repeat one. For each meeting use its NOTES to write both a one-line outcome and the talking points.
+
+Return ONLY a JSON object with exactly these keys:
 {
-  "pipeline": [{"title": "short bold headline, max 8 words", "content": "1-2 sentences of substance"}],
-  "meetings": [{"title": "institution or meeting name", "content": "what happened and what it means, 1-2 sentences"}],
-  "relationships": [{"title": "person or institution name", "content": "who they are and why they matter, 1 sentence"}],
-  "wins": [{"title": "the win", "content": "1 sentence on impact"}],
+  "meetings": [{
+    "title": "meeting name, who it was with, and the date",
+    "content": "ONE line: the outcome and why it matters",
+    "talking_points": ["3 to 5 short substantive bullets from the notes, the detail he would speak to if an executive asks"]
+  }],
+  "bd_momentum": [{"title": "short headline, max 8 words", "content": "1-2 sentences on pipeline or relationship progress"}],
+  "outreach": [{"title": "short headline", "content": "1 sentence on volume, channel, and who was targeted"}],
   "coming_up": [{"title": "what is coming", "content": "1 sentence on why it matters"}]
 }
 
-Aim for at most 4 items per section, fewer if the data does not support more. No markdown, no asterisks, no backticks. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.
+At most 5 meetings and at most 4 items in every other section, fewer if the data does not support more. Talking points must come from the meeting's own notes; if a meeting has no notes, return an empty talking_points array rather than inventing detail. No markdown, no asterisks, no backticks. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.
 
 Here is the data:
 ${context}`;
-  const text = await plainText(prompt, 800);
+  const text = await plainText(prompt, 900);
   const cleaned = (text || "").replace(/```json/gi, "").replace(/```/g, "").trim();
   const first = cleaned.indexOf("{");
   const last = cleaned.lastIndexOf("}");

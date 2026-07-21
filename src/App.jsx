@@ -6,7 +6,7 @@ import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo,
 import MapTab from "./MapTab";
 import VoiceRecorder from "./VoiceRecorder";
 import RichTextEditor, { RichTextView } from "./RichTextEditor";
-import { stripHtmlToText, isContentEmpty } from "./richtext";
+import { stripHtmlToText, isContentEmpty, toDisplayHtml, looksLikeHtml } from "./richtext";
 import "./styles.css";
 
 // Boss View (?view=boss) renders the full app in read-only mode: same layout and
@@ -453,19 +453,64 @@ function FormattedActivityBody({ lines }) {
 // those numbers are computed locally rather than written by the AI.
 const EXEC_SECTIONS = [
   { id: "metrics", label: "Headline Metrics", aiKey: null },
-  { id: "pipeline", label: "Pipeline Progress", aiKey: "pipeline" },
   { id: "meetings", label: "Key Meetings", aiKey: "meetings" },
-  { id: "relationships", label: "New Relationships", aiKey: "relationships" },
-  { id: "wins", label: "Wins", aiKey: "wins" },
+  { id: "bd_momentum", label: "BD Momentum", aiKey: "bd_momentum" },
+  { id: "outreach", label: "Outreach", aiKey: "outreach" },
   { id: "coming_up", label: "Coming Up", aiKey: "coming_up" },
 ];
 const execSectionLabel = (id) => EXEC_SECTIONS.find((s) => s.id === id)?.label || id || "Other";
 const EXEC_BLOCK_TYPES = [
   { id: "item", label: "Item" },
+  { id: "meeting", label: "Meeting (with talking points)" },
   { id: "commentary", label: "Commentary" },
   { id: "metric", label: "Metric" },
   { id: "header", label: "Section header" },
 ];
+
+// A `meeting` block carries two layers in one rich-text `content` field: the
+// leading text is the one-line outcome shown on the slide, and any bullet list
+// is the collapsible talking points. Keeping both in one field means the user
+// edits a meeting in a single editor (and can add or remove bullets naturally)
+// without needing a column the schema does not have.
+function splitMeetingContent(html) {
+  const doc = new DOMParser().parseFromString(`<div>${toDisplayHtml(html) || ""}</div>`, "text/html");
+  const root = doc.body.firstChild;
+  const list = root.querySelector("ul, ol");
+  const points = list ? [...list.querySelectorAll("li")].map((li) => li.innerHTML.trim()).filter(Boolean) : [];
+  if (list) list.remove();
+  return { lead: root.innerHTML.trim(), points };
+}
+
+// Builds that same combined structure from a headline and a list of points.
+function buildMeetingContent(lead, points) {
+  const body = (lead || "").trim();
+  const items = (points || []).map((p) => String(p).trim()).filter(Boolean);
+  const leadHtml = looksLikeHtml(body) ? body : (body ? `<div>${body.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>` : "");
+  const listHtml = items.length ? `<ul>${items.map((p) => `<li>${p.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</li>`).join("")}</ul>` : "";
+  return `${leadHtml}${listHtml}`;
+}
+
+// Parses the calendar sync's activity descriptions, which look like
+// `Upcoming meeting: "Title" on Jul 21, 2026 at 10:30 AM`. The same meeting
+// shows up as both Upcoming and Completed, and a reschedule adds another
+// Upcoming at a different time, so the dedupe key is title plus DAY (never the
+// time) and the completed phase always wins.
+const EXEC_SYNC_MEETING_RE = /^(Upcoming|Completed) meeting:\s*"(.+?)"\s*on\s+(.+?)(?:\s+at\s+.*)?$/;
+function parseSyncMeeting(description) {
+  const clean = cleanActivityText(description || "");
+  const first = firstLine(clean).trim();
+  const m = first.match(EXEC_SYNC_MEETING_RE);
+  if (m) return { phase: m[1].toLowerCase(), title: m[2].trim(), dayText: m[3].trim() };
+  // A logged calendar outcome is shaped "Meeting:\n<title>\n\nOutcome:\n<text>",
+  // so its first line is the bare word "Meeting:". Taking that as the title
+  // would both read as nonsense and collide with every other outcome logged
+  // the same day, so pull the real title from the next line.
+  if (/^Meeting:$/i.test(first)) {
+    const title = (clean.split("\n")[1] || "").trim();
+    if (title) return { phase: "outcome", title, dayText: null };
+  }
+  return null;
+}
 
 // Materials Library vocabularies (badge colors follow the constants.js pattern).
 const MATERIAL_TYPES = [
@@ -3103,10 +3148,6 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } finally { loggingOutcomeRef.current = false; }
   };
 
-  // "Extract tasks from outcome" (Section 6): reuses the voice-note digest
-  // prompt (it already returns {summary, action_items}) on typed outcome text,
-  // then creates one todo per action item, linked to every tagged person and
-  // the first tagged institution (a todo only carries one institution FK).
   /* ============================================================
      Executive Update: the curated biweekly deck (see CLAUDE.md).
      The system drafts it; Fahed owns every block from there on.
@@ -3125,9 +3166,77 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setExecPresentations((prev) => prev.map((p) => (p.id === id ? { ...p, updated_at: now } : p)));
   };
 
+  // The meetings that actually happened in the window, deduplicated.
+  //
+  // The calendar sync writes the SAME meeting as both an "Upcoming" and a
+  // "Completed" activity, and a reschedule adds a second "Upcoming" at a new
+  // time, so the raw log shows one meeting up to three times. Grouping by
+  // title plus calendar day (never the time) and preferring the completed
+  // phase collapses that back to one entry per real meeting.
+  //
+  // Each entry carries the FULLEST text available for the meeting, in
+  // preference order: the calendar event's outcome_notes, then a note linked
+  // to the same entity on the same day, then the activity description. The
+  // activity description is the truncated one, so it is the last resort.
+  const gatherExecMeetings = (startISO, endISO) => {
+    const inRange = (d) => d && d >= startISO && d <= endISO;
+    const acts = activities.filter((a) => inRange(a.created_at) && ["meeting", "call", "demo"].includes(a.type));
+    const byKey = new Map();
+
+    const nameFor = (a) => {
+      const inst = activityInstitutionInfo(a, { deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles });
+      const person = activityPersonInfo(a, contacts);
+      return { institution: inst?.name || null, person: person?.name || null };
+    };
+
+    acts.forEach((a) => {
+      const synced = parseSyncMeeting(a.description);
+      const day = (a.created_at || "").slice(0, 10);
+      // A synced row keys on its parsed title; a hand-logged one keys on its
+      // own first line, so manual entries never collapse into each other.
+      const title = synced ? synced.title : firstLine(cleanActivityText(a.description)).trim();
+      const key = `${title.toLowerCase()}|${day}`;
+      const phase = synced ? synced.phase : "logged";
+      const existing = byKey.get(key);
+      // Rank by how much real content the row carries: a logged outcome (which
+      // has actual notes) beats a hand-written entry, which beats a synced
+      // "completed", which beats a bare "upcoming" placeholder.
+      const rank = phase === "outcome" ? 3 : phase === "logged" ? 2 : phase === "completed" ? 1 : 0;
+      if (existing && existing.rank >= rank) return;
+      byKey.set(key, { key, rank, phase, title, day, activity: a, ...nameFor(a) });
+    });
+
+    return [...byKey.values()].map((m) => {
+      const ev = calendarEvents.find((e) => activityCalendarEventId(m.activity) === e.id)
+        || calendarEvents.find((e) => (e.title || "").trim().toLowerCase() === m.title.toLowerCase() && (e.start_time || "").slice(0, 10) === m.day);
+      // Notes are usually written up a day or two AFTER the meeting, so match
+      // within a few days rather than on the exact day, which would miss them.
+      const dayMs = new Date(`${m.day}T00:00:00Z`).getTime();
+      const linkedNote = notes.find((n) => {
+        const nd = new Date(`${(n.updated_at || n.created_at || "").slice(0, 10)}T00:00:00Z`).getTime();
+        if (!nd || Math.abs(nd - dayMs) > 3 * 86400000) return false;
+        return (m.activity.contact_id && n.contact_id === m.activity.contact_id)
+          || (m.activity.deal_id && n.deal_id === m.activity.deal_id)
+          || (m.activity.enabler_id && n.enabler_id === m.activity.enabler_id)
+          || (m.activity.organization_id && n.organization_id === m.activity.organization_id);
+      });
+      // Combine rather than pick: an outcome field often just points at the
+      // note ("refer to note"), and the note holds the substance. Feeding both
+      // is what lets the model write real talking points instead of echoing a
+      // one-line placeholder.
+      const noteText = linkedNote
+        ? [linkedNote.title, stripHtmlToText(linkedNote.content || "")].filter(Boolean).join(": ").trim()
+        : "";
+      const outcome = [ (ev?.outcome_notes || "").trim(), noteText ]
+        .filter(Boolean).join(" ")
+        || cleanActivityText(m.activity.description || "").trim();
+      return { ...m, event: ev || null, outcome, note: linkedNote || null, sourceType: ev ? "calendar_event" : "activity", sourceId: ev ? ev.id : m.activity.id };
+    }).sort((a, b) => (a.day < b.day ? 1 : -1));
+  };
+
   // Gathers the raw two-week window and shapes it for the model. Deliberately
   // compact: names, stages, and one-line summaries, not full descriptions, so
-  // the 800-token budget goes to synthesis rather than reading a log.
+  // the token budget goes to synthesis rather than reading a log.
   const gatherExecContext = (startISO, endISO) => {
     const inRange = (d) => d && d >= startISO && d <= endISO;
     const acts = activities.filter((a) => inRange(a.created_at));
@@ -3149,10 +3258,20 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     transitions.forEach((t) => lines.push(`- ${t.company}${t.tier && t.tier !== "Untiered" ? ` (${t.tier})` : ""}: ${stageLabel(t.fromStage)} to ${stageLabel(t.toStage)}`));
     lines.push(`\nNEW DEALS (${newDeals.length}):`);
     newDeals.forEach((d) => lines.push(`- ${d.company}, stage ${stageLabel(d.stage)}${d.value ? `, value ${d.value}` : ""}`));
-    lines.push(`\nMEETINGS AND CALLS (${meetings.length}):`);
-    meetings.slice(0, 40).forEach((a) => lines.push(`- [${formatDate(a.created_at)}] ${nameFor(a)}: ${firstLine(cleanActivityText(a.description))}`));
-    lines.push(`\nOTHER ACTIVITY (${acts.length - meetings.length}):`);
-    acts.filter((a) => !meetings.includes(a)).slice(0, 30).forEach((a) => lines.push(`- ${a.type} with ${nameFor(a)}: ${firstLine(cleanActivityText(a.description))}`));
+    // Deduplicated meetings, each with its FULL outcome text so the model can
+    // write real talking points instead of paraphrasing a truncated log line.
+    const deduped = gatherExecMeetings(startISO, endISO);
+    lines.push(`\nMEETINGS HELD, ALREADY DEDUPLICATED (${deduped.length}). Each entry is one real meeting:`);
+    deduped.forEach((m) => {
+      const who = [m.person, m.institution].filter(Boolean).join(", ");
+      lines.push(`- MEETING "${m.title}" on ${formatDate(m.day)}${who ? ` with ${who}` : ""}`);
+      if (m.outcome) lines.push(`  NOTES: ${m.outcome.replace(/\s+/g, " ").slice(0, 700)}`);
+    });
+    const nonMeeting = acts.filter((a) => !meetings.includes(a));
+    lines.push(`\nOTHER ACTIVITY (${nonMeeting.length}):`);
+    nonMeeting.slice(0, 40).forEach((a) => lines.push(`- ${a.type} with ${nameFor(a)}: ${firstLine(cleanActivityText(a.description))}`));
+    const byChannel = execOutreachByChannel(startISO, endISO);
+    lines.push(`\nOUTREACH BY CHANNEL: ${byChannel.summary || "none"}`);
     lines.push(`\nNEW PEOPLE (${newContacts.length}):`);
     newContacts.forEach((c) => lines.push(`- ${c.name}${c.role ? `, ${c.role}` : ""}${c.company ? ` at ${c.company}` : ""}${c.warmth ? `, warmth ${c.warmth}` : ""}`));
     lines.push(`\nNEW INSTITUTIONS (${newOrgs.length}):`);
@@ -3174,13 +3293,33 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       const inst = activityInstitutionInfo(a, { deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles });
       if (inst?.name) instKeys.add(inst.name);
     });
+    // Meetings are counted from the DEDUPLICATED list, not raw activities, so
+    // the headline number matches the meetings actually shown below it.
+    const meetingCount = gatherExecMeetings(startISO, endISO).length;
+    const outreach = execOutreachByChannel(startISO, endISO);
     return [
-      { title: "Institutions engaged", content: String(instKeys.size) },
-      { title: "Meetings held", content: String(acts.filter((a) => ["meeting", "call", "demo"].includes(a.type)).length) },
+      { title: "Meetings held", content: String(meetingCount) },
       { title: "New relationships", content: String(contacts.filter((c) => inRange(c.created_at)).length) },
+      { title: "Institutions engaged", content: String(instKeys.size) },
+      { title: "Outreach sent", content: String(outreach.total) },
       { title: "Deals advanced", content: String(buildStageTransitions(activities, deals).filter((t) => inRange(t.date)).length) },
-      { title: "Outreach sent", content: String(acts.filter((a) => ["email", "linkedin", "whatsapp"].includes(a.type)).length) },
     ];
+  };
+
+  // Outreach split by channel, for both the metric block and the Outreach
+  // section (e.g. "10 LinkedIn, 6 email, 3 WhatsApp").
+  const execOutreachByChannel = (startISO, endISO) => {
+    const inRange = (d) => d && d >= startISO && d <= endISO;
+    const acts = activities.filter((a) => inRange(a.created_at));
+    const counts = {};
+    OUTREACH_CHANNELS.forEach((ch) => { counts[ch.id] = 0; });
+    acts.forEach((a) => { if (counts[a.type] !== undefined) counts[a.type] += 1; });
+    const parts = OUTREACH_CHANNELS
+      .map((ch) => ({ ch, n: counts[ch.id] || 0 }))
+      .filter((x) => x.n > 0)
+      .sort((a, b) => b.n - a.n)
+      .map((x) => `${x.n} ${x.ch.label}`);
+    return { counts, total: Object.values(counts).reduce((s, n) => s + n, 0), summary: parts.join(", ") };
   };
 
   // "+ New Biweekly Update": creates the presentation, then drafts its blocks.
@@ -3217,7 +3356,28 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       try { ai = await generateExecSummary(gatherExecContext(startISO, endISO)); }
       catch (e) { console.error("[Exec] AI draft failed", e); }
 
-      EXEC_SECTIONS.filter((s) => s.id !== "metrics").forEach((sec) => {
+      // Meetings become `meeting` blocks: the one-line outcome is the visible
+      // headline and the talking points ride along in the same content field
+      // as a bullet list, collapsed behind a chevron until Fahed opens it.
+      // source_type/source_id point back at the calendar event or activity the
+      // block came from, so a block can be traced or regenerated later.
+      const meetingItems = Array.isArray(ai?.meetings) ? ai.meetings : [];
+      const drafted = gatherExecMeetings(startISO, endISO);
+      if (meetingItems.length) {
+        push({ block_type: "header", section: "meetings", title: "Key Meetings", content: null });
+        meetingItems.forEach((it, i) => {
+          const src = drafted[i] || null;
+          push({
+            block_type: "meeting", section: "meetings",
+            title: (it.title || "").trim() || null,
+            content: buildMeetingContent((it.content || "").trim(), Array.isArray(it.talking_points) ? it.talking_points : []),
+            source_type: src ? src.sourceType : null,
+            source_id: src ? src.sourceId : null,
+          });
+        });
+      }
+
+      EXEC_SECTIONS.filter((s) => s.id !== "metrics" && s.id !== "meetings").forEach((sec) => {
         const items = Array.isArray(ai?.[sec.aiKey]) ? ai[sec.aiKey] : [];
         if (!items.length) return;
         push({ block_type: "header", section: sec.id, title: sec.label, content: null });
@@ -3306,6 +3466,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Could not save the new order."); }
   };
 
+  // "Extract tasks from outcome": reuses the voice-note digest prompt (it
+  // already returns {summary, action_items}) on typed outcome text, then
+  // creates one todo per action item, linked to every tagged person and the
+  // first tagged institution (a todo only carries one institution FK).
   const extractTasksFromOutcome = async (ev, outcomeText) => {
     const text = (outcomeText || "").trim();
     if (!text) { showToast("Outcome is empty"); return; }
@@ -5310,6 +5474,15 @@ function execPlainText(pres, blocks) {
     if (b.section !== section && b.block_type !== "header") { /* keep flowing under the last header */ }
     if (b.block_type === "metric") { lines.push(`${b.title}: ${b.content || ""}`.trim()); return; }
     const title = (b.title || "").trim();
+    if (b.block_type === "meeting") {
+      // A meeting exports as its headline plus indented talking points, so the
+      // detail travels with it into an email rather than being lost.
+      const { lead, points } = splitMeetingContent(b.content);
+      const outcome = stripHtmlToText(lead).trim();
+      lines.push(`- ${[title, outcome].filter(Boolean).join(": ")}`);
+      points.forEach((p) => lines.push(`    . ${stripHtmlToText(p).trim()}`));
+      return;
+    }
     const content = stripHtmlToText(b.content || "").trim();
     if (title && content) lines.push(`- ${title}: ${content}`);
     else if (title || content) lines.push(`- ${title || content}`);
@@ -5329,12 +5502,52 @@ function execSlideText(pres, blocks) {
     if (!current) current = execSectionLabel(b.section);
     if (b.block_type === "metric") { buf.push(`• ${b.title}: ${b.content || ""}`.trim()); return; }
     const title = (b.title || "").trim();
+    if (b.block_type === "meeting") {
+      const { lead, points } = splitMeetingContent(b.content);
+      if (title) buf.push(`• ${title}`);
+      const outcome = stripHtmlToText(lead).trim();
+      if (outcome) buf.push(`   ${outcome}`);
+      points.forEach((p) => buf.push(`     - ${stripHtmlToText(p).trim()}`));
+      return;
+    }
     const content = stripHtmlToText(b.content || "").trim();
     if (title) buf.push(`• ${title}`);
     if (content) buf.push(`   ${content}`);
   });
   flush();
   return out.join("\n");
+}
+
+// A meeting's two layers: the headline outcome always visible, the talking
+// points behind a chevron and collapsed by default. Used in BOTH edit and
+// present mode, so what Fahed rehearses is exactly what the executives see.
+// The slide stays clean; he expands only if someone asks for detail.
+function ExecMeetingBody({ content, presenting = false }) {
+  const [open, setOpen] = useState(false);
+  const { lead, points } = splitMeetingContent(content);
+  return (
+    <>
+      {lead && <RichTextView value={lead} className={presenting ? "exec-present-item-body" : "exec-block-content"} />}
+      {points.length > 0 && (
+        <div className="exec-points">
+          <button
+            type="button"
+            className="exec-points-toggle"
+            onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+            aria-expanded={open}
+          >
+            <span className={`exec-chevron ${open ? "open" : ""}`}>›</span>
+            {open ? "Hide talking points" : `Talking points (${points.length})`}
+          </button>
+          {open && (
+            <ul className="exec-points-list">
+              {points.map((p, i) => <li key={i} dangerouslySetInnerHTML={{ __html: p }} />)}
+            </ul>
+          )}
+        </div>
+      )}
+    </>
+  );
 }
 
 // One editable block in EDIT MODE. Read state shows the rendered block with its
@@ -5358,6 +5571,7 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
 
   const isHeader = block.block_type === "header";
   const isMetric = block.block_type === "metric";
+  const isMeeting = block.block_type === "meeting";
 
   if (editing) {
     return (
@@ -5366,7 +5580,10 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
         {isHeader ? null : isMetric ? (
           <input className="input exec-edit-metric" value={content} onChange={(e) => setContent(e.target.value)} placeholder="Value" />
         ) : (
-          <RichTextEditor value={content} onChange={setContent} mini placeholder="What the executives should hear..." />
+          <>
+            <RichTextEditor value={content} onChange={setContent} mini placeholder={isMeeting ? "One-line outcome, then a bullet list for talking points..." : "What the executives should hear..."} />
+            {isMeeting && <div className="exec-add-hint">The bullet list is the collapsible talking points.</div>}
+          </>
         )}
         <div className="exec-edit-actions">
           <button type="button" className="btn-primary" disabled={saving} onClick={save}>{saving ? "Saving..." : "Save"}</button>
@@ -5397,7 +5614,9 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
         ) : (
           <>
             {block.title && <div className="exec-block-title">{block.title}</div>}
-            {block.content && <RichTextView value={block.content} className="exec-block-content" />}
+            {block.block_type === "meeting"
+              ? <ExecMeetingBody content={block.content} />
+              : block.content && <RichTextView value={block.content} className="exec-block-content" />}
             {block.block_type === "commentary" && <span className="exec-commentary-tag">Commentary</span>}
           </>
         )}
@@ -5456,8 +5675,9 @@ function ExecAddBlock({ onAdd }) {
       <input className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder={blockType === "header" ? "Section header text" : "Title"} autoFocus />
       {blockType !== "header" && (blockType === "metric"
         ? <input className="input" value={content} onChange={(e) => setContent(e.target.value)} placeholder="Value" />
-        : <RichTextEditor value={content} onChange={setContent} mini placeholder="Detail..." />
+        : <RichTextEditor value={content} onChange={setContent} mini placeholder={blockType === "meeting" ? "One-line outcome, then a bullet list for talking points..." : "Detail..."} />
       )}
+      {blockType === "meeting" && <div className="exec-add-hint">Any bullet list you add becomes the collapsible talking points.</div>}
       <div className="exec-edit-actions">
         <button type="button" className="btn-primary" disabled={saving || (!title.trim() && !content.trim())} onClick={submit}>{saving ? "Adding..." : "Add block"}</button>
         <button type="button" className="btn-ghost" onClick={() => setOpen(false)}>Cancel</button>
@@ -5513,7 +5733,9 @@ function ExecPresentView({ pres, blocks, onExit }) {
               {rest.map((b) => (
                 <div key={b.id} className={`exec-present-item ${b.block_type === "commentary" ? "exec-present-commentary" : ""}`}>
                   {b.title && <div className="exec-present-item-title">{b.title}</div>}
-                  {b.content && <RichTextView value={b.content} className="exec-present-item-body" />}
+                  {b.block_type === "meeting"
+                    ? <ExecMeetingBody content={b.content} presenting />
+                    : b.content && <RichTextView value={b.content} className="exec-present-item-body" />}
                 </div>
               ))}
             </section>
@@ -5658,7 +5880,7 @@ function ExecUpdateTab({
               <div className="exec-block-body">
                 {b.block_type === "header" ? <div className="exec-block-header-text">{b.title || execSectionLabel(b.section)}</div>
                   : b.block_type === "metric" ? <div className="exec-metric-inline"><span className="exec-metric-value">{b.content}</span><span className="exec-metric-label">{b.title}</span></div>
-                  : <>{b.title && <div className="exec-block-title">{b.title}</div>}{b.content && <RichTextView value={b.content} className="exec-block-content" />}</>}
+                  : <>{b.title && <div className="exec-block-title">{b.title}</div>}{b.block_type === "meeting" ? <ExecMeetingBody content={b.content} /> : b.content && <RichTextView value={b.content} className="exec-block-content" />}</>}
               </div>
             </div>
           ) : (

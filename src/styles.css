@@ -1765,3 +1765,30 @@ body.exec-presenting-body { overflow: hidden; }
    140px min-height: a one-line block would otherwise reserve a full editor's
    worth of blank space, which showed up as large gaps between exec blocks. */
 .rte-view { min-height: 0; overflow: visible; }
+
+/* Meeting blocks: headline always visible, talking points behind a chevron.
+   Collapsed by default in both edit and present mode so the slide stays clean
+   and Fahed expands only if an executive asks for the detail. */
+.exec-points { margin-top: 8px; }
+.exec-points-toggle {
+  display: inline-flex; align-items: center; gap: 6px; border: none; background: none;
+  color: var(--muted-2); font-family: inherit; font-size: 12.5px; font-weight: 650;
+  cursor: pointer; padding: 4px 2px; border-radius: 6px;
+}
+.exec-points-toggle:hover { color: var(--accent-strong, #B77400); }
+.exec-chevron { display: inline-block; transition: transform .15s ease; font-size: 15px; line-height: 1; }
+.exec-chevron.open { transform: rotate(90deg); }
+.exec-points-list { margin: 6px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 5px; }
+.exec-points-list li { font-size: 13px; line-height: 1.5; color: var(--text-2); }
+.exec-add-hint { font-size: 11.5px; color: var(--muted); }
+
+/* Present mode sizes the toggle and points up for screen-share. */
+.exec-present-item .exec-points-toggle { font-size: 15px; padding: 8px 2px; }
+.exec-present-item .exec-points-list { padding-left: 24px; gap: 10px; margin-top: 10px; }
+.exec-present-item .exec-points-list li { font-size: 16px; line-height: 1.55; }
+
+/* Print shows the talking points expanded: a PDF has no one to click it. */
+@media print {
+  .exec-points-toggle { display: none !important; }
+  .exec-points-list { display: flex !important; }
+}
