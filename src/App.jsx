@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
 import { api } from "./supabase";
-import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
+import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, generateExecSummary, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, toDateTimeLocal, fromDateTimeLocal, FATHOM_MARKER, isFathomActivity, stripFathomMarker, activityCalendarEventId, cleanActivityText } from "./utils";
 import MapTab from "./MapTab";
@@ -448,6 +448,25 @@ function FormattedActivityBody({ lines }) {
   );
 }
 
+// Executive Update sections, in presentation order. `aiKey` maps a section to
+// the key the model returns in its JSON draft; "metrics" has none because
+// those numbers are computed locally rather than written by the AI.
+const EXEC_SECTIONS = [
+  { id: "metrics", label: "Headline Metrics", aiKey: null },
+  { id: "pipeline", label: "Pipeline Progress", aiKey: "pipeline" },
+  { id: "meetings", label: "Key Meetings", aiKey: "meetings" },
+  { id: "relationships", label: "New Relationships", aiKey: "relationships" },
+  { id: "wins", label: "Wins", aiKey: "wins" },
+  { id: "coming_up", label: "Coming Up", aiKey: "coming_up" },
+];
+const execSectionLabel = (id) => EXEC_SECTIONS.find((s) => s.id === id)?.label || id || "Other";
+const EXEC_BLOCK_TYPES = [
+  { id: "item", label: "Item" },
+  { id: "commentary", label: "Commentary" },
+  { id: "metric", label: "Metric" },
+  { id: "header", label: "Section header" },
+];
+
 // Materials Library vocabularies (badge colors follow the constants.js pattern).
 const MATERIAL_TYPES = [
   { id: "one_pager", label: "One-Pager", color: "#2A6FDB" },
@@ -721,6 +740,7 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
   ];
   const more = [
     { id: "reports", label: "Reports", count: reportsUnreadCount },
+    { id: "exec", label: "Exec Update" },
   ];
   const mapView = view === "institution-sheet" ? sheetOrigin : view === "person-sheet" ? "network" : view;
   return (
@@ -1266,6 +1286,13 @@ export default function App() {
   const [calendarEvents, setCalendarEvents] = useState([]);
   const [eventInstitutions, setEventInstitutions] = useState([]);
   const [eventContacts, setEventContacts] = useState([]);
+  // Executive Update: the curated biweekly deck Fahed presents. Separate from
+  // the Week in Review, which is a live auto-dashboard nobody edits.
+  const [execPresentations, setExecPresentations] = useState([]);
+  const [execBlocks, setExecBlocks] = useState([]);
+  const [execOpenId, setExecOpenId] = useState(null);
+  const [execPresenting, setExecPresenting] = useState(false);
+  const [execGenerating, setExecGenerating] = useState(false);
   // The calendar event whose detail panel is open (a global overlay, so it can
   // be reached from the Calendar tab or from a "📅 Meeting" activity pill
   // anywhere in the app).
@@ -1326,7 +1353,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1352,6 +1379,8 @@ export default function App() {
         api("calendar_events", "GET", null, "?select=*&order=start_time.asc").catch(() => []),
         api("event_institutions", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
         api("event_contacts", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
+        api("exec_presentations", "GET", null, "?select=*&order=period_end.desc,created_at.desc").catch(() => []),
+        api("exec_blocks", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []); setTodoContacts(tdc || []);
@@ -1359,6 +1388,7 @@ export default function App() {
       setCustomOptions(co || []); setContactRoles(cr || []); setBossComments(bc || []); setNotes(nt || []); setNoteFolders(nf || []);
       setMaterials(mat || []); setMaterialLinks(ml || []); setMeetingBriefs(mb || []); setEmailTemplates(et || []); setCalendarEvents(cal || []);
       setEventInstitutions(evinst || []); setEventContacts(evcon || []);
+      setExecPresentations(xp || []); setExecBlocks(xb || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -3077,6 +3107,205 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // prompt (it already returns {summary, action_items}) on typed outcome text,
   // then creates one todo per action item, linked to every tagged person and
   // the first tagged institution (a todo only carries one institution FK).
+  /* ============================================================
+     Executive Update: the curated biweekly deck (see CLAUDE.md).
+     The system drafts it; Fahed owns every block from there on.
+     ============================================================ */
+
+  const execBlocksFor = (presentationId) => execBlocks
+    .filter((b) => b.presentation_id === presentationId)
+    .slice()
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+
+  const touchPresentation = async (id) => {
+    const now = new Date().toISOString();
+    // No updated_at trigger on this table, so every write stamps it by hand
+    // (same as notes and materials).
+    await api("exec_presentations", "PATCH", { updated_at: now }, `?id=eq.${id}`).catch(() => {});
+    setExecPresentations((prev) => prev.map((p) => (p.id === id ? { ...p, updated_at: now } : p)));
+  };
+
+  // Gathers the raw two-week window and shapes it for the model. Deliberately
+  // compact: names, stages, and one-line summaries, not full descriptions, so
+  // the 800-token budget goes to synthesis rather than reading a log.
+  const gatherExecContext = (startISO, endISO) => {
+    const inRange = (d) => d && d >= startISO && d <= endISO;
+    const acts = activities.filter((a) => inRange(a.created_at));
+    const transitions = buildStageTransitions(activities, deals).filter((t) => inRange(t.date));
+    const newDeals = deals.filter((d) => inRange(d.created_at));
+    const newContacts = contacts.filter((c) => inRange(c.created_at));
+    const newOrgs = organizations.filter((o) => inRange(o.created_at));
+    const meetings = acts.filter((a) => ["meeting", "call", "demo"].includes(a.type));
+    const nextEnd = new Date(new Date(endISO).getTime() + 14 * 86400000).toISOString();
+    const upcoming = calendarEvents.filter((e) => e.start_time > endISO && e.start_time <= nextEnd);
+    const nameFor = (a) => {
+      const inst = activityInstitutionInfo(a, { deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles });
+      const person = activityPersonInfo(a, contacts);
+      return [inst?.name, person?.name].filter(Boolean).join(" / ") || "General";
+    };
+    const lines = [];
+    lines.push(`PERIOD: ${formatDate(startISO)} to ${formatDate(endISO)}`);
+    lines.push(`\nSTAGE CHANGES (${transitions.length}):`);
+    transitions.forEach((t) => lines.push(`- ${t.company}${t.tier && t.tier !== "Untiered" ? ` (${t.tier})` : ""}: ${stageLabel(t.fromStage)} to ${stageLabel(t.toStage)}`));
+    lines.push(`\nNEW DEALS (${newDeals.length}):`);
+    newDeals.forEach((d) => lines.push(`- ${d.company}, stage ${stageLabel(d.stage)}${d.value ? `, value ${d.value}` : ""}`));
+    lines.push(`\nMEETINGS AND CALLS (${meetings.length}):`);
+    meetings.slice(0, 40).forEach((a) => lines.push(`- [${formatDate(a.created_at)}] ${nameFor(a)}: ${firstLine(cleanActivityText(a.description))}`));
+    lines.push(`\nOTHER ACTIVITY (${acts.length - meetings.length}):`);
+    acts.filter((a) => !meetings.includes(a)).slice(0, 30).forEach((a) => lines.push(`- ${a.type} with ${nameFor(a)}: ${firstLine(cleanActivityText(a.description))}`));
+    lines.push(`\nNEW PEOPLE (${newContacts.length}):`);
+    newContacts.forEach((c) => lines.push(`- ${c.name}${c.role ? `, ${c.role}` : ""}${c.company ? ` at ${c.company}` : ""}${c.warmth ? `, warmth ${c.warmth}` : ""}`));
+    lines.push(`\nNEW INSTITUTIONS (${newOrgs.length}):`);
+    newOrgs.forEach((o) => lines.push(`- ${o.name}${o.type ? `, ${o.type}` : ""}${o.city ? `, ${o.city}` : ""}`));
+    const wonOrContracted = deals.filter((d) => ["won", "contracted"].includes(d.stage) && inRange(d.last_activity_at));
+    lines.push(`\nWON OR CONTRACTED (${wonOrContracted.length}):`);
+    wonOrContracted.forEach((d) => lines.push(`- ${d.company}, ${stageLabel(d.stage)}${d.value ? `, value ${d.value}` : ""}`));
+    lines.push(`\nUPCOMING NEXT TWO WEEKS (${upcoming.length}):`);
+    upcoming.slice(0, 20).forEach((e) => lines.push(`- ${formatDate(e.start_time)}: ${e.title}`));
+    return lines.join("\n");
+  };
+
+  // The metric blocks are computed, never AI-written: numbers must be exact.
+  const execMetrics = (startISO, endISO) => {
+    const inRange = (d) => d && d >= startISO && d <= endISO;
+    const acts = activities.filter((a) => inRange(a.created_at));
+    const instKeys = new Set();
+    acts.forEach((a) => {
+      const inst = activityInstitutionInfo(a, { deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles });
+      if (inst?.name) instKeys.add(inst.name);
+    });
+    return [
+      { title: "Institutions engaged", content: String(instKeys.size) },
+      { title: "Meetings held", content: String(acts.filter((a) => ["meeting", "call", "demo"].includes(a.type)).length) },
+      { title: "New relationships", content: String(contacts.filter((c) => inRange(c.created_at)).length) },
+      { title: "Deals advanced", content: String(buildStageTransitions(activities, deals).filter((t) => inRange(t.date)).length) },
+      { title: "Outreach sent", content: String(acts.filter((a) => ["email", "linkedin", "whatsapp"].includes(a.type)).length) },
+    ];
+  };
+
+  // "+ New Biweekly Update": creates the presentation, then drafts its blocks.
+  // Metrics are computed locally and the narrative sections come from one AI
+  // synthesis pass. If the AI call fails the presentation is still created with
+  // its metrics, so the user always has something to edit rather than nothing.
+  const createExecPresentation = async () => {
+    if (execGenerating) return;
+    setExecGenerating(true);
+    const end = new Date();
+    const start = new Date(end.getTime() - 14 * 86400000);
+    const endDate = end.toISOString().slice(0, 10);
+    const startDate = start.toISOString().slice(0, 10);
+    try {
+      const rows = await api("exec_presentations", "POST", {
+        title: `Executive Update, ${formatDate(start)} to ${formatDate(end)}`,
+        period_start: startDate, period_end: endDate, status: "draft",
+      });
+      const pres = Array.isArray(rows) ? rows[0] : rows;
+      if (!pres) throw new Error("no presentation row");
+      setExecPresentations((prev) => [pres, ...prev]);
+      setExecOpenId(pres.id);
+      navigateTab("exec");
+
+      const startISO = start.toISOString(), endISO = end.toISOString();
+      const blocks = [];
+      let order = 0;
+      const push = (b) => { blocks.push({ presentation_id: pres.id, sort_order: order++, is_hidden: false, ...b }); };
+
+      push({ block_type: "header", section: "metrics", title: "Headline Metrics", content: null });
+      execMetrics(startISO, endISO).forEach((m) => push({ block_type: "metric", section: "metrics", title: m.title, content: m.content }));
+
+      let ai = null;
+      try { ai = await generateExecSummary(gatherExecContext(startISO, endISO)); }
+      catch (e) { console.error("[Exec] AI draft failed", e); }
+
+      EXEC_SECTIONS.filter((s) => s.id !== "metrics").forEach((sec) => {
+        const items = Array.isArray(ai?.[sec.aiKey]) ? ai[sec.aiKey] : [];
+        if (!items.length) return;
+        push({ block_type: "header", section: sec.id, title: sec.label, content: null });
+        items.forEach((it) => push({
+          block_type: "item", section: sec.id,
+          title: (it.title || "").trim() || null,
+          content: (it.content || "").trim() || null,
+        }));
+      });
+
+      const created = await api("exec_blocks", "POST", blocks);
+      setExecBlocks((prev) => [...prev, ...(created || [])]);
+      showToast(ai ? "Draft ready. Edit anything before you present." : "Created with metrics. AI draft unavailable, add items manually.");
+    } catch (e) {
+      console.error("[Exec] create failed", e);
+      showToast("Could not create the update. Please try again.");
+    } finally { setExecGenerating(false); }
+  };
+
+  const updateExecPresentation = async (id, patch) => {
+    try {
+      const now = new Date().toISOString();
+      const body = { ...patch, updated_at: now };
+      await api("exec_presentations", "PATCH", body, `?id=eq.${id}`);
+      setExecPresentations((prev) => prev.map((p) => (p.id === id ? { ...p, ...body } : p)));
+      savedToast();
+    } catch { showToast("Could not save. Please try again."); }
+  };
+
+  const deleteExecPresentation = async (id) => {
+    try {
+      // No guaranteed ON DELETE CASCADE, so blocks go first (same convention
+      // as every other delete in this app).
+      await api("exec_blocks", "DELETE", null, `?presentation_id=eq.${id}`);
+      await api("exec_presentations", "DELETE", null, `?id=eq.${id}`);
+      setExecBlocks((prev) => prev.filter((b) => b.presentation_id !== id));
+      setExecPresentations((prev) => prev.filter((p) => p.id !== id));
+      setExecOpenId((cur) => (cur === id ? null : cur));
+      showToast("Update deleted");
+    } catch { showToast("Could not delete. Please try again."); }
+  };
+
+  const addExecBlock = async (presentationId, fields) => {
+    try {
+      const siblings = execBlocksFor(presentationId);
+      const sort_order = siblings.length ? Math.max(...siblings.map((b) => b.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("exec_blocks", "POST", { presentation_id: presentationId, sort_order, is_hidden: false, ...fields });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setExecBlocks((prev) => [...prev, row]);
+      await touchPresentation(presentationId);
+      return true;
+    } catch { showToast("Could not add block. Please try again."); return false; }
+  };
+
+  const updateExecBlock = async (id, patch) => {
+    try {
+      await api("exec_blocks", "PATCH", patch, `?id=eq.${id}`);
+      setExecBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+      const block = execBlocks.find((b) => b.id === id);
+      if (block) await touchPresentation(block.presentation_id);
+      return true;
+    } catch { showToast("Could not save block. Please try again."); return false; }
+  };
+
+  const deleteExecBlock = async (id) => {
+    try {
+      const block = execBlocks.find((b) => b.id === id);
+      await api("exec_blocks", "DELETE", null, `?id=eq.${id}`);
+      setExecBlocks((prev) => prev.filter((b) => b.id !== id));
+      if (block) await touchPresentation(block.presentation_id);
+      return true;
+    } catch { showToast("Could not delete block. Please try again."); return false; }
+  };
+
+  // Drag reorder: renumbers the whole presentation so sort_order stays dense
+  // and predictable, rather than juggling fractional positions.
+  const reorderExecBlocks = async (presentationId, orderedIds) => {
+    const next = orderedIds.map((id, i) => ({ id, sort_order: i }));
+    setExecBlocks((prev) => prev.map((b) => {
+      const hit = next.find((n) => n.id === b.id);
+      return hit ? { ...b, sort_order: hit.sort_order } : b;
+    }));
+    try {
+      await Promise.all(next.map((n) => api("exec_blocks", "PATCH", { sort_order: n.sort_order }, `?id=eq.${n.id}`)));
+      await touchPresentation(presentationId);
+    } catch { showToast("Could not save the new order."); }
+  };
+
   const extractTasksFromOutcome = async (ev, outcomeText) => {
     const text = (outcomeText || "").trim();
     if (!text) { showToast("Outcome is empty"); return; }
@@ -3475,7 +3704,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // it back to the Week in Review, Andy's homepage, rather than a tab that is
   // no longer in his nav (M4).
   useEffect(() => {
-    if (bossMode && ["outreach", "notes", "home", "map", "materials"].includes(view)) setView("reports");
+    if (bossMode && ["outreach", "notes", "home", "map", "materials", "exec"].includes(view)) setView("reports");
   }, [bossMode, view]);
   const VIEW_BACK_LABELS = { home: "Home", calendar: "Calendar", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports" };
   const backTarget = navStack[navStack.length - 1];
@@ -4043,6 +4272,28 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           }}
           onOpenPerson={openPerson}
           onOpenInstitution={(name) => openInstitution(name)}
+        />
+      )}
+
+      {/* EXECUTIVE UPDATE */}
+      {view === "exec" && (
+        <ExecUpdateTab
+          presentations={execPresentations}
+          blocksFor={execBlocksFor}
+          openId={execOpenId}
+          onOpen={setExecOpenId}
+          onCreate={createExecPresentation}
+          generating={execGenerating}
+          onUpdatePresentation={updateExecPresentation}
+          onDeletePresentation={deleteExecPresentation}
+          onAddBlock={addExecBlock}
+          onUpdateBlock={updateExecBlock}
+          onDeleteBlock={deleteExecBlock}
+          onReorder={reorderExecBlocks}
+          presenting={execPresenting}
+          onPresent={() => setExecPresenting(true)}
+          onExitPresent={() => setExecPresenting(false)}
+          showToast={showToast}
         />
       )}
 
@@ -5039,6 +5290,397 @@ function DeltaBadge({ current, prior }) {
     <span className={`stat-delta ${up ? "stat-delta-up" : "stat-delta-down"}`}>
       {up ? "↑" : "↓"} {Math.abs(diff)} vs last period
     </span>
+  );
+}
+
+/* ============================================================
+   Executive Update: the curated biweekly deck.
+   The Week in Review is a live dashboard nobody edits; this is the
+   opposite, a draft the system writes once and Fahed then owns
+   completely (edit, hide, reorder, delete, add) before presenting.
+   ============================================================ */
+
+// Plain-text export, for pasting into an email or a doc.
+function execPlainText(pres, blocks) {
+  const lines = [pres.title || "Executive Update"];
+  lines.push(`${formatDate(pres.period_start)} to ${formatDate(pres.period_end)}`);
+  let section = null;
+  blocks.filter((b) => !b.is_hidden).forEach((b) => {
+    if (b.block_type === "header") { lines.push("", (b.title || execSectionLabel(b.section)).toUpperCase()); section = b.section; return; }
+    if (b.section !== section && b.block_type !== "header") { /* keep flowing under the last header */ }
+    if (b.block_type === "metric") { lines.push(`${b.title}: ${b.content || ""}`.trim()); return; }
+    const title = (b.title || "").trim();
+    const content = stripHtmlToText(b.content || "").trim();
+    if (title && content) lines.push(`- ${title}: ${content}`);
+    else if (title || content) lines.push(`- ${title || content}`);
+  });
+  return lines.join("\n");
+}
+
+// Slide-ready export: one block per section with bullets, so each section can
+// be pasted straight onto its own slide.
+function execSlideText(pres, blocks) {
+  const visible = blocks.filter((b) => !b.is_hidden);
+  const out = [`${pres.title || "Executive Update"}\n${formatDate(pres.period_start)} to ${formatDate(pres.period_end)}`];
+  let current = null, buf = [];
+  const flush = () => { if (current) out.push(`\n--- SLIDE: ${current} ---\n${buf.join("\n")}`); buf = []; };
+  visible.forEach((b) => {
+    if (b.block_type === "header") { flush(); current = (b.title || execSectionLabel(b.section)); return; }
+    if (!current) current = execSectionLabel(b.section);
+    if (b.block_type === "metric") { buf.push(`• ${b.title}: ${b.content || ""}`.trim()); return; }
+    const title = (b.title || "").trim();
+    const content = stripHtmlToText(b.content || "").trim();
+    if (title) buf.push(`• ${title}`);
+    if (content) buf.push(`   ${content}`);
+  });
+  flush();
+  return out.join("\n");
+}
+
+// One editable block in EDIT MODE. Read state shows the rendered block with its
+// controls; editing swaps it for the inline form, matching the click-to-edit
+// pattern the rest of the app uses rather than opening a modal.
+function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDrop, isDragging, onMove, canMoveUp, canMoveDown }) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(block.title || "");
+  const [content, setContent] = useState(block.content || "");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => { setTitle(block.title || ""); setContent(block.content || ""); }, [block.title, block.content]);
+
+  const save = async () => {
+    if (saving) return;
+    setSaving(true);
+    const ok = await onUpdate(block.id, { title: title.trim() || null, content: content.trim() || null });
+    setSaving(false);
+    if (ok !== false) setEditing(false);
+  };
+
+  const isHeader = block.block_type === "header";
+  const isMetric = block.block_type === "metric";
+
+  if (editing) {
+    return (
+      <div className="exec-block exec-block-editing" onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setEditing(false); } }}>
+        <input className="input exec-edit-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder={isMetric ? "Metric label" : "Title"} autoFocus />
+        {isHeader ? null : isMetric ? (
+          <input className="input exec-edit-metric" value={content} onChange={(e) => setContent(e.target.value)} placeholder="Value" />
+        ) : (
+          <RichTextEditor value={content} onChange={setContent} mini placeholder="What the executives should hear..." />
+        )}
+        <div className="exec-edit-actions">
+          <button type="button" className="btn-primary" disabled={saving} onClick={save}>{saving ? "Saving..." : "Save"}</button>
+          <button type="button" className="btn-ghost" onClick={() => setEditing(false)}>Cancel</button>
+          <span className="exec-edit-hint">Esc to cancel</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={`exec-block exec-block-${block.block_type} ${block.is_hidden ? "exec-block-hidden" : ""} ${isDragging ? "exec-block-dragging" : ""}`}
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+    >
+      <span className="exec-drag-handle" title="Drag to reorder">⠿</span>
+      <div className="exec-block-body">
+        {isHeader ? (
+          <div className="exec-block-header-text">{block.title || execSectionLabel(block.section)}</div>
+        ) : isMetric ? (
+          <div className="exec-metric-inline">
+            <span className="exec-metric-value">{block.content}</span>
+            <span className="exec-metric-label">{block.title}</span>
+          </div>
+        ) : (
+          <>
+            {block.title && <div className="exec-block-title">{block.title}</div>}
+            {block.content && <RichTextView value={block.content} className="exec-block-content" />}
+            {block.block_type === "commentary" && <span className="exec-commentary-tag">Commentary</span>}
+          </>
+        )}
+      </div>
+      <div className="exec-block-actions">
+        {/* Drag works on desktop; these arrows are the reorder path on touch,
+            where HTML5 drag and drop does not fire. */}
+        <button type="button" className="exec-move-btn" onClick={() => onMove(block.id, -1)} disabled={!canMoveUp} title="Move up">↑</button>
+        <button type="button" className="exec-move-btn" onClick={() => onMove(block.id, 1)} disabled={!canMoveDown} title="Move down">↓</button>
+        <button type="button" onClick={() => setEditing(true)} title="Edit">✎</button>
+        <button type="button" onClick={() => onUpdate(block.id, { is_hidden: !block.is_hidden })} title={block.is_hidden ? "Show in presentation" : "Hide from presentation"}>
+          {block.is_hidden ? "🚫" : "👁"}
+        </button>
+        <button type="button" className="exec-action-danger" onClick={() => { if (window.confirm("Delete this block?")) onDelete(block.id); }} title="Delete">✕</button>
+      </div>
+    </div>
+  );
+}
+
+// "+ Add block": section, type, title, content. Also how a section header gets
+// added, since a header is just a block whose type is header.
+function ExecAddBlock({ onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [section, setSection] = useState("pipeline");
+  const [blockType, setBlockType] = useState("item");
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    if (saving) return;
+    if (!title.trim() && !content.trim()) return;
+    setSaving(true);
+    const ok = await onAdd({ section, block_type: blockType, title: title.trim() || null, content: content.trim() || null });
+    setSaving(false);
+    if (ok !== false) { setTitle(""); setContent(""); setOpen(false); }
+  };
+
+  if (!open) return <button type="button" className="link-btn exec-add-btn" onClick={() => setOpen(true)}>+ Add block</button>;
+  return (
+    <div className="exec-add-form" onKeyDown={(e) => { if (e.key === "Escape") setOpen(false); }}>
+      <div className="exec-add-row">
+        <label className="exec-add-field">
+          <span className="exec-add-label">Section</span>
+          <select className="input" value={section} onChange={(e) => setSection(e.target.value)}>
+            {EXEC_SECTIONS.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+          </select>
+        </label>
+        <label className="exec-add-field">
+          <span className="exec-add-label">Type</span>
+          <select className="input" value={blockType} onChange={(e) => setBlockType(e.target.value)}>
+            {EXEC_BLOCK_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </select>
+        </label>
+      </div>
+      <input className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder={blockType === "header" ? "Section header text" : "Title"} autoFocus />
+      {blockType !== "header" && (blockType === "metric"
+        ? <input className="input" value={content} onChange={(e) => setContent(e.target.value)} placeholder="Value" />
+        : <RichTextEditor value={content} onChange={setContent} mini placeholder="Detail..." />
+      )}
+      <div className="exec-edit-actions">
+        <button type="button" className="btn-primary" disabled={saving || (!title.trim() && !content.trim())} onClick={submit}>{saving ? "Adding..." : "Add block"}</button>
+        <button type="button" className="btn-ghost" onClick={() => setOpen(false)}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// PRESENT MODE: a clean full-screen render of the visible blocks only, sized
+// for screen-share. Escape exits. Deliberately shows no controls at all, so
+// nothing editable is on screen while executives are watching.
+function ExecPresentView({ pres, blocks, onExit }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onExit(); };
+    window.addEventListener("keydown", onKey);
+    document.body.classList.add("exec-presenting-body");
+    return () => { window.removeEventListener("keydown", onKey); document.body.classList.remove("exec-presenting-body"); };
+  }, [onExit]);
+
+  const visible = blocks.filter((b) => !b.is_hidden);
+  // Group into runs so each header owns the blocks that follow it, and a run of
+  // metrics can render as a row of big numbers.
+  const groups = [];
+  visible.forEach((b) => {
+    if (b.block_type === "header" || !groups.length) groups.push({ header: b.block_type === "header" ? b : null, items: b.block_type === "header" ? [] : [b] });
+    else groups[groups.length - 1].items.push(b);
+  });
+
+  return (
+    <div className="exec-present">
+      <button type="button" className="exec-present-exit" onClick={onExit} title="Exit presentation (Esc)">✕</button>
+      <div className="exec-present-inner">
+        <header className="exec-present-head">
+          <h1>{pres.title || "Executive Update"}</h1>
+          <div className="exec-present-period">{formatDate(pres.period_start)} to {formatDate(pres.period_end)}</div>
+        </header>
+        {groups.map((g, i) => {
+          const metrics = g.items.filter((b) => b.block_type === "metric");
+          const rest = g.items.filter((b) => b.block_type !== "metric");
+          return (
+            <section key={i} className="exec-present-section">
+              {g.header && <h2>{g.header.title || execSectionLabel(g.header.section)}</h2>}
+              {metrics.length > 0 && (
+                <div className="exec-present-metrics">
+                  {metrics.map((m) => (
+                    <div key={m.id} className="exec-present-metric">
+                      <div className="exec-present-metric-value">{m.content}</div>
+                      <div className="exec-present-metric-label">{m.title}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {rest.map((b) => (
+                <div key={b.id} className={`exec-present-item ${b.block_type === "commentary" ? "exec-present-commentary" : ""}`}>
+                  {b.title && <div className="exec-present-item-title">{b.title}</div>}
+                  {b.content && <RichTextView value={b.content} className="exec-present-item-body" />}
+                </div>
+              ))}
+            </section>
+          );
+        })}
+        {visible.length === 0 && <div className="exec-present-empty">Nothing to present yet. Add or unhide some blocks.</div>}
+      </div>
+    </div>
+  );
+}
+
+function ExecUpdateTab({
+  presentations, blocksFor, openId, onOpen, onCreate, generating,
+  onUpdatePresentation, onDeletePresentation,
+  onAddBlock, onUpdateBlock, onDeleteBlock, onReorder,
+  presenting, onPresent, onExitPresent, showToast,
+}) {
+  const readOnly = useReadOnly();
+  const [dragId, setDragId] = useState(null);
+  const pres = presentations.find((p) => p.id === openId) || null;
+  const blocks = pres ? blocksFor(pres.id) : [];
+
+  const copy = async (text, label) => {
+    try { await navigator.clipboard.writeText(text); showToast(`${label} copied`); }
+    catch { showToast("Could not copy"); }
+  };
+
+  if (presenting && pres) return <ExecPresentView pres={pres} blocks={blocks} onExit={onExitPresent} />;
+
+  // LIST VIEW
+  if (!pres) {
+    return (
+      <div className="exec-tab">
+        <div className="page-head">
+          <div>
+            <h1 className="page-title">Executive Update</h1>
+            <p className="page-sub">The curated biweekly deck you present to the executive team.</p>
+          </div>
+          {!readOnly && (
+            <button className="btn-primary" onClick={onCreate} disabled={generating}>
+              {generating ? "Drafting..." : "+ New Biweekly Update"}
+            </button>
+          )}
+        </div>
+        {generating && <div className="exec-generating">Pulling the last two weeks and drafting your update. This takes a few seconds.</div>}
+        {presentations.length === 0 && !generating ? (
+          <div className="empty-small">No executive updates yet. Create one to draft it from the last two weeks.</div>
+        ) : (
+          <div className="exec-list">
+            {presentations.map((p) => {
+              const count = blocksFor(p.id).filter((b) => !b.is_hidden).length;
+              return (
+                <button key={p.id} type="button" className="exec-list-item" onClick={() => onOpen(p.id)}>
+                  <div className="exec-list-main">
+                    <div className="exec-list-title">{p.title}</div>
+                    <div className="exec-list-meta">
+                      {formatDate(p.period_start)} to {formatDate(p.period_end)} . {count} block{count === 1 ? "" : "s"}
+                    </div>
+                  </div>
+                  <span className={`badge exec-status exec-status-${p.status}`}>{p.status === "presented" ? "Presented" : "Draft"}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // EDIT VIEW
+  // Shift one block by one position. Same renumber path as drag, so both
+  // reorder routes end up writing the identical dense sort_order sequence.
+  const move = (id, delta) => {
+    const ids = blocks.map((b) => b.id);
+    const from = ids.indexOf(id);
+    const to = from + delta;
+    if (from === -1 || to < 0 || to >= ids.length) return;
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    onReorder(pres.id, ids);
+  };
+
+  const onDrop = (targetId) => {
+    if (!dragId || dragId === targetId) { setDragId(null); return; }
+    const ids = blocks.map((b) => b.id);
+    const from = ids.indexOf(dragId), to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) { setDragId(null); return; }
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    onReorder(pres.id, ids);
+    setDragId(null);
+  };
+
+  return (
+    <div className="exec-tab exec-editor">
+      <div className="page-head exec-editor-head">
+        <div className="exec-editor-headmain">
+          <button type="button" className="btn-back" onClick={() => onOpen(null)}>← All updates</button>
+          {readOnly ? (
+            <h1 className="page-title">{pres.title}</h1>
+          ) : (
+            <input
+              className="exec-title-input"
+              defaultValue={pres.title}
+              onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== pres.title) onUpdatePresentation(pres.id, { title: v }); }}
+            />
+          )}
+          <div className="exec-period">
+            {readOnly ? (
+              <span>{formatDate(pres.period_start)} to {formatDate(pres.period_end)}</span>
+            ) : (
+              <>
+                <input type="date" className="input exec-date" defaultValue={pres.period_start || ""} onBlur={(e) => onUpdatePresentation(pres.id, { period_start: e.target.value || null })} />
+                <span className="exec-period-to">to</span>
+                <input type="date" className="input exec-date" defaultValue={pres.period_end || ""} onBlur={(e) => onUpdatePresentation(pres.id, { period_end: e.target.value || null })} />
+              </>
+            )}
+          </div>
+        </div>
+        <div className="exec-editor-actions">
+          <button className="btn-primary" onClick={onPresent}>Present</button>
+          <button className="btn-ghost" onClick={() => copy(execPlainText(pres, blocks), "Update")}>Copy as text</button>
+          <button className="btn-ghost" onClick={() => copy(execSlideText(pres, blocks), "Slides")}>Copy for slides</button>
+          <button className="btn-ghost" onClick={() => window.print()}>Print</button>
+          {!readOnly && (
+            <>
+              <button
+                className="btn-ghost"
+                onClick={() => onUpdatePresentation(pres.id, { status: pres.status === "presented" ? "draft" : "presented" })}
+              >
+                {pres.status === "presented" ? "Mark as draft" : "Mark as presented"}
+              </button>
+              <button className="btn-ghost exec-action-danger" onClick={() => { if (window.confirm("Delete this update and all of its blocks?")) onDeletePresentation(pres.id); }}>Delete</button>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="exec-blocks">
+        {blocks.length === 0 && <div className="empty-small">No blocks yet. Add one below.</div>}
+        {blocks.map((b) => (
+          readOnly ? (
+            <div key={b.id} className={`exec-block exec-block-${b.block_type} ${b.is_hidden ? "exec-block-hidden" : ""}`}>
+              <div className="exec-block-body">
+                {b.block_type === "header" ? <div className="exec-block-header-text">{b.title || execSectionLabel(b.section)}</div>
+                  : b.block_type === "metric" ? <div className="exec-metric-inline"><span className="exec-metric-value">{b.content}</span><span className="exec-metric-label">{b.title}</span></div>
+                  : <>{b.title && <div className="exec-block-title">{b.title}</div>}{b.content && <RichTextView value={b.content} className="exec-block-content" />}</>}
+              </div>
+            </div>
+          ) : (
+            <ExecBlockRow
+              key={b.id}
+              block={b}
+              onUpdate={onUpdateBlock}
+              onDelete={onDeleteBlock}
+              isDragging={dragId === b.id}
+              onDragStart={() => setDragId(b.id)}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => { e.preventDefault(); onDrop(b.id); }}
+              onMove={move}
+              canMoveUp={blocks.indexOf(b) > 0}
+              canMoveDown={blocks.indexOf(b) < blocks.length - 1}
+            />
+          )
+        ))}
+      </div>
+
+      {!readOnly && <ExecAddBlock onAdd={(fields) => onAddBlock(pres.id, fields)} />}
+    </div>
   );
 }
 

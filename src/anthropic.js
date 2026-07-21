@@ -272,6 +272,46 @@ ${context}`;
   return text;
 };
 
+// Executive Update draft: synthesizes two weeks of raw CRM activity into crisp,
+// executive-appropriate bullets. Executives want signal, not a log, so the
+// prompt is explicit that this is a synthesis and that raw entries should be
+// merged, ranked, and dropped rather than restated.
+//
+// The response contract is a JSON object keyed by section id, each holding an
+// array of {title, content}. Returning structured data (rather than prose the
+// app would have to parse) is what lets every bullet become its own editable
+// block with its own title and body.
+export const generateExecSummary = async (context) => {
+  const prompt = `You are preparing a biweekly update that a VP of Commercial will present to the executive team of a healthcare company operating in Saudi Arabia. Below is the raw CRM data for the last two weeks.
+
+Synthesize it. Do NOT restate the log. Merge related entries, drop noise, and keep only what an executive would care about: momentum, risk, money, and relationships that open doors. If a section has nothing worth reporting, return an empty array for it rather than padding it.
+
+Write for an audience with no context on individual contacts: name the institution and why it matters, not just the person.
+
+Return ONLY a JSON object with exactly these keys, each an array of objects with "title" and "content":
+{
+  "pipeline": [{"title": "short bold headline, max 8 words", "content": "1-2 sentences of substance"}],
+  "meetings": [{"title": "institution or meeting name", "content": "what happened and what it means, 1-2 sentences"}],
+  "relationships": [{"title": "person or institution name", "content": "who they are and why they matter, 1 sentence"}],
+  "wins": [{"title": "the win", "content": "1 sentence on impact"}],
+  "coming_up": [{"title": "what is coming", "content": "1 sentence on why it matters"}]
+}
+
+Aim for at most 4 items per section, fewer if the data does not support more. No markdown, no asterisks, no backticks. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.
+
+Here is the data:
+${context}`;
+  const text = await plainText(prompt, 800);
+  const cleaned = (text || "").replace(/```json/gi, "").replace(/```/g, "").trim();
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
+  if (first === -1 || last <= first) return null;
+  try {
+    const obj = JSON.parse(cleaned.slice(first, last + 1));
+    return obj && typeof obj === "object" ? obj : null;
+  } catch { return null; }
+};
+
 // Pulls a JSON ARRAY out of a model response (news briefing): strips markdown
 // fences, keeps the substring from the first [ to the last ]. Returns null so
 // callers can decide whether to surface a retry.
