@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
+import { useState, useEffect, useCallback, useRef, createContext, useContext, Fragment } from "react";
 import { api } from "./supabase";
 import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, generateMeetingSummary, generateConclusions, cleanupBlockers, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
@@ -7,6 +7,8 @@ import MapTab from "./MapTab";
 import VoiceRecorder from "./VoiceRecorder";
 import RichTextEditor, { RichTextView } from "./RichTextEditor";
 import { stripHtmlToText, isContentEmpty, toDisplayHtml, looksLikeHtml } from "./richtext";
+import MentionEditor, { MentionText, MentionContext } from "./MentionEditor";
+import { extractMentionRefs, mentionsToPlainText, detectFullNameMentions } from "./mentions";
 import "./styles.css";
 
 // Boss View (?view=boss) renders the full app in read-only mode: same layout and
@@ -113,7 +115,7 @@ function ActivityDescription({ activity, onSummarizeEmail, summarizingId }) {
   return (
     <div className="act-desc">
       {fathom && <span className="fathom-badge" title="Auto-imported from Fathom"><span className="fathom-badge-dot" />Fathom</span>}
-      {structured ? <FormattedActivityBody lines={lines} /> : text}
+      {structured ? <FormattedActivityBody lines={lines} /> : <MentionText text={text} />}
       {isEmail && (
         <div className={`act-email-snippet ${expanded ? "expanded" : "clamped"}`} onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }} title={expanded ? "Click to collapse" : "Click to expand"}>
           {summary && <span className="ai-badge" title="AI-generated summary">AI</span>}
@@ -197,8 +199,6 @@ function ActivityEditForm({ initial = {}, linkOptions = {}, customOptions = [], 
     initial.organization_id ? `organization:${initial.organization_id}` : ""
   );
   const [saving, setSaving] = useState(false);
-  const textRef = useRef(null);
-  useEffect(() => { if (autoFocus) textRef.current?.focus(); }, [autoFocus]);
 
   const typeOptions = optionsWithCustom(ACT_TYPES.map((t) => ({ id: t.id, label: t.label })), customOptions, "activity_type");
 
@@ -222,13 +222,12 @@ function ActivityEditForm({ initial = {}, linkOptions = {}, customOptions = [], 
 
   return (
     <div className="act-edit" onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); onCancel(); } }}>
-      <textarea
-        ref={textRef}
-        className="input act-edit-text"
-        rows={3}
+      <MentionEditor
         value={description}
-        onChange={(e) => setDescription(e.target.value)}
-        placeholder="What happened?"
+        onChange={setDescription}
+        placeholder="What happened? Use @ to mention a person or institution."
+        className="act-edit-text"
+        autoFocus={autoFocus}
       />
       <div className="act-edit-row">
         <label className="act-edit-field">
@@ -377,7 +376,7 @@ function HomeActivityRow({ activity, entityName, onOpenEntity, onUpdateActivity,
       <div className="home-act-main">
         <div className="home-act-desc">
           {isFathomActivity(activity) && <span className="fathom-badge sm" title="Auto-imported from Fathom">Fathom</span>}
-          {firstLine(cleanActivityText(activity.description))}
+          <MentionText text={firstLine(cleanActivityText(activity.description))} />
         </div>
         <div className="home-act-meta" onClick={(e) => e.stopPropagation()}>
           {entityName(activity) ? <ActivityEntityPills activity={activity} {...pillProps} /> : <span>General</span>}
@@ -440,9 +439,9 @@ function FormattedActivityBody({ lines }) {
     <div className="act-structured">
       {blocks.map((b, i) => {
         if (b.type === "h") return <div key={i} className="act-heading">{b.text}</div>;
-        if (b.type === "kv") return <div key={i} className="act-para"><span className="act-kv-label">{b.label}:</span> {b.value}</div>;
-        if (b.type === "ul") return <ul key={i} className="act-bullets">{b.items.map((it, j) => <li key={j}>{it}</li>)}</ul>;
-        return <div key={i} className="act-para">{b.text}</div>;
+        if (b.type === "kv") return <div key={i} className="act-para"><span className="act-kv-label">{b.label}:</span> <MentionText text={b.value} /></div>;
+        if (b.type === "ul") return <ul key={i} className="act-bullets">{b.items.map((it, j) => <li key={j}><MentionText text={it} /></li>)}</ul>;
+        return <div key={i} className="act-para"><MentionText text={b.text} /></div>;
       })}
     </div>
   );
@@ -2546,6 +2545,13 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       if (form.deal_id) clean.deal_id = form.deal_id;
       if (form.enabler_id) clean.enabler_id = form.enabler_id;
       if (form.organization_id) clean.organization_id = form.organization_id;
+      // Mention indexing: fill any entity link the title mentions but the form
+      // did not set, so an @ mention links the task to that entity too.
+      const refs = extractMentionRefs(title);
+      if (!clean.contact_id && refs.contact_id) clean.contact_id = refs.contact_id;
+      if (!clean.deal_id && refs.deal_id) clean.deal_id = refs.deal_id;
+      if (!clean.enabler_id && refs.enabler_id) clean.enabler_id = refs.enabler_id;
+      if (!clean.organization_id && refs.organization_id) clean.organization_id = refs.organization_id;
       const rows = await api("todos", "POST", clean);
       const row = Array.isArray(rows) ? rows[0] : rows;
       if (row) {
@@ -2590,9 +2596,20 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   };
   const updateNote = async (id, patch) => {
     const now = new Date().toISOString();
+    const body = { ...patch, updated_at: now };
+    // Mention indexing: when the content changes, fill any UNSET entity link
+    // from a mention in the body, so the note surfaces on the people and
+    // institutions it names. Explicit links the user set are never overwritten.
+    if ("content" in patch) {
+      const existing = notes.find((n) => n.id === id) || {};
+      const refs = extractMentionRefs(patch.content);
+      ["contact_id", "deal_id", "enabler_id", "organization_id"].forEach((col) => {
+        if (refs[col] && !existing[col] && body[col] == null) body[col] = refs[col];
+      });
+    }
     try {
-      await api("notes", "PATCH", { ...patch, updated_at: now }, `?id=eq.${id}`);
-      setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch, updated_at: now } : n)));
+      await api("notes", "PATCH", body, `?id=eq.${id}`);
+      setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, ...body } : n)));
     } catch { showToast("Error saving note"); }
   };
   const deleteNote = async (id) => {
@@ -2834,7 +2851,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // be revisited without regenerating.
   const gatherBriefContext = ({ contact, deal, enabler, org }) => {
     const lines = [];
-    const actLine = (a) => `[${formatDate(a.created_at)}] ${a.type}: ${firstLine(cleanActivityText(a.description))}`;
+    const actLine = (a) => `[${formatDate(a.created_at)}] ${a.type}: ${mentionsToPlainText(firstLine(cleanActivityText(a.description)))}`;
     if (contact) {
       lines.push(`PERSON: ${contact.name}${contact.role ? `, ${contact.role}` : ""}${contact.company ? ` at ${contact.company}` : ""}`);
       lines.push(`Warmth: ${contact.warmth || "unknown"}. Last contacted: ${contact.last_contacted_at ? formatDate(contact.last_contacted_at) : "never logged"}.`);
@@ -2890,7 +2907,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         const d = a.deal_id ? deals.find((x) => x.id === a.deal_id) : null;
         const e = a.enabler_id ? enablers.find((x) => x.id === a.enabler_id) : null;
         const who = d?.company || e?.name || "General";
-        return `- [${formatDate(a.created_at)}] ${who}: ${firstLine(cleanActivityText(a.description))}`;
+        return `- [${formatDate(a.created_at)}] ${who}: ${mentionsToPlainText(firstLine(cleanActivityText(a.description)))}`;
       }).join("\n")}`);
     }
 
@@ -3064,7 +3081,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // for a meeting about entities not on the calendar invite (Section 5).
   const gatherBriefContextForEntities = (taggedContacts, taggedInstEntities) => {
     const lines = [];
-    const actLine = (a) => `[${formatDate(a.created_at)}] ${a.type}: ${firstLine(cleanActivityText(a.description))}`;
+    const actLine = (a) => `[${formatDate(a.created_at)}] ${a.type}: ${mentionsToPlainText(firstLine(cleanActivityText(a.description)))}`;
     taggedContacts.forEach((contact) => {
       lines.push(`PERSON: ${contact.name}${contact.role ? `, ${contact.role}` : ""}${contact.company ? ` at ${contact.company}` : ""}`);
       lines.push(`Warmth: ${contact.warmth || "unknown"}. Last contacted: ${contact.last_contacted_at ? formatDate(contact.last_contacted_at) : "never logged"}.`);
@@ -3413,7 +3430,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     });
     const nonMeeting = acts.filter((a) => !meetings.includes(a));
     lines.push(`\nOTHER ACTIVITY (${nonMeeting.length}):`);
-    nonMeeting.slice(0, 40).forEach((a) => lines.push(`- ${a.type} with ${nameFor(a)}: ${firstLine(cleanActivityText(a.description))}`));
+    nonMeeting.slice(0, 40).forEach((a) => lines.push(`- ${a.type} with ${nameFor(a)}: ${mentionsToPlainText(firstLine(cleanActivityText(a.description)))}`));
     const byChannel = execOutreachByChannel(startISO, endISO);
     lines.push(`\nOUTREACH BY CHANNEL: ${byChannel.summary || "none"}`);
     lines.push(`\nNEW PEOPLE (${newContacts.length}):`);
@@ -3611,7 +3628,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       .forEach((e) => { const n = matchName(e); items.push(`${formatDate(e.start_time)}: ${e.title || "Meeting"}${n ? ` (${n})` : ""}`); });
     activities
       .filter((a) => a.type === "scheduled_meeting" && a.scheduled_for && a.scheduled_for >= nowISO && a.scheduled_for <= horizonISO)
-      .forEach((a) => items.push(`${formatDate(a.scheduled_for)}: ${firstLine(cleanActivityText(a.description)) || "Scheduled meeting"}`));
+      .forEach((a) => items.push(`${formatDate(a.scheduled_for)}: ${mentionsToPlainText(firstLine(cleanActivityText(a.description))) || "Scheduled meeting"}`));
     todos
       .filter((t) => t.status !== "done" && (t.priority === "high" || (t.due_date && t.due_date <= horizonISO)))
       .slice(0, 10)
@@ -3998,14 +4015,24 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       // contact_roles) and store it on the row, rather than leaving it to be
       // derived (or not) at display time.
       let fkDeal = dealId, fkEnabler = enablerId, fkOrg = organizationId;
-      if (contactId && !fkDeal && !fkEnabler && !fkOrg) {
-        const contact = contacts.find((c) => c.id === contactId);
+      let fkContact = contactId;
+      // Mention indexing: an @ mention in the description fills any entity link
+      // still unset, so the activity surfaces on whom it names. Explicit links
+      // passed in are never overwritten.
+      const refs = extractMentionRefs(activity.description || "");
+      if (!fkContact && refs.contact_id) fkContact = refs.contact_id;
+      if (!fkDeal && refs.deal_id) fkDeal = refs.deal_id;
+      if (!fkEnabler && refs.enabler_id) fkEnabler = refs.enabler_id;
+      if (!fkOrg && refs.organization_id) fkOrg = refs.organization_id;
+      if (fkContact && !fkDeal && !fkEnabler && !fkOrg) {
+        const contact = contacts.find((c) => c.id === fkContact);
         const roles = contact ? resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles }) : [];
         const primary = roles.find((r) => r.is_primary) || roles[0];
         if (primary?.entity_type === "deal") fkDeal = primary.entity_id;
         else if (primary?.entity_type === "enabler") fkEnabler = primary.entity_id;
         else if (primary?.entity_type === "organization") fkOrg = primary.entity_id;
       }
+      contactId = fkContact;
 
       // Section 5: guard against accidental double-taps / double-submits. Skip
       // creating a new row if an identical one (same type, description, and
@@ -4218,6 +4245,63 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setView("institution-sheet");
   };
   const openPerson = (id) => { pushNav(); setPersonSheetId(id); setView("person-sheet"); };
+
+  // Navigate to whatever entity a mention chip references. One delegated
+  // listener covers every chip on the page (rendered live in an editor, via
+  // MentionText, or via RichTextView's dangerouslySetInnerHTML), so no surface
+  // has to wire click handling. Chips inside a live editor are left alone: a
+  // click there selects the chip for editing rather than navigating away.
+  const openMention = useCallback((kind, id, name) => {
+    if (kind === "person") { if (id) openPerson(id); return; }
+    if (name) openInstitution(name);
+  }, [openPerson, openInstitution]);
+  useEffect(() => {
+    const onDocClick = (e) => {
+      const chip = e.target.closest?.(".mention[data-mkind]");
+      if (!chip) return;
+      if (chip.closest('[contenteditable="true"]')) return;
+      e.preventDefault();
+      openMention(chip.getAttribute("data-mkind"), chip.getAttribute("data-mid"), chip.getAttribute("data-mname"));
+    };
+    document.addEventListener("click", onDocClick);
+    return () => document.removeEventListener("click", onDocClick);
+  }, [openMention]);
+
+  // A bare contact created inline from an @ mention's "Create person". Patches
+  // local state so the new chip resolves immediately, no full reload.
+  const createContactForMention = async (name) => {
+    const clean = (name || "").trim();
+    if (!clean) return null;
+    try {
+      const created = (await api("contacts", "POST", { name: clean }) || [])[0];
+      if (created) setContacts((prev) => [...prev, created].sort((a, b) => (a.name || "").localeCompare(b.name || "")));
+      return created ? { id: created.id, name: created.name } : null;
+    } catch { showToast("Could not create person"); return null; }
+  };
+
+  // Search source for the @ dropdown: people (by name, role, institution) and
+  // deduplicated institutions (by name), each with a small type label.
+  const mentionSource = {
+    search: (query) => {
+      const q = (query || "").trim().toLowerCase();
+      const people = contacts.map((c) => {
+        const roles = resolveContactRoles(c, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles });
+        const primary = roles.find((r) => r.is_primary) || roles[0];
+        const inst = primary?.institutionName || c.company || "";
+        return { type: "person", id: c.id, name: c.name, sub: [c.role, inst].filter(Boolean).join(", "), hay: `${c.name} ${c.role || ""} ${inst}`.toLowerCase() };
+      }).filter((p) => p.name && (!q || p.hay.includes(q)));
+      const insts = dedupeInstitutionOptions({ deals, enablers, organizations, prefer: ["deal", "enabler", "organization"] })
+        .map((o) => { const i = o.value.indexOf(":"); const type = o.value.slice(0, i); const id = o.value.slice(i + 1); const meta = institutions.find((x) => (x.name || "").toLowerCase() === o.label.toLowerCase()); return { type, id, name: o.label, sub: meta?.type ? institutionTypeMeta(meta.type, customOptions).label : "", hay: o.label.toLowerCase() }; })
+        .filter((o) => !q || o.hay.includes(q));
+      // People first, then institutions, capped so the menu stays scannable.
+      return [...people.slice(0, 5), ...insts.slice(0, 5)].slice(0, 8);
+    },
+    createPerson: createContactForMention,
+    createInstitution: async (name) => {
+      const created = await createInstitutionInline({ name, type: "hospital", isTarget: false, isEnabler: false });
+      return created?.preferred ? { name: name.trim(), type: created.preferred.type, id: created.preferred.id } : null;
+    },
+  };
   const goBack = () => {
     const prev = navStack[navStack.length - 1];
     setNavStack((s) => s.slice(0, -1));
@@ -4308,6 +4392,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
   return (
     <ReadOnlyContext.Provider value={bossMode}>
+    <MentionContext.Provider value={mentionSource}>
     <div className="app">
       {toast && <div className="toast">{toast}</div>}
 
@@ -4999,6 +5084,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       {/* MODALS (creating new records only; hidden in Boss View) */}
       {!bossMode && modal?.type === "deal" && <DealForm deal={modal.data} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onSave={saveDeal} onClose={() => setModal(null)} />}
     </div>
+    </MentionContext.Provider>
     </ReadOnlyContext.Provider>
   );
 }
@@ -5148,7 +5234,7 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
                     <button className="home-task-check" title="Mark complete" onClick={(e) => { e.stopPropagation(); onToggleTodo(t); }} aria-label="Mark complete" />
                   )}
                   <div className="home-task-main">
-                    <div className="home-task-title">{t.title}</div>
+                    <div className="home-task-title"><MentionText text={t.title} /></div>
                     <div className="home-task-meta">
                       <PriorityBadge priority={t.priority} />
                       {t.due_date && <span className={`home-due ${overdue ? "due-overdue" : dueToday ? "due-today" : ""}`}>{overdue ? `Overdue ${formatDate(t.due_date)}` : dueToday ? "Due today" : `Due ${formatDate(t.due_date)}`}</span>}
@@ -5445,7 +5531,28 @@ function CalendarEventRow({ ev, entityName, eventEntityRow, onOpenEntity, onOpen
           )}
         </div>
         {ev.location && <div className="cal-event-loc">📍 {ev.location}</div>}
-        {attendees.length > 0 && <div className="cal-event-attendees">{attendees.slice(0, 5).join(", ")}{attendees.length > 5 ? ` +${attendees.length - 5}` : ""}</div>}
+        {attendees.length > 0 && (
+          <div className="cal-event-attendees">
+            {attendees.slice(0, 5).map((nm, i) => {
+              // Link an attendee only when it maps to a known contact (by email
+              // first, then exact name). Chips navigate via the app-level
+              // handler; stopPropagation keeps the row from also opening.
+              const emails = Array.isArray(ev.attendee_emails) ? ev.attendee_emails : [];
+              const email = (emails[i] || "").trim().toLowerCase();
+              const c = (email && contacts.find((x) => (x.email || "").trim().toLowerCase() === email))
+                || contacts.find((x) => (x.name || "").trim().toLowerCase() === (nm || "").trim().toLowerCase());
+              return (
+                <Fragment key={i}>
+                  {i > 0 && ", "}
+                  {c
+                    ? <span className="mention mention-person" data-mkind="person" data-mid={c.id} data-mname={c.name} onClick={(e) => e.stopPropagation()}>{nm}</span>
+                    : nm}
+                </Fragment>
+              );
+            })}
+            {attendees.length > 5 ? ` +${attendees.length - 5}` : ""}
+          </div>
+        )}
         <div className="cal-event-actions" onClick={(e) => e.stopPropagation()}>
           {matched && ent && (
             <button className={`task-pill ${eventMatchClass(ev)}`} onClick={() => onOpenEntity(entRow)} title={`Open ${ent}`}>{ent}</button>
@@ -5774,14 +5881,9 @@ function EventDetailPanel({
         <div className="event-detail-section">
           <div className="section-label">Prep Notes</div>
           <div className="event-detail-outcome-row">
-            <textarea
-              className="input textarea event-detail-textarea"
-              placeholder="Notes before the meeting..."
-              value={prepDraft}
-              onChange={(e) => setPrepDraft(e.target.value)}
-              onBlur={savePrep}
-              disabled={readOnly}
-            />
+            {readOnly
+              ? <div className="input textarea event-detail-textarea mention-readonly"><MentionText text={prepDraft} /></div>
+              : <MentionEditor className="textarea event-detail-textarea" placeholder="Notes before the meeting... use @ to mention" value={prepDraft} onChange={setPrepDraft} onBlur={savePrep} />}
             {!readOnly && <VoiceRecorder mode="plain" onPlainText={onPrepVoiceText} showToast={showToast} compact title="Dictate prep notes" />}
           </div>
           {!readOnly && (
@@ -5835,14 +5937,9 @@ function EventDetailPanel({
         <div className="event-detail-section event-detail-outcome">
           <div className="section-label">Outcome</div>
           <div className="event-detail-outcome-row">
-            <textarea
-              className="input textarea event-detail-textarea"
-              placeholder="What happened, decisions made, next steps..."
-              value={outcomeDraft}
-              onChange={(e) => setOutcomeDraft(e.target.value)}
-              onBlur={saveOutcomeDraft}
-              disabled={readOnly}
-            />
+            {readOnly
+              ? <div className="input textarea event-detail-textarea mention-readonly"><MentionText text={outcomeDraft} /></div>
+              : <MentionEditor className="textarea event-detail-textarea" placeholder="What happened, decisions made, next steps... use @ to mention" value={outcomeDraft} onChange={setOutcomeDraft} onBlur={saveOutcomeDraft} />}
             {!readOnly && <VoiceRecorder mode="digest" onDigest={onOutcomeVoiceDigest} showToast={showToast} title="Record outcome by voice" />}
           </div>
           {!readOnly && (
@@ -6640,7 +6737,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
     r += `COMING UP NEXT WEEK\n`;
     if (upcomingEvents.length === 0 && upcomingScheduled.length === 0 && upcomingTasks.length === 0) r += `. Nothing scheduled yet.\n`;
     upcomingEvents.forEach((e) => { r += `. ${formatDate(e.start_time)}: ${e.title || "Untitled event"}\n`; });
-    upcomingScheduled.forEach((a) => { r += `. ${formatDate(a.scheduled_for)}: ${firstLine(cleanActivityText(a.description)) || "Scheduled meeting"}\n`; });
+    upcomingScheduled.forEach((a) => { r += `. ${formatDate(a.scheduled_for)}: ${mentionsToPlainText(firstLine(cleanActivityText(a.description))) || "Scheduled meeting"}\n`; });
     if (upcomingTasks.length > 0) { r += `Tasks:\n`; upcomingTasks.forEach((t) => { r += `. ${t.title}${t.due_date ? ` (due ${formatDate(t.due_date)})` : ""}\n`; }); }
     r += `\n`;
 
@@ -6688,7 +6785,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
     else {
       h += `<ul>`;
       upcomingEvents.forEach((e) => { h += `<li>${esc(formatDate(e.start_time))}: ${esc(e.title || "Untitled event")}</li>`; });
-      upcomingScheduled.forEach((a) => { h += `<li>${esc(formatDate(a.scheduled_for))}: ${esc(firstLine(cleanActivityText(a.description)) || "Scheduled meeting")}</li>`; });
+      upcomingScheduled.forEach((a) => { h += `<li>${esc(formatDate(a.scheduled_for))}: ${esc(mentionsToPlainText(firstLine(cleanActivityText(a.description))) || "Scheduled meeting")}</li>`; });
       h += `</ul>`;
       if (upcomingTasks.length > 0) { h += `<p><b>Tasks</b></p><ul>`; upcomingTasks.forEach((t) => { h += `<li>${esc(t.title)}${t.due_date ? ` (due ${esc(formatDate(t.due_date))})` : ""}</li>`; }); h += `</ul>`; }
     }
@@ -6903,7 +7000,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
             })}
             {upcomingScheduled.map((a) => (
               <div key={`sm-${a.id}`} className="wir-row">
-                <span className="wir-row-name">{firstLine(cleanActivityText(a.description)) || "Scheduled meeting"}</span>
+                <span className="wir-row-name"><MentionText text={firstLine(cleanActivityText(a.description)) || "Scheduled meeting"} /></span>
                 <span className="wir-row-detail">{formatDateTime(a.scheduled_for)}</span>
               </div>
             ))}
@@ -6912,7 +7009,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
                 <div className="wir-subhead">Tasks</div>
                 {upcomingTasks.map((t) => (
                   <div key={t.id} className="wir-row">
-                    <span className="wir-row-name">{t.title}</span>
+                    <span className="wir-row-name"><MentionText text={t.title} /></span>
                     <PriorityBadge priority={t.priority} />
                     {t.due_date && <span className="wir-row-detail">Due {formatDate(t.due_date)}</span>}
                     <TaskPills todo={t} deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} todoContacts={todoContacts} onNavigate={onOpenTaskLink} />
@@ -7045,7 +7142,7 @@ function WeekInReviewComments({ comments, author, onPost, onMarkRead, readOnly, 
               <div className="boss-comment-main">
                 <div className="boss-comment-meta"><span className="boss-comment-author">{c.author}</span><span className="boss-comment-time">{formatDateTime(c.created_at)}</span></div>
                 {tName && <div className="comment-target-chip">re: {tName}</div>}
-                {c.content && <div className="boss-comment-text">{c.content}</div>}
+                {c.content && <div className="boss-comment-text"><MentionText text={c.content} /></div>}
                 {c.file_data && (String(c.file_data).startsWith("data:image")
                   ? <img className="boss-comment-img" src={c.file_data} alt={c.file_name || "attachment"} />
                   : <a className="boss-comment-file" href={c.file_data} download={c.file_name || "file"}>📎 {c.file_name || "Download attachment"}</a>)}
@@ -8128,9 +8225,32 @@ function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate
   const [linkingEvent, setLinkingEvent] = useState(false);
   const [eventQuery, setEventQuery] = useState("");
   const [folderPicking, setFolderPicking] = useState(false);
+  // Detect-mentions confirmation: { html, matches } awaiting the user's OK.
+  const [detectResult, setDetectResult] = useState(null);
   const titleRef = useRef(null);
   const debounceRef = useRef(null);
   const savedTimerRef = useRef(null);
+
+  // Scans the note for FULL-name matches (2+ words) of contacts and
+  // institutions and offers to convert them to mentions. Never auto-converts
+  // and never matches a lone first name (see detectFullNameMentions).
+  const runDetectMentions = () => {
+    const candidates = [
+      ...(entityCtx.contacts || []).map((c) => ({ name: c.name, type: "person", id: c.id })),
+      ...dedupeInstitutionOptions({ deals: entityCtx.deals, enablers: entityCtx.enablers, organizations: entityCtx.organizations, prefer: ["deal", "enabler", "organization"] })
+        .map((o) => { const i = o.value.indexOf(":"); return { name: o.label, type: o.value.slice(0, i), id: o.value.slice(i + 1) }; }),
+    ];
+    const res = detectFullNameMentions(content, candidates);
+    if (!res.matches.length) { showToast("No full names to link were found"); return; }
+    setDetectResult(res);
+  };
+  const applyDetect = () => {
+    if (!detectResult) return;
+    setContent(detectResult.html);
+    onUpdate(note.id, { content: detectResult.html });
+    setDetectResult(null);
+    showToast("Mentions added");
+  };
 
   useEffect(() => { setTitle(note.title || ""); setContent(note.content || ""); }, [note.id]);
   useEffect(() => {
@@ -8308,7 +8428,19 @@ function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate
             )}
           </div>
 
+          <button className="note-tool-btn" onClick={runDetectMentions} title="Scan for full names and turn them into mentions">✨ Detect mentions</button>
           <button className="note-tool-btn note-delete-btn" onClick={() => { if (confirm("Delete this note?")) onDelete(note.id); }} title="Delete note">🗑 Delete</button>
+        </div>
+      )}
+      {detectResult && (
+        <div className="detect-mentions-bar">
+          <div className="detect-mentions-text">
+            Found {detectResult.matches.reduce((n, m) => n + m.count, 0)} name{detectResult.matches.length === 1 ? "" : "s"} to link: {detectResult.matches.map((m) => m.name).join(", ")}.
+          </div>
+          <div className="detect-mentions-actions">
+            <button className="btn-primary" onClick={applyDetect}>Convert to mentions</button>
+            <button className="btn-ghost" onClick={() => setDetectResult(null)}>Cancel</button>
+          </div>
         </div>
       )}
     </div>
@@ -9150,12 +9282,13 @@ function QuickAdd({ dealId = null, enablerId = null, organizationId = null, cont
             onChange={e => setQDesc(e.target.value)}
           />
         ) : (
-          <input
-            className="input quickadd-input"
-            placeholder="Log an update..."
+          <MentionEditor
+            className="quickadd-input"
+            placeholder="Log an update... use @ to mention"
             value={qDesc}
-            onChange={e => setQDesc(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter") submit(); }}
+            onChange={setQDesc}
+            multiline={false}
+            onSubmit={submit}
           />
         )}
         <SelectWithCustom
@@ -9536,7 +9669,7 @@ function TaskForm({ deals = [], enablers = [], organizations = [], contacts = []
   return (
     <div className="task-form">
       <div className="task-form-title-row">
-        <input className="input task-form-title" placeholder="Task title..." value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(); }} />
+        <MentionEditor className="task-form-title" placeholder="Task title... use @ to mention" value={title} onChange={setTitle} multiline={false} onSubmit={submit} />
         <VoiceRecorder mode="plain" onPlainText={(t) => setTitle((v) => (v.trim() ? `${v.trim()} ${t}` : t))} showToast={showToast} compact title="Dictate task title" />
       </div>
       <div className="task-form-row">
@@ -9610,7 +9743,7 @@ function TodoRow({ todo, contacts = [], deals = [], enablers = [], organizations
       <input type="checkbox" checked={done} onChange={() => onToggle(todo)} disabled={readOnly} className="todo-checkbox" />
       <div className="todo-main">
         <div className="todo-title-row">
-          <span className="todo-title">{todo.title}</span>
+          <span className="todo-title"><MentionText text={todo.title} /></span>
           {!readOnly && !done && onUpdate && <button onClick={() => setEditing(true)} className="icon-btn" title="Edit task">✎</button>}
           {!readOnly && onUpdate
             ? <BadgeSelect options={PRIORITIES} value={todo.priority} color={PRIORITIES.find(p => p.id === todo.priority)?.color} onChange={(v) => onUpdate(todo.id, { priority: v })} title="Change priority" />
@@ -10998,7 +11131,7 @@ function CommentPanel({ comments, author, unread = 0, onOpen, onPost, targetName
             <button className="close-btn" onClick={() => setOpen(false)} title="Close">✕</button>
           </div>
           <div className="comment-compose">
-            <textarea className="input comment-compose-input" placeholder={author === "Andy Liu" ? "Leave a note for Fahed..." : "Reply to Andy..."} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); }} />
+            <MentionEditor className="comment-compose-input" placeholder={author === "Andy Liu" ? "Leave a note for Fahed... use @ to mention" : "Reply to Andy... use @ to mention"} value={text} onChange={setText} />
             <input ref={fileRef} type="file" className="photo-input-hidden" onChange={pickFile} />
             <button className="boss-clip-btn" onClick={() => fileRef.current && fileRef.current.click()} title="Attach a file or screenshot">📎</button>
             <button className="btn-primary" onClick={send} disabled={posting || (!text.trim() && !file)}>Send</button>
@@ -11019,7 +11152,7 @@ function CommentPanel({ comments, author, unread = 0, onOpen, onPost, targetName
                   <div className="boss-comment-main">
                     <div className="boss-comment-meta"><span className="boss-comment-author">{c.author}</span><span className="boss-comment-time">{formatDateTime(c.created_at)}</span></div>
                     {tName && <div className="comment-target-chip">re: {tName}</div>}
-                    {c.content && <div className="boss-comment-text">{c.content}</div>}
+                    {c.content && <div className="boss-comment-text"><MentionText text={c.content} /></div>}
                     {c.file_data && (String(c.file_data).startsWith("data:image")
                       ? <img className="boss-comment-img" src={c.file_data} alt={c.file_name || "attachment"} />
                       : <a className="boss-comment-file" href={c.file_data} download={c.file_name || "file"}>📎 {c.file_name || "Download attachment"}</a>)}
@@ -11076,7 +11209,7 @@ function BossNotes({ comments, entityName, tag, author, onPost }) {
               <Avatar name={c.author} size={30} />
               <div className="boss-comment-main">
                 <div className="boss-comment-meta"><span className="boss-comment-author">{c.author}</span><span className="boss-comment-time">{formatDateTime(c.created_at)}</span></div>
-                {c.content && <div className="boss-comment-text">{c.content}</div>}
+                {c.content && <div className="boss-comment-text"><MentionText text={c.content} /></div>}
               </div>
             </div>
           ))}

@@ -1,5 +1,6 @@
-import { useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useCallback, useContext } from "react";
 import { sanitizeHtml, toDisplayHtml } from "./richtext";
+import { useMentionAutocomplete, MentionContext } from "./MentionEditor";
 
 const FULL_TOOLBAR = [
   { cmd: "bold", label: "B", title: "Bold (Cmd+B)", style: { fontWeight: 800 } },
@@ -35,7 +36,9 @@ const CHECK_ITEM_HTML = '<div class="rt-check"><input type="checkbox" contentedi
 // this set of basic operations (bold/italic/lists/headings/links). Content is
 // read back as sanitized HTML and handed to the caller on every change, which
 // owns debouncing/saving (same contract the old plain textarea had).
-export default function RichTextEditor({ value, onChange, onBlur, placeholder = "Start writing...", mini = false, autoFocus = false }) {
+export default function RichTextEditor({ value, onChange, onBlur, placeholder = "Start writing...", mini = false, autoFocus = false, mentionSource = null }) {
+  const ctxSource = useContext(MentionContext);
+  const source = mentionSource || ctxSource;
   const ref = useRef(null);
   const lastValueRef = useRef(null);
 
@@ -92,13 +95,23 @@ export default function RichTextEditor({ value, onChange, onBlur, placeholder = 
     return runCommand(btn.cmd);
   };
 
+  const mentions = useMentionAutocomplete({
+    editorRef: ref,
+    search: source?.search,
+    onCreatePerson: source?.createPerson,
+    onCreateInstitution: source?.createInstitution,
+    onAfterInsert: emitChange,
+  });
+
   const onKeyDown = (e) => {
+    if (source && mentions.onEditorKeyDown(e)) return;
     const mod = e.metaKey || e.ctrlKey;
     if (!mod) return;
     if (e.key.toLowerCase() === "b") { e.preventDefault(); runCommand("bold"); }
     else if (e.key.toLowerCase() === "i") { e.preventDefault(); runCommand("italic"); }
     else if (e.key.toLowerCase() === "u") { e.preventDefault(); runCommand("underline"); }
   };
+  const onInput = () => { emitChange(); if (source) mentions.scan(); };
 
   // A checkbox click toggles its own `checked` property but leaves the HTML
   // attribute untouched; sync the attribute so the saved HTML reflects it.
@@ -126,11 +139,13 @@ export default function RichTextEditor({ value, onChange, onBlur, placeholder = 
         contentEditable
         suppressContentEditableWarning
         data-placeholder={placeholder}
-        onInput={emitChange}
+        onInput={onInput}
+        onKeyUp={source ? mentions.scan : undefined}
         onBlur={() => { emitChange(); onBlur && onBlur(); }}
         onKeyDown={onKeyDown}
-        onClick={onClickChecklist}
+        onClick={(e) => { onClickChecklist(e); if (source) mentions.scan(); }}
       />
+      {source ? mentions.dropdown : null}
     </div>
   );
 }

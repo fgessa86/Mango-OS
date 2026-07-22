@@ -11,7 +11,9 @@ const ALLOWED_TAGS = new Set([
 const ALLOWED_ATTRS = {
   A: ["href", "target", "rel"],
   INPUT: ["type", "checked", "contenteditable"],
-  SPAN: ["class"],
+  // SPAN carries @ mention chips: the class plus the entity reference and the
+  // contenteditable="false" that makes a chip behave as one atomic unit.
+  SPAN: ["class", "data-mkind", "data-mid", "data-mname", "contenteditable"],
   LI: ["class"],
   DIV: ["class"],
 };

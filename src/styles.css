@@ -1861,3 +1861,68 @@ body.exec-presenting-body { overflow: hidden; }
 @media (max-width: 768px) {
   .exec-regen-btn { min-width: 40px; min-height: 40px; }
 }
+
+/* ============================================================
+   @ mentions: chips, the plain-text mention field, and the
+   autocomplete dropdown. Chips are colored by kind, matching the
+   activity entity pills (person neutral, deal blue, enabler gold,
+   organization gray). Clickable everywhere except inside a live editor.
+   ============================================================ */
+.mention {
+  display: inline; border-radius: 5px; padding: 0 4px; font-weight: 600;
+  font-size: .95em; white-space: nowrap; cursor: pointer; text-decoration: none;
+  border: 1px solid transparent;
+}
+.mention-person { background: var(--card-tint); color: var(--muted-2); border-color: var(--divider); }
+.mention-deal { background: #E4EDFB; color: #2A6FDB; border-color: #2A6FDB44; }
+.mention-enabler { background: #FDECCB; color: #B77400; border-color: #B7740044; }
+.mention-organization { background: #ECECEF; color: #6B6B7B; border-color: #6B6B7B44; }
+/* Inside a live editor a chip is an atomic, non-navigating unit. */
+[contenteditable="true"] .mention { cursor: default; }
+/* In read contexts a chip navigates: subtle hover affordance. */
+:not([contenteditable="true"]) > .mention:hover,
+.rte-view .mention:hover, .act-desc .mention:hover, .mention-readonly .mention:hover { filter: brightness(.96); text-decoration: underline; }
+
+/* The plain-text mention field (contentEditable) styled to read like an input
+   or textarea, so it drops into forms without looking foreign. */
+.mention-input { min-height: 40px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; cursor: text; }
+.mention-input.mention-input-single { min-height: 0; white-space: nowrap; overflow-x: auto; }
+.mention-input:empty::before { content: attr(data-placeholder); color: var(--dim); pointer-events: none; }
+.mention-input:focus { border-color: var(--mango); box-shadow: 0 0 0 3px rgba(245,166,35,0.15); }
+
+/* Autocomplete dropdown (position: fixed, placed at the caret). */
+.mention-menu {
+  width: 260px; background: var(--surface); border: 1px solid var(--divider);
+  border-radius: 12px; box-shadow: 0 8px 28px rgba(0,0,0,.16); padding: 4px;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
+.mention-menu-item {
+  display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+  padding: 8px 9px; border: none; background: none; border-radius: 8px;
+  cursor: pointer; font-family: inherit; color: var(--text);
+}
+.mention-menu-item.active, .mention-menu-item:hover { background: var(--nav-active); }
+.mention-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.mention-dot-person { background: var(--muted-2); }
+.mention-dot-deal { background: #2A6FDB; }
+.mention-dot-enabler { background: #B77400; }
+.mention-dot-organization { background: #6B6B7B; }
+.mention-menu-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.mention-menu-name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mention-menu-sub { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mention-menu-kind { font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); flex-shrink: 0; }
+
+@media (max-width: 768px) {
+  .mention-menu { width: 240px; }
+  .mention-menu-item { padding: 11px 10px; }
+}
+
+/* Detect mentions confirmation bar in the note editor. */
+.detect-mentions-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  margin-top: 8px; padding: 10px 12px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--next-tint);
+}
+.detect-mentions-text { font-size: 13px; color: var(--text-2); flex: 1; min-width: 180px; }
+.detect-mentions-actions { display: flex; gap: 8px; }
+.mention-readonly { min-height: 0; }
