@@ -69,12 +69,42 @@ export function plainTextToHtml(text) {
   return lines.map((l) => `<div>${l ? esc(l) : "<br>"}</div>`).join("");
 }
 
+const BLOCK_TAGS = new Set(["DIV", "P", "H1", "H2", "H3", "BLOCKQUOTE"]);
+// A block that carries nothing to show: no text, and no meaningful child
+// (an image, checkbox, or list). A lone <br> still counts as blank.
+function isBlankBlock(el) {
+  if (!BLOCK_TAGS.has(el.tagName)) return false;
+  if ((el.textContent || "").trim()) return false;
+  return !el.querySelector("img, input, ul, ol, li");
+}
+// Collapses the phantom vertical gaps a paste can leave behind (runs of empty
+// blocks, and empty blocks at the very start or end), so the read view and the
+// editor render with the same tight spacing. A single intentional blank line
+// is preserved; only consecutive and edge blanks are removed. Runs on the
+// shared display path, so both modes get the identical cleaned HTML.
+function tidyBlocks(root) {
+  const blocks = [...root.children];
+  let prevBlank = false;
+  blocks.forEach((el) => {
+    const blank = isBlankBlock(el);
+    if (blank && prevBlank) { el.remove(); return; }
+    prevBlank = blank;
+  });
+  while (root.firstElementChild && isBlankBlock(root.firstElementChild)) root.firstElementChild.remove();
+  while (root.lastElementChild && isBlankBlock(root.lastElementChild)) root.lastElementChild.remove();
+}
+
 // Renders whatever is stored (rich HTML, or legacy plain text) as safe HTML
-// for both the editor and the read-only view.
+// for both the editor and the read-only view, tidied so the two render
+// identically.
 export function toDisplayHtml(value) {
   const v = value || "";
   if (!v) return "";
-  return looksLikeHtml(v) ? sanitizeHtml(v) : plainTextToHtml(v);
+  const clean = looksLikeHtml(v) ? sanitizeHtml(v) : plainTextToHtml(v);
+  const doc = new DOMParser().parseFromString(`<div>${clean}</div>`, "text/html");
+  const root = doc.body.firstChild;
+  tidyBlocks(root);
+  return root.innerHTML;
 }
 
 // Plain-text extraction for list previews and linked-entity snippets, where

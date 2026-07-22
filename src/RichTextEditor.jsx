@@ -135,7 +135,7 @@ export default function RichTextEditor({ value, onChange, onBlur, placeholder = 
       </div>
       <div
         ref={ref}
-        className={mini ? "rte-body input notes-editor" : "rte-body note-content-input"}
+        className={mini ? "note-content rte-body input notes-editor" : "note-content rte-body note-content-input"}
         contentEditable
         suppressContentEditableWarning
         data-placeholder={placeholder}
@@ -179,7 +179,7 @@ export function RichTextRead({ value, className = "", onChange, onClick }) {
     if (onClick) onClick(e);
   };
   if (!html) return null;
-  return <div ref={ref} className={`rte-body rte-view rtf-read-body ${className}`} onClick={handleClick} dangerouslySetInnerHTML={{ __html: html }} />;
+  return <div ref={ref} className={`note-content rte-body rte-view rtf-read-body ${className}`} onClick={handleClick} dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
 // Rich text with two modes. Default is READ: formatted content where mention

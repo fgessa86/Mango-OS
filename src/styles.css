@@ -1006,7 +1006,11 @@ button.act-pill { -webkit-appearance: none; appearance: none; }
 .note-title-input, .note-title-static { width: 100%; border: none; background: transparent; font-family: inherit; font-size: 26px; font-weight: 800; letter-spacing: -0.02em; color: var(--text); outline: none; padding: 4px 0; }
 .note-title-input::placeholder { color: var(--dim); }
 .note-content-input, .note-content-static { flex: 1; width: 100%; border: none; background: transparent; font-family: inherit; font-size: 15px; line-height: 1.7; color: var(--text-2); outline: none; resize: none; padding: 12px 0 24px; }
-.note-content-static { white-space: pre-wrap; overflow-y: auto; }
+/* Read view: no pre-wrap (it turned source whitespace between pasted blocks
+   into phantom blank lines) and the same padding the editor has, so read and
+   edit render identically. */
+.note-content-static { overflow-y: auto; }
+.rtf-read-body.note-content-static { padding: 12px 0 24px; }
 .note-content-input::placeholder { color: var(--dim); }
 .note-toolbar { display: flex; align-items: center; gap: 10px; padding: 12px 0 20px; border-top: 1px solid var(--divider); flex-wrap: wrap; }
 .note-tool-btn { border: 1px solid var(--dark); background: var(--surface); color: var(--text-2); font-size: 13px; font-weight: 600; padding: 8px 13px; border-radius: 10px; cursor: pointer; font-family: inherit; }
@@ -1864,24 +1868,24 @@ body.exec-presenting-body { overflow: hidden; }
 
 /* ============================================================
    @ mentions: chips, the plain-text mention field, and the
-   autocomplete dropdown. Chips are colored by kind, matching the
-   activity entity pills (person neutral, deal blue, enabler gold,
-   organization gray). Clickable everywhere except inside a live editor.
+   autocomplete dropdown. Every chip, person or institution, uses ONE clear
+   blue treatment so any clickable entity reference reads as a link at a
+   glance and looks consistent. Clickable everywhere except inside a live
+   editor, where it stays the same blue but is a non-navigational atom.
    ============================================================ */
 .mention {
   display: inline; border-radius: 5px; padding: 0 4px; font-weight: 600;
   font-size: .95em; white-space: nowrap; cursor: pointer; text-decoration: none;
-  border: 1px solid transparent;
+  color: #2A6FDB; background: #E4EDFB; border: 1px solid #2A6FDB33;
 }
-.mention-person { background: var(--card-tint); color: var(--muted-2); border-color: var(--divider); }
-.mention-deal { background: #E4EDFB; color: #2A6FDB; border-color: #2A6FDB44; }
-.mention-enabler { background: #FDECCB; color: #B77400; border-color: #B7740044; }
-.mention-organization { background: #ECECEF; color: #6B6B7B; border-color: #6B6B7B44; }
-/* Inside a live editor a chip is an atomic, non-navigating unit. */
+/* All kinds share the blue treatment (the kind still drives the dropdown dot). */
+.mention-person, .mention-deal, .mention-enabler, .mention-organization {
+  color: #2A6FDB; background: #E4EDFB; border-color: #2A6FDB33;
+}
+.mention:hover { background: #D3E2FA; text-decoration: underline; }
+/* Inside a live editor a chip is an atomic, non-navigating unit (keeps blue). */
 [contenteditable="true"] .mention { cursor: default; }
-/* In read contexts a chip navigates: subtle hover affordance. */
-:not([contenteditable="true"]) > .mention:hover,
-.rte-view .mention:hover, .act-desc .mention:hover, .mention-readonly .mention:hover { filter: brightness(.96); text-decoration: underline; }
+[contenteditable="true"] .mention:hover { text-decoration: none; background: #E4EDFB; }
 
 /* The plain-text mention field (contentEditable) styled to read like an input
    or textarea, so it drops into forms without looking foreign. */
@@ -1982,3 +1986,25 @@ body.exec-presenting-body { overflow: hidden; }
   .note-editor .rtf .rte { flex: 1; min-height: 0; }
   .note-editor .rtf-foot { flex-shrink: 0; }
 }
+
+/* ============================================================
+   Shared note content typography. ONE class applied to both the
+   contentEditable editor body and the read-only renderer, so a note reads
+   the same in both modes, just without the toolbar and caret. Placed last
+   so it is the single authority for block spacing. white-space: normal
+   collapses source whitespace between blocks (no phantom blank lines);
+   plain lines (divs/p) carry no margin so they sit tight, exactly as the
+   editor shows them.
+   ============================================================ */
+.note-content { white-space: normal; }
+.note-content p, .note-content div { margin: 0; }
+.note-content h1 { font-size: 22px; font-weight: 800; margin: 0.4em 0; line-height: 1.3; }
+.note-content h2 { font-size: 18px; font-weight: 800; margin: 0.4em 0; line-height: 1.3; }
+.note-content h3 { font-size: 15px; font-weight: 800; margin: 0.4em 0; line-height: 1.3; }
+.note-content ul, .note-content ol { padding-left: 22px; margin: 0.3em 0; }
+.note-content li { margin: 0; }
+/* Nested lists must not add extra vertical space. */
+.note-content ul ul, .note-content ol ol, .note-content ul ol, .note-content ol ul { margin: 0; }
+.note-content blockquote { border-left: 3px solid var(--mango); margin: 0.4em 0; padding: 2px 12px; color: var(--text-2); }
+.note-content .rt-check { display: flex; align-items: flex-start; gap: 8px; margin: 0; }
+.note-content .rt-check input[type="checkbox"] { margin-top: 4px; }
