@@ -5,9 +5,9 @@ import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, I
 import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, toDateTimeLocal, fromDateTimeLocal, FATHOM_MARKER, isFathomActivity, stripFathomMarker, activityCalendarEventId, cleanActivityText } from "./utils";
 import MapTab from "./MapTab";
 import VoiceRecorder from "./VoiceRecorder";
-import RichTextEditor, { RichTextView } from "./RichTextEditor";
+import RichTextEditor, { RichTextView, RichTextField } from "./RichTextEditor";
 import { stripHtmlToText, isContentEmpty, toDisplayHtml, looksLikeHtml } from "./richtext";
-import MentionEditor, { MentionText, MentionContext } from "./MentionEditor";
+import MentionEditor, { MentionText, MentionContext, MentionField } from "./MentionEditor";
 import { extractMentionRefs, mentionsToPlainText, detectFullNameMentions } from "./mentions";
 import "./styles.css";
 
@@ -950,11 +950,20 @@ function NotesEditor({ value, onSave, placeholder = "Add notes...", showToast = 
     setDraft(appended);
     onSave(appended);
   };
-  if (readOnly) return isContentEmpty(value) ? <div className="notes-readonly empty-small">No notes.</div> : <RichTextView value={value} className="notes-readonly" />;
+  const isMobile = useIsMobile();
   return (
     <div className="notes-editor-wrap">
-      <RichTextEditor value={draft} onChange={setDraft} onBlur={commit} placeholder={placeholder} mini />
-      <VoiceRecorder mode="plain" onPlainText={onVoiceText} showToast={showToast} compact title="Dictate notes" />
+      <RichTextField
+        value={draft}
+        onChange={setDraft}
+        onBlur={commit}
+        placeholder={placeholder}
+        className="notes-readonly"
+        mini
+        readOnly={readOnly}
+        isMobile={isMobile}
+        editExtras={<VoiceRecorder mode="plain" onPlainText={onVoiceText} showToast={showToast} compact title="Dictate notes" />}
+      />
     </div>
   );
 }
@@ -5701,6 +5710,7 @@ function EventDetailPanel({
   meetingNote, otherEventNotes = [], onSaveMeetingNote, onOpenNote,
 }) {
   const readOnly = useReadOnly();
+  const isMobile = useIsMobile();
   const [prepDraft, setPrepDraft] = useState(ev.prep_notes || "");
   const [outcomeDraft, setOutcomeDraft] = useState(ev.outcome_notes || "");
   const [noteDraft, setNoteDraft] = useState(meetingNote?.content || "");
@@ -5881,9 +5891,7 @@ function EventDetailPanel({
         <div className="event-detail-section">
           <div className="section-label">Prep Notes</div>
           <div className="event-detail-outcome-row">
-            {readOnly
-              ? <div className="input textarea event-detail-textarea mention-readonly"><MentionText text={prepDraft} /></div>
-              : <MentionEditor className="textarea event-detail-textarea" placeholder="Notes before the meeting... use @ to mention" value={prepDraft} onChange={setPrepDraft} onBlur={savePrep} />}
+            <MentionField className="textarea event-detail-textarea" placeholder="Notes before the meeting... use @ to mention" value={prepDraft} onChange={setPrepDraft} onSave={savePrep} readOnly={readOnly} isMobile={isMobile} />
             {!readOnly && <VoiceRecorder mode="plain" onPlainText={onPrepVoiceText} showToast={showToast} compact title="Dictate prep notes" />}
           </div>
           {!readOnly && (
@@ -5905,25 +5913,22 @@ function EventDetailPanel({
               <button type="button" className="link-btn" onClick={() => onOpenNote(meetingNote.id)}>Open in Notes</button>
             )}
           </div>
-          {readOnly ? (
-            meetingNote ? <RichTextView value={meetingNote.content} className="event-detail-note-static" />
-              : <div className="empty-small">No meeting notes.</div>
-          ) : (
-            <>
-              <RichTextEditor
-                key={ev.id}
-                value={noteDraft}
-                onChange={setNoteDraft}
-                onBlur={flushNote}
-                mini
-                placeholder="Write the meeting report. It saves as a note and shows on everyone tagged above."
-              />
-              <div className="event-detail-note-actions">
+          <RichTextField
+            key={ev.id}
+            value={noteDraft}
+            onChange={setNoteDraft}
+            onBlur={flushNote}
+            mini
+            placeholder="Write the meeting report. It saves as a note and shows on everyone tagged above. Use @ to mention."
+            readOnly={readOnly}
+            isMobile={isMobile}
+            editExtras={
+              <>
                 <VoiceRecorder mode="plain" onPlainText={onNoteVoiceText} showToast={showToast} compact title="Dictate meeting notes" />
                 <span className="event-detail-note-status">{noteSaving ? "Saving..." : meetingNote ? "Saved as a note" : "Starts a note when you type"}</span>
-              </div>
-            </>
-          )}
+              </>
+            }
+          />
           {/* Any OTHER note tagged to this meeting (linked from the Notes tab
               rather than written here) shows as a card rather than being
               silently invisible. */}
@@ -5937,9 +5942,7 @@ function EventDetailPanel({
         <div className="event-detail-section event-detail-outcome">
           <div className="section-label">Outcome</div>
           <div className="event-detail-outcome-row">
-            {readOnly
-              ? <div className="input textarea event-detail-textarea mention-readonly"><MentionText text={outcomeDraft} /></div>
-              : <MentionEditor className="textarea event-detail-textarea" placeholder="What happened, decisions made, next steps... use @ to mention" value={outcomeDraft} onChange={setOutcomeDraft} onBlur={saveOutcomeDraft} />}
+            <MentionField className="textarea event-detail-textarea" placeholder="What happened, decisions made, next steps... use @ to mention" value={outcomeDraft} onChange={setOutcomeDraft} onSave={saveOutcomeDraft} readOnly={readOnly} isMobile={isMobile} />
             {!readOnly && <VoiceRecorder mode="digest" onDigest={onOutcomeVoiceDigest} showToast={showToast} title="Record outcome by voice" />}
           </div>
           {!readOnly && (
@@ -8318,16 +8321,16 @@ function NoteEditor({ note, readOnly, autoFocusTitle, onClearAutoFocus, onUpdate
           onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
         />
       )}
-      {readOnly ? (
-        <RichTextView value={note.content} className="note-content-static" />
-      ) : (
-        <>
-          <RichTextEditor value={content} onChange={onContentChange} onBlur={flushContent} placeholder="Start writing..." />
-          <div className="note-voice-row">
-            <VoiceRecorder mode="plain" onPlainText={onVoiceText} showToast={showToast} compact title="Dictate into this note" />
-          </div>
-        </>
-      )}
+      <RichTextField
+        value={content}
+        onChange={onContentChange}
+        onBlur={flushContent}
+        placeholder="Start writing... use @ to mention"
+        className="note-content-static"
+        readOnly={readOnly}
+        isMobile={isMobile}
+        editExtras={<VoiceRecorder mode="plain" onPlainText={onVoiceText} showToast={showToast} compact title="Dictate into this note" />}
+      />
 
       {!readOnly && (
         <div className="note-toolbar">

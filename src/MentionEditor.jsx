@@ -189,6 +189,42 @@ function MentionDropdown({ items, active, rect, onHover, onPick }) {
   );
 }
 
+// Read/edit toggle for a plain-text mention field (prep and outcome notes).
+// Read renders MentionText so chips are clickable; an Edit control switches to
+// the MentionEditor. Done, or clicking outside, saves and returns to read.
+export function MentionField({ value, onChange, onSave, placeholder = "", readOnly = false, isMobile = false, editExtras = null, className = "" }) {
+  const [editing, setEditing] = useState(false);
+  const wrapRef = useRef(null);
+  const exit = useCallback(() => { setEditing(false); if (onSave) onSave(); }, [onSave]);
+  useEffect(() => {
+    if (!editing) return undefined;
+    const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) exit(); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [editing, exit]);
+  const empty = !((value || "").trim());
+
+  if (readOnly) {
+    return empty ? <div className={`rtf-empty ${className}`}>Empty</div> : <div className={`mention-readonly ${className}`}><MentionText text={value} /></div>;
+  }
+  if (!editing) {
+    return (
+      <div className="rtf rtf-read" ref={wrapRef}>
+        {empty
+          ? <div className={`rtf-empty ${className}`} onClick={() => setEditing(true)}>{placeholder || "Click to add"}</div>
+          : <div className={`mention-readonly ${className}`} onClick={(e) => { if (e.target.closest(".mention")) return; if (!isMobile) setEditing(true); }}><MentionText text={value} /></div>}
+        <button type="button" className="rtf-edit-btn" onMouseDown={(e) => e.preventDefault()} onClick={() => setEditing(true)} title="Edit">✎ Edit</button>
+      </div>
+    );
+  }
+  return (
+    <div className="rtf rtf-editing" ref={wrapRef}>
+      <MentionEditor value={value} onChange={onChange} placeholder={placeholder} className={className} autoFocus />
+      <div className="rtf-foot"><span className="rtf-mode">Editing</span>{editExtras}<button type="button" className="rtf-done" onMouseDown={(e) => e.preventDefault()} onClick={exit}>Done</button></div>
+    </div>
+  );
+}
+
 // A contentEditable field for plain-text values that carry @ mentions. Serializes
 // to the @[Name](type:id) token format the rest of the app stores, so the raw
 // token is never shown: chips render live while editing. Use for descriptions,

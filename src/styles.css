@@ -1926,3 +1926,59 @@ body.exec-presenting-body { overflow: hidden; }
 .detect-mentions-text { font-size: 13px; color: var(--text-2); flex: 1; min-width: 180px; }
 .detect-mentions-actions { display: flex; gap: 8px; }
 .mention-readonly { min-height: 0; }
+
+/* ============================================================
+   Read/edit toggle for rich text with mentions (RichTextField /
+   MentionField). Default READ shows formatted content with clickable
+   chips, links, and tickable checkboxes; an Edit affordance switches to
+   the contentEditable editor, and Done (or clicking outside) returns to
+   read. This is what makes a mention chip inside a note clickable, which
+   a permanently-contentEditable body prevents.
+   ============================================================ */
+.rtf { position: relative; }
+.rtf-read-body { cursor: text; }
+/* Chips and links stay their own affordance inside a read body. */
+.rtf-read-body .mention { cursor: pointer; }
+.rtf-read-body a { cursor: pointer; }
+/* Re-enable checkboxes in the read view (RichTextView keeps them inert). */
+.rtf-read-body .rt-check input[type="checkbox"] { pointer-events: auto; cursor: pointer; }
+.rtf-empty { color: var(--dim); cursor: text; padding: 4px 0; font-size: 14px; }
+
+/* The Edit affordance: subtle, top-right, stronger on hover. Always visible
+   on touch, where tapping the body must not open the keyboard. */
+.rtf-edit-btn {
+  position: absolute; top: 0; right: 0; z-index: 2;
+  border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  font-size: 11.5px; font-weight: 600; font-family: inherit; padding: 3px 8px;
+  border-radius: 7px; cursor: pointer; opacity: 0; transition: opacity .12s ease;
+}
+.rtf-read:hover .rtf-edit-btn, .rtf-edit-btn:focus-visible { opacity: .85; }
+.rtf-edit-btn:hover { opacity: 1; border-color: var(--mango); color: var(--accent-strong); }
+
+/* Edit mode footer: mode indicator, dictation, Done. */
+.rtf-foot { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.rtf-mode {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--accent-strong, #B77400); background: #F5A62318; border: 1px solid #F5A62333;
+  border-radius: 6px; padding: 2px 7px;
+}
+.rtf-done {
+  margin-left: auto; border: 1px solid var(--mango); background: var(--mango); color: #fff;
+  font-size: 12.5px; font-weight: 650; font-family: inherit; padding: 5px 14px;
+  border-radius: 8px; cursor: pointer;
+}
+.rtf-done:hover { background: var(--mango-hover); border-color: var(--mango-hover); }
+
+@media (max-width: 768px) {
+  /* Touch: the Edit button is the only way in, so it is always visible. */
+  .rtf-edit-btn { opacity: 1; padding: 6px 12px; font-size: 13px; }
+}
+
+/* Notes tab: keep the body the independent scroll region in both modes, with
+   the Edit button / footer pinned, matching the edit-only layout from before. */
+@media (min-width: 769px) {
+  .note-editor .rtf { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .note-editor .rtf-read-body { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .note-editor .rtf .rte { flex: 1; min-height: 0; }
+  .note-editor .rtf-foot { flex-shrink: 0; }
+}

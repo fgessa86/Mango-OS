@@ -1,5 +1,5 @@
-import { useRef, useEffect, useCallback, useContext } from "react";
-import { sanitizeHtml, toDisplayHtml } from "./richtext";
+import { useRef, useEffect, useCallback, useContext, useState } from "react";
+import { sanitizeHtml, toDisplayHtml, isContentEmpty } from "./richtext";
 import { useMentionAutocomplete, MentionContext } from "./MentionEditor";
 
 const FULL_TOOLBAR = [
@@ -156,4 +156,81 @@ export function RichTextView({ value, className = "" }) {
   const html = toDisplayHtml(value);
   if (!html) return null;
   return <div className={`rte-body rte-view ${className}`} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+// Read render for the read/edit toggle: like RichTextView but INTERACTIVE where
+// it should be. @ mention chips are clickable (they navigate via the app's
+// delegated handler, since this is not a contentEditable surface), links are
+// clickable, and checklist checkboxes are tickable (a state change, not text
+// editing) with the toggle saved back through onChange. onClick fires for any
+// other click, which the field uses to enter edit mode on desktop.
+export function RichTextRead({ value, className = "", onChange, onClick }) {
+  const ref = useRef(null);
+  const html = toDisplayHtml(value);
+  const handleClick = (e) => {
+    const t = e.target;
+    if (t.tagName === "INPUT" && t.type === "checkbox") {
+      if (t.checked) t.setAttribute("checked", ""); else t.removeAttribute("checked");
+      if (onChange && ref.current) onChange(sanitizeHtml(ref.current.innerHTML));
+      return;
+    }
+    // A chip or link handles itself (navigation); do not also enter edit mode.
+    if (t.closest && t.closest(".mention, a")) return;
+    if (onClick) onClick(e);
+  };
+  if (!html) return null;
+  return <div ref={ref} className={`rte-body rte-view rtf-read-body ${className}`} onClick={handleClick} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+// Rich text with two modes. Default is READ: formatted content where mention
+// chips and links are clickable and checkboxes tick. An explicit Edit control
+// (or, on desktop, clicking into the body) switches to the contentEditable
+// editor with the toolbar; Done, or clicking outside, saves and returns to
+// read. Boss View is always read. This is what makes a chip inside a note
+// clickable, which a permanently-contentEditable body prevents.
+export function RichTextField({ value, onChange, onBlur, mini = false, placeholder = "", className = "", readOnly = false, isMobile = false, editExtras = null, autoFocusOnEdit = true }) {
+  const [editing, setEditing] = useState(false);
+  const wrapRef = useRef(null);
+
+  const exit = useCallback(() => { setEditing(false); if (onBlur) onBlur(); }, [onBlur]);
+
+  // Leave edit mode when the user presses down anywhere outside the field (a
+  // click elsewhere). More reliable than focusout with a contentEditable. The
+  // toolbar, voice, and Done all sit inside the wrapper, so they never trigger
+  // it (Done exits explicitly).
+  useEffect(() => {
+    if (!editing) return undefined;
+    const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) exit(); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [editing, exit]);
+
+  if (readOnly) {
+    return isContentEmpty(value)
+      ? <div className={`rtf-empty ${className}`}>Empty</div>
+      : <RichTextRead value={value} className={className} />;
+  }
+
+  if (!editing) {
+    const empty = isContentEmpty(value);
+    return (
+      <div className="rtf rtf-read" ref={wrapRef}>
+        {empty
+          ? <div className={`rtf-empty ${className}`} onClick={() => setEditing(true)}>{placeholder || "Click to add"}</div>
+          : <RichTextRead value={value} onChange={onChange} className={className} onClick={isMobile ? undefined : () => setEditing(true)} />}
+        <button type="button" className="rtf-edit-btn" onMouseDown={(e) => e.preventDefault()} onClick={() => setEditing(true)} title="Edit">✎ Edit</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rtf rtf-editing" ref={wrapRef}>
+      <RichTextEditor value={value} onChange={onChange} mini={mini} placeholder={placeholder} autoFocus={autoFocusOnEdit} />
+      <div className="rtf-foot">
+        <span className="rtf-mode">Editing</span>
+        {editExtras}
+        <button type="button" className="rtf-done" onMouseDown={(e) => e.preventDefault()} onClick={exit}>Done</button>
+      </div>
+    </div>
+  );
 }
