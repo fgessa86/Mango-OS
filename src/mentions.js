@@ -119,7 +119,11 @@ export function detectFullNameMentions(html, candidates) {
     while ((m = re.exec(text)) !== null) {
       const cand = byLower.get(m[1].toLowerCase());
       if (!cand) continue;
-      if (m.index > last) frag.appendChild(doc.createTextNode(text.slice(last, m.index)));
+      // A name typed or pasted with a literal "@" prefix (e.g. "@Mohsen
+      // Alzahrani") should convert cleanly: eat the "@" so the chip (which
+      // already shows its own "@") does not end up doubled.
+      const start = (m.index > 0 && text[m.index - 1] === "@") ? m.index - 1 : m.index;
+      if (start > last) frag.appendChild(doc.createTextNode(text.slice(last, start)));
       const holder = doc.createElement("span");
       holder.innerHTML = mentionChipHtml(cand);
       frag.appendChild(holder.firstChild);
