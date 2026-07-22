@@ -1833,3 +1833,31 @@ body.exec-presenting-body { overflow: hidden; }
   font-size: 12px; padding: 0 2px; opacity: .75;
 }
 .note-link-open:hover { opacity: 1; }
+
+/* Per-section Regenerate control on each section header. */
+.exec-regen-btn {
+  border: 1px solid var(--border); background: var(--surface); color: var(--muted-2);
+  font-size: 13px; min-width: 30px; min-height: 30px; border-radius: 7px; cursor: pointer; font-family: inherit;
+}
+.exec-regen-btn:hover:not(:disabled) { border-color: var(--mango); color: var(--accent-strong, #B77400); }
+.exec-regen-btn:disabled { opacity: .5; cursor: default; }
+
+/* Meeting block's jump-to-event control. "Add outcome" is emphasized because a
+   placeholder meeting is waiting on notes; "Open meeting" is quiet. */
+.exec-meeting-openbtn { display: inline-block; margin-top: 8px; font-size: 12.5px; font-weight: 600; }
+.exec-meeting-addbtn { color: var(--accent-strong, #B77400); }
+
+/* Blockers editor tools: voice dictation plus AI cleanup. */
+.exec-blockers-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+
+/* Blockers and Asks reads as the action list, so it is visually distinct. */
+.exec-block-sec-blockers.exec-block-commentary {
+  border-left: 3px solid #F97316; background: #F973160A;
+}
+.exec-block-header.exec-block-sec-blockers .exec-block-header-text { color: #C2410C; }
+.exec-present-section-blockers h2 { color: #C2410C; }
+.exec-present-section-blockers .exec-present-item { border-left: 3px solid #F97316; padding-left: 18px; background: #F973160A; border-radius: 0 10px 10px 0; padding-top: 12px; padding-bottom: 12px; }
+
+@media (max-width: 768px) {
+  .exec-regen-btn { min-width: 40px; min-height: 40px; }
+}

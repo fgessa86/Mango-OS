@@ -281,32 +281,10 @@ ${context}`;
 // array of {title, content}. Returning structured data (rather than prose the
 // app would have to parse) is what lets every bullet become its own editable
 // block with its own title and body.
-export const generateExecSummary = async (context) => {
-  const prompt = `You are preparing a biweekly update that a VP of Commercial will present to the executive team of a healthcare company operating in Saudi Arabia. Below is the CRM data for the last two weeks.
-
-Synthesize it. Do NOT restate the log. Merge related entries, drop noise (vendor marketing emails, calendar invite acceptances, and automated notifications are never worth reporting), and keep only what an executive would care about: momentum, risk, money, and relationships that open doors. If a section has nothing worth reporting, return an empty array rather than padding it.
-
-Lead with the strongest signal: real meetings with decision-relevant people. Write for an audience with no context on individual contacts, so name the institution and why it matters, not just the person.
-
-The MEETINGS HELD list has already been deduplicated, so treat each entry as one real meeting and never split or repeat one. For each meeting use its NOTES to write both a one-line outcome and the talking points.
-
-Return ONLY a JSON object with exactly these keys:
-{
-  "meetings": [{
-    "title": "meeting name, who it was with, and the date",
-    "content": "ONE line: the outcome and why it matters",
-    "talking_points": ["3 to 5 short substantive bullets from the notes, the detail he would speak to if an executive asks"]
-  }],
-  "bd_momentum": [{"title": "short headline, max 8 words", "content": "1-2 sentences on pipeline or relationship progress"}],
-  "outreach": [{"title": "short headline", "content": "1 sentence on volume, channel, and who was targeted"}],
-  "coming_up": [{"title": "what is coming", "content": "1 sentence on why it matters"}]
-}
-
-At most 5 meetings and at most 4 items in every other section, fewer if the data does not support more. Talking points must come from the meeting's own notes; if a meeting has no notes, return an empty talking_points array rather than inventing detail. No markdown, no asterisks, no backticks. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.
-
-Here is the data:
-${context}`;
-  const text = await plainText(prompt, 900);
+// Pulls a JSON OBJECT out of a model response: strips fences, keeps the
+// substring from the first { to the last }. Returns null so callers can fall
+// back to editable scaffolding rather than nothing.
+const parseJsonObject = (text) => {
   const cleaned = (text || "").replace(/```json/gi, "").replace(/```/g, "").trim();
   const first = cleaned.indexOf("{");
   const last = cleaned.lastIndexOf("}");
@@ -315,6 +293,55 @@ ${context}`;
     const obj = JSON.parse(cleaned.slice(first, last + 1));
     return obj && typeof obj === "object" ? obj : null;
   } catch { return null; }
+};
+
+// One meeting's written summary for the Executive Update. Receives a blob of
+// everything known about a single meeting (prep notes, outcome, the linked
+// note, the activity, and supporting messages around that date) and returns a
+// short past-tense executive summary plus talking points. Returns null on
+// failure so the caller can fall back to an editable placeholder rather than
+// fabricating anything.
+export const generateMeetingSummary = async (context) => {
+  const prompt = `You are writing ONE meeting summary for a biweekly update that a VP of Commercial presents to the executive team of a healthcare company operating in Saudi Arabia. Below is everything known about a single meeting.
+
+Write a summary of 3 to 5 sentences in past tense, executive tone, covering what was discussed, what was decided, and what came out of it. Then give 3 to 5 short talking points: the substantive detail he would speak to if an executive asked. Use ONLY what is in the context. Never invent facts, names, numbers, or commitments. If the context is thin, write a shorter honest summary rather than padding it.
+
+Return ONLY JSON: {"summary": "the paragraph", "talking_points": ["point", "point"]}. No markdown, no asterisks, no backticks. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.
+
+Meeting context:
+${context}`;
+  const text = await plainText(prompt, 500);
+  return parseJsonObject(text);
+};
+
+// The "Conclusions" section: reads across the whole two-week window and states
+// what it adds up to (themes, what is working, what the pattern suggests) as a
+// few bullets. Returns null on failure so the caller can prefill scaffolding.
+export const generateConclusions = async (context) => {
+  const prompt = `You are writing the "Conclusions" section of a biweekly executive update for a healthcare company operating in Saudi Arabia. Below is the CRM data for the last two weeks.
+
+Read across all of it and state what it adds up to: the themes, what is working, and what the pattern suggests for the next two weeks. Write 3 to 5 short bullets, each one sentence, executive tone. Base every bullet on the data. Do not restate the log and do not invent facts.
+
+Return ONLY JSON: {"bullets": ["bullet", "bullet"]}. No markdown, no asterisks, no backticks. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.
+
+Data:
+${context}`;
+  const text = await plainText(prompt, 500);
+  return parseJsonObject(text);
+};
+
+// Optional AI cleanup for the Blockers and Asks section: organizes whatever
+// Fahed typed or dictated into three short lists. Keeps his meaning, invents
+// nothing. Returns null on failure so his raw text is left untouched.
+export const cleanupBlockers = async (text) => {
+  const prompt = `Organize the following raw notes about blockers, needs, and asks into three short bulleted lists, for a VP presenting to executives. Keep the writer's meaning and wording where possible. Do not invent anything. An item that does not clearly fit can go under the closest category.
+
+Return ONLY JSON: {"outcomes": ["..."], "needs": ["..."], "asks": ["..."]}. Each is an array of short one sentence bullets and may be empty. No markdown, no asterisks, no backticks. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.
+
+Raw notes:
+${text}`;
+  const out = await plainText(prompt, 500);
+  return parseJsonObject(out);
 };
 
 // Pulls a JSON ARRAY out of a model response (news briefing): strips markdown

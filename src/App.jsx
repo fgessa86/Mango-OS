@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
 import { api } from "./supabase";
-import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, generateExecSummary, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
+import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, generateMeetingSummary, generateConclusions, cleanupBlockers, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, toDateTimeLocal, fromDateTimeLocal, FATHOM_MARKER, isFathomActivity, stripFathomMarker, activityCalendarEventId, cleanActivityText } from "./utils";
 import MapTab from "./MapTab";
@@ -448,17 +448,18 @@ function FormattedActivityBody({ lines }) {
   );
 }
 
-// Executive Update sections, in presentation order. `aiKey` maps a section to
-// the key the model returns in its JSON draft; "metrics" has none because
-// those numbers are computed locally rather than written by the AI.
+// The Executive Update is always drafted with these five sections, in this
+// order, even when data is thin: no section is ever left missing. `regenerable`
+// marks sections whose header shows a "Regenerate" control.
 const EXEC_SECTIONS = [
-  { id: "metrics", label: "Headline Metrics", aiKey: null },
-  { id: "meetings", label: "Key Meetings", aiKey: "meetings" },
-  { id: "bd_momentum", label: "BD Momentum", aiKey: "bd_momentum" },
-  { id: "outreach", label: "Outreach", aiKey: "outreach" },
-  { id: "coming_up", label: "Coming Up", aiKey: "coming_up" },
+  { id: "metrics", label: "Headline Metrics", regenerable: true },
+  { id: "meetings", label: "Meeting Summaries", regenerable: true },
+  { id: "conclusions", label: "Conclusions", regenerable: true },
+  { id: "next_up", label: "Next Up", regenerable: true },
+  { id: "blockers", label: "Blockers and Asks", regenerable: true },
 ];
 const execSectionLabel = (id) => EXEC_SECTIONS.find((s) => s.id === id)?.label || id || "Other";
+const execSectionOrder = (id) => { const i = EXEC_SECTIONS.findIndex((s) => s.id === id); return i === -1 ? EXEC_SECTIONS.length : i; };
 const EXEC_BLOCK_TYPES = [
   { id: "item", label: "Item" },
   { id: "meeting", label: "Meeting (with talking points)" },
@@ -466,6 +467,17 @@ const EXEC_BLOCK_TYPES = [
   { id: "metric", label: "Metric" },
   { id: "header", label: "Section header" },
 ];
+// The prefilled body of a meeting block that has no note or outcome yet. It is
+// still a real, editable block: Fahed can type the summary straight in, or use
+// "Add outcome" to jump to the meeting, dictate notes, and regenerate.
+const EXEC_MEETING_PLACEHOLDER = "Summary pending. Add outcome notes for this meeting.";
+const execEscapeHtml = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const execBulletsToHtml = (arr) => (arr && arr.length) ? `<ul>${arr.map((b) => `<li>${execEscapeHtml(b)}</li>`).join("")}</ul>` : "";
+// Blockers cleanup renders as three labeled lists.
+const execBlockersToHtml = ({ outcomes, needs, asks } = {}) => {
+  const sec = (label, arr) => (arr && arr.length) ? `<div><b>${label}</b></div>${execBulletsToHtml(arr)}` : "";
+  return [sec("Outcomes", outcomes), sec("Needs", needs), sec("Asks", asks)].filter(Boolean).join("");
+};
 
 // A `meeting` block carries two layers in one rich-text `content` field: the
 // leading text is the one-line outcome shown on the slide, and any bullet list
@@ -1338,6 +1350,9 @@ export default function App() {
   const [execOpenId, setExecOpenId] = useState(null);
   const [execPresenting, setExecPresenting] = useState(false);
   const [execGenerating, setExecGenerating] = useState(false);
+  // The section id currently being regenerated (per-section "Regenerate"), so
+  // its header can show a spinner and a second click is blocked.
+  const [execRegenSection, setExecRegenSection] = useState(null);
   // The calendar event whose detail panel is open (a global overlay, so it can
   // be reached from the Calendar tab or from a "📅 Meeting" activity pill
   // anywhere in the app).
@@ -3451,21 +3466,220 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     return { counts, total: Object.values(counts).reduce((s, n) => s + n, 0), summary: parts.join(", ") };
   };
 
-  // "+ New Biweekly Update": creates the presentation, then drafts its blocks.
-  // Metrics are computed locally and the narrative sections come from one AI
-  // synthesis pass. If the AI call fails the presentation is still created with
-  // its metrics, so the user always has something to edit rather than nothing.
+  // Everything known about ONE meeting, concatenated into a blob for the model:
+  // prep and outcome notes, the linked note body, the activities on the event,
+  // and supporting messages with the same person around that date. This is what
+  // lets the AI write a real summary rather than paraphrasing a log line.
+  const execMeetingContext = (m) => {
+    const parts = [];
+    const who = [m.person, m.institution].filter(Boolean).join(", ");
+    parts.push(`Meeting: "${m.title}" on ${formatDate(m.day)}${who ? ` with ${who}` : ""}`);
+    const ev = m.event;
+    // A hand-logged meeting (or a logged outcome) carries its substance in its
+    // own description, not a separate note, so include it. A bare synced
+    // "Upcoming/Completed meeting" line is not content and is skipped.
+    const synced = parseSyncMeeting(m.activity.description);
+    if (!synced || synced.phase === "outcome") {
+      const d = cleanActivityText(m.activity.description || "").trim();
+      if (d) parts.push(`Notes: ${d}`);
+    }
+    if ((ev?.prep_notes || "").trim()) parts.push(`Prep notes: ${ev.prep_notes.trim()}`);
+    if ((ev?.outcome_notes || "").trim()) parts.push(`Outcome notes: ${ev.outcome_notes.trim()}`);
+    // Prefer the note tagged to this event; fall back to an entity-linked note.
+    const evNote = ev ? notes.find((n) => n.calendar_event_id === ev.id) : null;
+    const noteRow = evNote || m.note;
+    if (noteRow && !isContentEmpty(noteRow.content)) parts.push(`Meeting note "${noteRow.title}": ${stripHtmlToText(noteRow.content)}`);
+    if (ev) {
+      activities.filter((a) => activityCalendarEventId(a) === ev.id).forEach((a) => {
+        const d = cleanActivityText(a.description || "").trim();
+        const sn = (a.body_snippet || "").trim();
+        if (d) parts.push(`Logged activity: ${d}`);
+        if (sn) parts.push(`Message excerpt: ${sn}`);
+      });
+    }
+    const cid = m.activity.contact_id;
+    if (cid) {
+      const dayMs = new Date(`${m.day}T00:00:00Z`).getTime();
+      activities
+        .filter((a) => a.contact_id === cid && a.id !== m.activity.id && ["whatsapp", "linkedin", "email", "call"].includes(a.type)
+          && Math.abs(new Date(a.created_at).getTime() - dayMs) <= 3 * 86400000)
+        .slice(0, 6)
+        .forEach((a) => { const d = firstLine(cleanActivityText(a.description || "")).trim(); if (d) parts.push(`Supporting ${a.type}: ${d}`); });
+    }
+    return parts.join("\n");
+  };
+
+  // True when a meeting has real content to summarize (as opposed to only a
+  // bare calendar placeholder). Drives whether a block gets an AI summary or
+  // the editable "summary pending" placeholder.
+  const execMeetingHasContent = (m) => {
+    const ev = m.event;
+    const evNote = ev ? notes.find((n) => n.calendar_event_id === ev.id) : null;
+    if ((ev?.outcome_notes || "").trim() || (ev?.prep_notes || "").trim()) return true;
+    if (evNote && !isContentEmpty(evNote.content)) return true;
+    if (m.note && !isContentEmpty(m.note.content)) return true;
+    if (ev && activities.some((a) => activityCalendarEventId(a) === ev.id && (a.body_snippet || "").trim())) return true;
+    // A hand-logged meeting or a logged outcome carries its substance in its
+    // own description; a bare synced upcoming/completed line does not.
+    const synced = parseSyncMeeting(m.activity.description);
+    if ((!synced || synced.phase === "outcome") && cleanActivityText(m.activity.description || "").trim()) return true;
+    return false;
+  };
+
+  // A readable one-line label for a meeting block. A hand-logged meeting's
+  // "title" is its whole first line, which can be a paragraph, so drop it in
+  // favor of who and date once it is clearly a description rather than a name.
+  const execMeetingTitleLine = (m) => {
+    const who = [m.person, m.institution].filter(Boolean).join(", ");
+    let name = (m.title || "").trim();
+    if (name.length > 60) name = who ? "" : `${name.slice(0, 57).trim()}...`;
+    return [name, who, formatDate(m.day)].filter(Boolean).join(", ");
+  };
+
+  /* ---- Per-section block builders. Each returns an array of block payloads
+     (no presentation_id/sort_order/id), header first. Both create (all
+     sections) and Regenerate (one section) use these, so the two paths can
+     never drift. Every section always returns at least its header, so a
+     section is never missing even when data is thin. ---- */
+
+  const buildMetricsBlocks = (startISO, endISO) => [
+    { block_type: "header", section: "metrics", title: "Headline Metrics", content: null },
+    ...execMetrics(startISO, endISO).map((mt) => ({ block_type: "metric", section: "metrics", title: mt.title, content: mt.content })),
+  ];
+
+  // One block per real meeting. A meeting with content gets an AI summary plus
+  // talking points; a meeting with none gets an editable placeholder and its
+  // calendar-event source, so "Add outcome" can jump there. Nothing is ever
+  // skipped and nothing is fabricated.
+  const buildMeetingBlocks = async (startISO, endISO) => {
+    const meetings = gatherExecMeetings(startISO, endISO);
+    const header = { block_type: "header", section: "meetings", title: "Meeting Summaries", content: null };
+    if (!meetings.length) {
+      return [header, { block_type: "item", section: "meetings", title: null, content: "<div>No meetings logged in this period. Add one below, or log meetings on the calendar.</div>" }];
+    }
+    const rows = await Promise.all(meetings.map(async (m) => {
+      const src = { source_type: m.event ? "calendar_event" : "activity", source_id: m.event ? m.event.id : m.activity.id };
+      if (!execMeetingHasContent(m)) {
+        return { block_type: "meeting", section: "meetings", title: execMeetingTitleLine(m), content: buildMeetingContent(EXEC_MEETING_PLACEHOLDER, []), ...src };
+      }
+      let summary = null;
+      try { summary = await generateMeetingSummary(execMeetingContext(m)); }
+      catch (e) { console.error("[Exec] meeting summary failed", e); }
+      const lead = (summary?.summary || "").trim() || EXEC_MEETING_PLACEHOLDER;
+      const points = Array.isArray(summary?.talking_points) ? summary.talking_points : [];
+      return { block_type: "meeting", section: "meetings", title: execMeetingTitleLine(m), content: buildMeetingContent(lead, points), ...src };
+    }));
+    return [header, ...rows];
+  };
+
+  // Reads across the whole window. Falls back to editable scaffolding bullets
+  // (never nothing) when the AI is unavailable or the data is thin.
+  const buildConclusionsBlocks = async (startISO, endISO) => {
+    const header = { block_type: "header", section: "conclusions", title: "Conclusions", content: null };
+    let bullets = [];
+    try {
+      const r = await generateConclusions(gatherExecContext(startISO, endISO));
+      if (Array.isArray(r?.bullets)) bullets = r.bullets.map((b) => String(b).trim()).filter(Boolean);
+    } catch (e) { console.error("[Exec] conclusions failed", e); }
+    if (!bullets.length) bullets = [
+      "Add the throughline: what this period added up to.",
+      "Note what is working and worth repeating.",
+      "Flag the pattern the meetings point to.",
+    ];
+    return [header, { block_type: "item", section: "conclusions", title: null, content: execBulletsToHtml(bullets) }];
+  };
+
+  // Calendar events in the next 14 days, future scheduled_meeting activities,
+  // and open high-priority or soon-due tasks, as one written list.
+  const buildNextUpBlocks = () => {
+    const header = { block_type: "header", section: "next_up", title: "Next Up", content: null };
+    const now = new Date();
+    const nowISO = now.toISOString();
+    const horizonISO = new Date(now.getTime() + 14 * 86400000).toISOString();
+    const matchName = (e) => {
+      if (e.matched_deal_id) return deals.find((d) => d.id === e.matched_deal_id)?.company;
+      if (e.matched_enabler_id) return enablers.find((x) => x.id === e.matched_enabler_id)?.name;
+      if (e.matched_organization_id) return organizations.find((o) => o.id === e.matched_organization_id)?.name;
+      if (e.matched_contact_id) return contacts.find((c) => c.id === e.matched_contact_id)?.name;
+      return null;
+    };
+    const items = [];
+    calendarEvents
+      .filter((e) => e.start_time && e.start_time >= nowISO && e.start_time <= horizonISO)
+      .sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
+      .slice(0, 12)
+      .forEach((e) => { const n = matchName(e); items.push(`${formatDate(e.start_time)}: ${e.title || "Meeting"}${n ? ` (${n})` : ""}`); });
+    activities
+      .filter((a) => a.type === "scheduled_meeting" && a.scheduled_for && a.scheduled_for >= nowISO && a.scheduled_for <= horizonISO)
+      .forEach((a) => items.push(`${formatDate(a.scheduled_for)}: ${firstLine(cleanActivityText(a.description)) || "Scheduled meeting"}`));
+    todos
+      .filter((t) => t.status !== "done" && (t.priority === "high" || (t.due_date && t.due_date <= horizonISO)))
+      .slice(0, 10)
+      .forEach((t) => items.push(`Task: ${t.title}${t.due_date ? ` (due ${formatDate(t.due_date)})` : ""}`));
+    const content = items.length ? execBulletsToHtml(items) : execBulletsToHtml(["Add the key meetings and milestones for the next two weeks."]);
+    return [header, { block_type: "item", section: "next_up", title: null, content }];
+  };
+
+  // Auto-detected signals (stale deals, unresolved boss comments, overdue
+  // high-priority tasks) as starter bullets, in a commentary block that Fahed
+  // then writes into or dictates. The block editor offers voice plus AI cleanup.
+  const buildBlockersBlocks = () => {
+    const header = { block_type: "header", section: "blockers", title: "Blockers and Asks", content: null };
+    const bullets = [];
+    deals
+      .filter((d) => !["won", "lost"].includes(d.stage) && d.last_activity_at && daysAgo(d.last_activity_at) >= 14)
+      .sort((a, b) => daysAgo(b.last_activity_at) - daysAgo(a.last_activity_at))
+      .slice(0, 5)
+      .forEach((d) => bullets.push(`${d.company} has had no activity in ${daysAgo(d.last_activity_at)} days.`));
+    bossComments
+      .filter((c) => !c.is_read && (c.author || "") !== "Fahed Al Essa")
+      .slice(0, 5)
+      .forEach((c) => bullets.push(`Unresolved comment from Andy: ${firstLine(stripHtmlToText(c.content || "")) || "(attachment)"}`));
+    todos
+      .filter((t) => t.status !== "done" && t.priority === "high" && isOverdue(t.due_date))
+      .slice(0, 5)
+      .forEach((t) => bullets.push(`Overdue high-priority task: ${t.title}`));
+    const content = bullets.length
+      ? execBulletsToHtml(bullets)
+      : "<div>Add blockers, needs, and asks. You can dictate them and clean them up with AI.</div>";
+    return [header, { block_type: "commentary", section: "blockers", title: null, content }];
+  };
+
+  // Runs every section builder in canonical order and returns a flat payload
+  // list. Meetings and conclusions run in parallel since both hit the API.
+  const buildAllExecSections = async (startISO, endISO) => {
+    const [meetingB, conclB] = await Promise.all([
+      buildMeetingBlocks(startISO, endISO),
+      buildConclusionsBlocks(startISO, endISO),
+    ]);
+    return [
+      ...buildMetricsBlocks(startISO, endISO),
+      ...meetingB,
+      ...conclB,
+      ...buildNextUpBlocks(),
+      ...buildBlockersBlocks(),
+    ];
+  };
+
+  // ISO window from a presentation's stored period dates (for Regenerate).
+  const execPeriodISO = (pres) => ({
+    startISO: new Date(`${pres.period_start}T00:00:00`).toISOString(),
+    endISO: new Date(`${pres.period_end}T23:59:59`).toISOString(),
+  });
+
+  // "+ New Biweekly Update": always creates all five sections, even when data
+  // is thin. Metrics are computed locally; meetings and conclusions come from
+  // the AI with editable fallbacks, so the deck is never empty or missing a
+  // section. A failed AI call degrades to placeholders, it never aborts.
   const createExecPresentation = async () => {
     if (execGenerating) return;
     setExecGenerating(true);
     const end = new Date();
     const start = new Date(end.getTime() - 14 * 86400000);
-    const endDate = end.toISOString().slice(0, 10);
-    const startDate = start.toISOString().slice(0, 10);
     try {
       const rows = await api("exec_presentations", "POST", {
         title: `Executive Update, ${formatDate(start)} to ${formatDate(end)}`,
-        period_start: startDate, period_end: endDate, status: "draft",
+        period_start: start.toISOString().slice(0, 10), period_end: end.toISOString().slice(0, 10), status: "draft",
       });
       const pres = Array.isArray(rows) ? rows[0] : rows;
       if (!pres) throw new Error("no presentation row");
@@ -3473,57 +3687,80 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       setExecOpenId(pres.id);
       navigateTab("exec");
 
-      const startISO = start.toISOString(), endISO = end.toISOString();
-      const blocks = [];
-      let order = 0;
-      const push = (b) => { blocks.push({ presentation_id: pres.id, sort_order: order++, is_hidden: false, ...b }); };
-
-      push({ block_type: "header", section: "metrics", title: "Headline Metrics", content: null });
-      execMetrics(startISO, endISO).forEach((m) => push({ block_type: "metric", section: "metrics", title: m.title, content: m.content }));
-
-      let ai = null;
-      try { ai = await generateExecSummary(gatherExecContext(startISO, endISO)); }
-      catch (e) { console.error("[Exec] AI draft failed", e); }
-
-      // Meetings become `meeting` blocks: the one-line outcome is the visible
-      // headline and the talking points ride along in the same content field
-      // as a bullet list, collapsed behind a chevron until Fahed opens it.
-      // source_type/source_id point back at the calendar event or activity the
-      // block came from, so a block can be traced or regenerated later.
-      const meetingItems = Array.isArray(ai?.meetings) ? ai.meetings : [];
-      const drafted = gatherExecMeetings(startISO, endISO);
-      if (meetingItems.length) {
-        push({ block_type: "header", section: "meetings", title: "Key Meetings", content: null });
-        meetingItems.forEach((it, i) => {
-          const src = drafted[i] || null;
-          push({
-            block_type: "meeting", section: "meetings",
-            title: (it.title || "").trim() || null,
-            content: buildMeetingContent((it.content || "").trim(), Array.isArray(it.talking_points) ? it.talking_points : []),
-            source_type: src ? src.sourceType : null,
-            source_id: src ? src.sourceId : null,
-          });
-        });
-      }
-
-      EXEC_SECTIONS.filter((s) => s.id !== "metrics" && s.id !== "meetings").forEach((sec) => {
-        const items = Array.isArray(ai?.[sec.aiKey]) ? ai[sec.aiKey] : [];
-        if (!items.length) return;
-        push({ block_type: "header", section: sec.id, title: sec.label, content: null });
-        items.forEach((it) => push({
-          block_type: "item", section: sec.id,
-          title: (it.title || "").trim() || null,
-          content: (it.content || "").trim() || null,
-        }));
-      });
-
+      const payloads = await buildAllExecSections(start.toISOString(), end.toISOString());
+      // Every row must carry the SAME keys: PostgREST bulk insert rejects a
+      // batch whose objects have mismatched keys (PGRST102), and only meeting
+      // blocks set source_type/source_id, so default them on all.
+      const blocks = payloads.map((b, i) => ({ presentation_id: pres.id, sort_order: i, is_hidden: false, source_type: null, source_id: null, ...b }));
       const created = await api("exec_blocks", "POST", blocks);
       setExecBlocks((prev) => [...prev, ...(created || [])]);
-      showToast(ai ? "Draft ready. Edit anything before you present." : "Created with metrics. AI draft unavailable, add items manually.");
+      showToast("Draft ready. Every section is editable before you present.");
     } catch (e) {
       console.error("[Exec] create failed", e);
       showToast("Could not create the update. Please try again.");
     } finally { setExecGenerating(false); }
+  };
+
+  // Rebuilds ONE section in place: deletes its current blocks, generates fresh
+  // ones from the same builder create uses, and slots them back at the
+  // section's position (or its canonical position if it had none), renumbering
+  // sort_order densely. Other sections and any manual reordering are preserved.
+  const regenerateExecSection = async (pres, sectionId) => {
+    if (execRegenSection) return;
+    const { startISO, endISO } = execPeriodISO(pres);
+    const builders = {
+      metrics: async () => buildMetricsBlocks(startISO, endISO),
+      meetings: () => buildMeetingBlocks(startISO, endISO),
+      conclusions: () => buildConclusionsBlocks(startISO, endISO),
+      next_up: async () => buildNextUpBlocks(),
+      blockers: async () => buildBlockersBlocks(),
+    };
+    if (!builders[sectionId]) return;
+    setExecRegenSection(sectionId);
+    try {
+      const payloads = await builders[sectionId]();
+      const cur = execBlocksFor(pres.id);
+      const oldSection = cur.filter((b) => b.section === sectionId);
+      const others = cur.filter((b) => b.section !== sectionId);
+      // Where the new section goes: at the old section's first position, or (if
+      // it had none) before the first block whose canonical section is later.
+      let insertPos;
+      if (oldSection.length) {
+        const firstOldIdx = cur.findIndex((b) => b.section === sectionId);
+        insertPos = cur.slice(0, firstOldIdx).filter((b) => b.section !== sectionId).length;
+      } else {
+        const idx = others.findIndex((b) => execSectionOrder(b.section) > execSectionOrder(sectionId));
+        insertPos = idx === -1 ? others.length : idx;
+      }
+      if (oldSection.length) await Promise.all(oldSection.map((b) => api("exec_blocks", "DELETE", null, `?id=eq.${b.id}`)));
+      // Same-keys rule as create: default source_* so a mixed batch (header plus
+      // meetings) does not 400.
+      const toCreate = payloads.map((p) => ({ presentation_id: pres.id, is_hidden: false, source_type: null, source_id: null, ...p }));
+      const created = toCreate.length ? ((await api("exec_blocks", "POST", toCreate)) || []) : [];
+      const finalOrder = [...others.slice(0, insertPos), ...created, ...others.slice(insertPos)];
+      await Promise.all(finalOrder.map((b, i) => (b.sort_order === i ? null : api("exec_blocks", "PATCH", { sort_order: i }, `?id=eq.${b.id}`))).filter(Boolean));
+      const renumbered = finalOrder.map((b, i) => ({ ...b, sort_order: i }));
+      setExecBlocks((prev) => [...prev.filter((b) => b.presentation_id !== pres.id), ...renumbered]);
+      await touchPresentation(pres.id);
+      showToast(`${execSectionLabel(sectionId)} regenerated`);
+    } catch (e) {
+      console.error("[Exec] regenerate failed", e);
+      showToast("Could not regenerate. Please try again.");
+    } finally { setExecRegenSection(null); }
+  };
+
+  // Blockers voice/AI cleanup: organizes typed or dictated text into Outcomes,
+  // Needs, and Asks. Returns HTML for the editor to drop in, or null on failure
+  // so the user's raw text is left untouched.
+  const cleanupExecBlockers = async (text) => {
+    const clean = (text || "").trim();
+    if (!clean) { showToast("Nothing to clean up yet"); return null; }
+    try {
+      const r = await cleanupBlockers(clean);
+      const html = r ? execBlockersToHtml(r) : "";
+      if (!html) { showToast("Could not organize that text"); return null; }
+      return html;
+    } catch (e) { console.error("[Exec] blockers cleanup failed", e); showToast("Could not clean up. Please try again."); return null; }
   };
 
   const updateExecPresentation = async (id, patch) => {
@@ -4585,6 +4822,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onUpdateBlock={updateExecBlock}
           onDeleteBlock={deleteExecBlock}
           onReorder={reorderExecBlocks}
+          onRegenerateSection={regenerateExecSection}
+          regeneratingSection={execRegenSection}
+          onOpenEvent={openCalendarEventDetail}
+          onCleanupBlockers={cleanupExecBlockers}
           presenting={execPresenting}
           onPresent={() => setExecPresenting(true)}
           onExitPresent={() => setExecPresenting(false)}
@@ -5707,18 +5948,19 @@ function execPlainText(pres, blocks) {
     if (b.section !== section && b.block_type !== "header") { /* keep flowing under the last header */ }
     if (b.block_type === "metric") { lines.push(`${b.title}: ${b.content || ""}`.trim()); return; }
     const title = (b.title || "").trim();
-    if (b.block_type === "meeting") {
-      // A meeting exports as its headline plus indented talking points, so the
-      // detail travels with it into an email rather than being lost.
-      const { lead, points } = splitMeetingContent(b.content);
-      const outcome = stripHtmlToText(lead).trim();
-      lines.push(`- ${[title, outcome].filter(Boolean).join(": ")}`);
+    // Meetings and any block whose content is a bullet list (conclusions, next
+    // up, blockers) export as a lead line plus indented sub-bullets, so the
+    // detail travels into an email rather than being flattened into one run.
+    const { lead, points } = splitMeetingContent(b.content);
+    const outcome = stripHtmlToText(lead).trim();
+    if (points.length) {
+      const head = [title, outcome].filter(Boolean).join(": ");
+      if (head) lines.push(`- ${head}`);
       points.forEach((p) => lines.push(`    . ${stripHtmlToText(p).trim()}`));
       return;
     }
-    const content = stripHtmlToText(b.content || "").trim();
-    if (title && content) lines.push(`- ${title}: ${content}`);
-    else if (title || content) lines.push(`- ${title || content}`);
+    if (title && outcome) lines.push(`- ${title}: ${outcome}`);
+    else if (title || outcome) lines.push(`- ${title || outcome}`);
   });
   return lines.join("\n");
 }
@@ -5735,17 +5977,16 @@ function execSlideText(pres, blocks) {
     if (!current) current = execSectionLabel(b.section);
     if (b.block_type === "metric") { buf.push(`• ${b.title}: ${b.content || ""}`.trim()); return; }
     const title = (b.title || "").trim();
-    if (b.block_type === "meeting") {
-      const { lead, points } = splitMeetingContent(b.content);
+    const { lead, points } = splitMeetingContent(b.content);
+    const outcome = stripHtmlToText(lead).trim();
+    if (points.length) {
       if (title) buf.push(`• ${title}`);
-      const outcome = stripHtmlToText(lead).trim();
       if (outcome) buf.push(`   ${outcome}`);
       points.forEach((p) => buf.push(`     - ${stripHtmlToText(p).trim()}`));
       return;
     }
-    const content = stripHtmlToText(b.content || "").trim();
     if (title) buf.push(`• ${title}`);
-    if (content) buf.push(`   ${content}`);
+    if (outcome) buf.push(`   ${outcome}`);
   });
   flush();
   return out.join("\n");
@@ -5786,11 +6027,12 @@ function ExecMeetingBody({ content, presenting = false }) {
 // One editable block in EDIT MODE. Read state shows the rendered block with its
 // controls; editing swaps it for the inline form, matching the click-to-edit
 // pattern the rest of the app uses rather than opening a modal.
-function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDrop, isDragging, onMove, canMoveUp, canMoveDown }) {
+function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDrop, isDragging, onMove, canMoveUp, canMoveDown, onRegenerate, regenerating, onOpenEvent, onCleanupBlockers, showToast }) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(block.title || "");
   const [content, setContent] = useState(block.content || "");
   const [saving, setSaving] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
 
   useEffect(() => { setTitle(block.title || ""); setContent(block.content || ""); }, [block.title, block.content]);
 
@@ -5805,6 +6047,27 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
   const isHeader = block.block_type === "header";
   const isMetric = block.block_type === "metric";
   const isMeeting = block.block_type === "meeting";
+  const isBlockers = block.section === "blockers" && !isHeader;
+  const sectionMeta = EXEC_SECTIONS.find((s) => s.id === block.section);
+  const canRegen = isHeader && sectionMeta?.regenerable && onRegenerate;
+  const regenBusy = regenerating === block.section;
+  // A meeting with a calendar-event source can jump to that event; the label
+  // is "Add outcome" while it still holds the placeholder, "Open meeting" once
+  // it has a real summary.
+  const meetingEventId = isMeeting && block.source_type === "calendar_event" ? block.source_id : null;
+  const isPlaceholderMeeting = isMeeting && stripHtmlToText(splitMeetingContent(block.content).lead).trim() === EXEC_MEETING_PLACEHOLDER;
+
+  const appendDictation = (t) => {
+    const clean = (t || "").trim();
+    if (!clean) return;
+    setContent((c) => `${c || ""}<div>${clean.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>`);
+  };
+  const runCleanup = async () => {
+    if (cleaning) return;
+    setCleaning(true);
+    try { const html = await onCleanupBlockers(stripHtmlToText(content)); if (html) setContent(html); }
+    finally { setCleaning(false); }
+  };
 
   if (editing) {
     return (
@@ -5814,8 +6077,15 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
           <input className="input exec-edit-metric" value={content} onChange={(e) => setContent(e.target.value)} placeholder="Value" />
         ) : (
           <>
-            <RichTextEditor value={content} onChange={setContent} mini placeholder={isMeeting ? "One-line outcome, then a bullet list for talking points..." : "What the executives should hear..."} />
+            <RichTextEditor value={content} onChange={setContent} mini placeholder={isMeeting ? "Summary, then a bullet list for talking points..." : "What the executives should hear..."} />
             {isMeeting && <div className="exec-add-hint">The bullet list is the collapsible talking points.</div>}
+            {isBlockers && onCleanupBlockers && (
+              <div className="exec-blockers-tools">
+                <VoiceRecorder mode="plain" compact showToast={showToast} onPlainText={appendDictation} title="Dictate blockers and asks" />
+                <button type="button" className="btn-sec" disabled={cleaning} onClick={runCleanup}>{cleaning ? "Organizing..." : "Clean up with AI"}</button>
+                <span className="exec-add-hint">Dictate or type, then organize into Outcomes, Needs, Asks.</span>
+              </div>
+            )}
           </>
         )}
         <div className="exec-edit-actions">
@@ -5829,7 +6099,7 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
 
   return (
     <div
-      className={`exec-block exec-block-${block.block_type} ${block.is_hidden ? "exec-block-hidden" : ""} ${isDragging ? "exec-block-dragging" : ""}`}
+      className={`exec-block exec-block-${block.block_type} exec-block-sec-${block.section} ${block.is_hidden ? "exec-block-hidden" : ""} ${isDragging ? "exec-block-dragging" : ""}`}
       draggable
       onDragStart={onDragStart}
       onDragOver={onDragOver}
@@ -5847,14 +6117,24 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
         ) : (
           <>
             {block.title && <div className="exec-block-title">{block.title}</div>}
-            {block.block_type === "meeting"
+            {isMeeting
               ? <ExecMeetingBody content={block.content} />
               : block.content && <RichTextView value={block.content} className="exec-block-content" />}
-            {block.block_type === "commentary" && <span className="exec-commentary-tag">Commentary</span>}
+            {block.block_type === "commentary" && !isBlockers && <span className="exec-commentary-tag">Commentary</span>}
+            {meetingEventId && onOpenEvent && (
+              <button type="button" className={`link-btn exec-meeting-openbtn ${isPlaceholderMeeting ? "exec-meeting-addbtn" : ""}`} onClick={() => onOpenEvent(meetingEventId)}>
+                {isPlaceholderMeeting ? "Add outcome" : "↗ Open meeting"}
+              </button>
+            )}
           </>
         )}
       </div>
       <div className="exec-block-actions">
+        {canRegen && (
+          <button type="button" className="exec-regen-btn" disabled={regenBusy} onClick={() => onRegenerate(block.section)} title="Regenerate this section from the latest data">
+            {regenBusy ? "..." : "↻"}
+          </button>
+        )}
         {/* Drag works on desktop; these arrows are the reorder path on touch,
             where HTML5 drag and drop does not fire. */}
         <button type="button" className="exec-move-btn" onClick={() => onMove(block.id, -1)} disabled={!canMoveUp} title="Move up">↑</button>
@@ -5873,7 +6153,7 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
 // added, since a header is just a block whose type is header.
 function ExecAddBlock({ onAdd }) {
   const [open, setOpen] = useState(false);
-  const [section, setSection] = useState("pipeline");
+  const [section, setSection] = useState("meetings");
   const [blockType, setBlockType] = useState("item");
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
@@ -5950,8 +6230,9 @@ function ExecPresentView({ pres, blocks, onExit }) {
         {groups.map((g, i) => {
           const metrics = g.items.filter((b) => b.block_type === "metric");
           const rest = g.items.filter((b) => b.block_type !== "metric");
+          const secId = g.header?.section || g.items[0]?.section;
           return (
-            <section key={i} className="exec-present-section">
+            <section key={i} className={`exec-present-section ${secId === "blockers" ? "exec-present-section-blockers" : ""}`}>
               {g.header && <h2>{g.header.title || execSectionLabel(g.header.section)}</h2>}
               {metrics.length > 0 && (
                 <div className="exec-present-metrics">
@@ -5984,6 +6265,7 @@ function ExecUpdateTab({
   presentations, blocksFor, openId, onOpen, onCreate, generating,
   onUpdatePresentation, onDeletePresentation,
   onAddBlock, onUpdateBlock, onDeleteBlock, onReorder,
+  onRegenerateSection, regeneratingSection, onOpenEvent, onCleanupBlockers,
   presenting, onPresent, onExitPresent, showToast,
 }) {
   const readOnly = useReadOnly();
@@ -6129,6 +6411,11 @@ function ExecUpdateTab({
               onMove={move}
               canMoveUp={blocks.indexOf(b) > 0}
               canMoveDown={blocks.indexOf(b) < blocks.length - 1}
+              onRegenerate={(section) => onRegenerateSection(pres, section)}
+              regenerating={regeneratingSection}
+              onOpenEvent={onOpenEvent}
+              onCleanupBlockers={onCleanupBlockers}
+              showToast={showToast}
             />
           )
         ))}
