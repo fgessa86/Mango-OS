@@ -1798,6 +1798,62 @@ body.exec-presenting-body { overflow: hidden; }
   .exec-points-list { display: flex !important; }
 }
 
+/* Pipeline snapshot block: a clean, executive-readable view of the pipeline
+   grouped by tier, in the editor, in Present mode, and in Boss View. */
+.exec-pipeline { margin-top: 4px; display: flex; flex-direction: column; gap: 12px; }
+.exec-pipeline-summary {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px;
+  font-size: 12.5px; color: var(--text-2); font-weight: 600;
+}
+.exec-pipeline-summary-part { display: inline-flex; align-items: center; }
+.exec-pipeline-summary-part + .exec-pipeline-summary-part::before { content: "·"; margin-right: 14px; color: var(--muted); }
+.exec-pipeline-refresh {
+  margin-left: auto; border: 1px solid var(--border); background: var(--surface);
+  color: var(--muted-2); font-family: inherit; font-size: 11.5px; font-weight: 650;
+  cursor: pointer; padding: 4px 10px; border-radius: 999px;
+}
+.exec-pipeline-refresh:hover:not(:disabled) { border-color: var(--mango); color: var(--accent-strong, #B77400); }
+.exec-pipeline-refresh:disabled { opacity: .6; cursor: default; }
+.exec-pipeline-empty { font-size: 12.5px; color: var(--muted); }
+.exec-pipeline-tier { display: flex; flex-direction: column; gap: 6px; }
+.exec-pipeline-tier-head { display: flex; align-items: center; gap: 8px; }
+.exec-pipeline-tier-count { font-size: 11.5px; color: var(--muted); font-weight: 600; }
+.exec-pipeline-deals { display: flex; flex-direction: column; gap: 6px; }
+.exec-pipeline-deal {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px;
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface);
+}
+.exec-pipeline-deal-adv { border-color: #10B98155; background: #10B9810d; }
+.exec-pipeline-deal-hidden { opacity: .45; }
+.exec-pipeline-company {
+  border: none; background: none; padding: 0; font-family: inherit; font-size: 13.5px; font-weight: 650;
+  color: #2A6FDB; cursor: pointer;
+}
+.exec-pipeline-company:hover { text-decoration: underline; }
+.exec-pipeline-stage { font-size: 11px; font-weight: 650; padding: 1px 8px; border-radius: 999px; }
+.exec-pipeline-city { font-size: 11.5px; color: var(--muted-2); }
+.exec-pipeline-type { font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px; }
+.exec-pipeline-adv-tag { font-size: 10.5px; font-weight: 700; color: #10B981; margin-left: 2px; }
+.exec-pipeline-hide {
+  margin-left: auto; border: none; background: none; cursor: pointer; font-size: 13px;
+  opacity: .6; padding: 2px 4px; border-radius: 6px; line-height: 1;
+}
+.exec-pipeline-hide:hover { opacity: 1; background: var(--card); }
+
+/* Present mode: larger and airier for screen-share. */
+.exec-pipeline-present { gap: 18px; }
+.exec-pipeline-present .exec-pipeline-summary { font-size: 16px; }
+.exec-pipeline-present .exec-pipeline-deal { padding: 10px 14px; gap: 8px 12px; }
+.exec-pipeline-present .exec-pipeline-company { font-size: 18px; }
+.exec-pipeline-present .exec-pipeline-stage { font-size: 13px; padding: 2px 11px; }
+.exec-pipeline-present .exec-pipeline-city { font-size: 13.5px; }
+.exec-pipeline-present .exec-pipeline-type { font-size: 12px; }
+.exec-pipeline-present .exec-pipeline-adv-tag { font-size: 12.5px; }
+@media print {
+  .exec-pipeline-refresh, .exec-pipeline-hide { display: none !important; }
+  .exec-pipeline-deal-hidden { display: none !important; }
+}
+
 /* Notes surfaced away from the Notes tab render as compact openable cards
    (calendar event panel, institution and person sheets), never as a wall of
    text in someone else's view. */

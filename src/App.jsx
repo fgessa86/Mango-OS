@@ -452,6 +452,7 @@ function FormattedActivityBody({ lines }) {
 // marks sections whose header shows a "Regenerate" control.
 const EXEC_SECTIONS = [
   { id: "metrics", label: "Headline Metrics", regenerable: true },
+  { id: "pipeline", label: "Pipeline", regenerable: true },
   { id: "meetings", label: "Meeting Summaries", regenerable: true },
   { id: "conclusions", label: "Conclusions", regenerable: true },
   { id: "next_up", label: "Next Up", regenerable: true },
@@ -1397,6 +1398,8 @@ export default function App() {
   // The section id currently being regenerated (per-section "Regenerate"), so
   // its header can show a spinner and a second click is blocked.
   const [execRegenSection, setExecRegenSection] = useState(null);
+  // The pipeline snapshot block currently being refreshed to current state.
+  const [refreshingPipelineId, setRefreshingPipelineId] = useState(null);
   // The calendar event whose detail panel is open (a global overlay, so it can
   // be reached from the Calendar tab or from a "📅 Meeting" activity pill
   // anywhere in the app).
@@ -3613,6 +3616,52 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     ...execMetrics(startISO, endISO).map((mt) => ({ block_type: "metric", section: "metrics", title: mt.title, content: mt.content })),
   ];
 
+  // A snapshot of the pipeline at generation time: every active (not won/lost)
+  // deal with its tier, stage, city and institution type, plus which deals
+  // advanced a stage in the period. Stored as JSON on the block's content so the
+  // executive view is self-contained and never recomputes on its own (the block
+  // is a snapshot, refreshed on demand via the block's "Refresh pipeline"
+  // control, not a live query). Type label/color are resolved here so the render
+  // needs no customOptions; stage/tier are re-resolved from the constants.
+  const buildPipelineSnapshot = (startISO, endISO) => {
+    const advancedIds = new Set(
+      buildStageTransitions(activities, deals)
+        .filter((t) => t.date && t.date >= startISO && t.date <= endISO)
+        .map((t) => t.dealId)
+    );
+    const rows = deals
+      .filter((d) => !["won", "lost"].includes(d.stage))
+      .map((d) => {
+        const inst = instByName.get((d.company || "").trim().toLowerCase());
+        const typeMeta = inst?.type ? institutionTypeMeta(inst.type, customOptions) : null;
+        const cities = parseCities(d.city || inst?.city);
+        const city = cities.length ? (cities.length > 1 ? `${cities[0]} +${cities.length - 1}` : cities[0]) : "";
+        return {
+          id: d.id,
+          company: d.company || "",
+          stage: d.stage || "prospecting",
+          tier: d.tier || "Untiered",
+          city,
+          typeLabel: typeMeta?.label || "",
+          typeColor: typeMeta?.color || "",
+          advanced: advancedIds.has(d.id),
+        };
+      })
+      // Strongest tier first, then advanced deals surfaced within a tier.
+      .sort((a, b) => {
+        const to = (x) => DEAL_TIERS.findIndex((t) => t.id === (x.tier || "Untiered"));
+        if (to(a) !== to(b)) return to(a) - to(b);
+        if (a.advanced !== b.advanced) return a.advanced ? -1 : 1;
+        return (a.company || "").localeCompare(b.company || "");
+      });
+    return { generatedAt: new Date().toISOString(), deals: rows, hidden: [] };
+  };
+
+  const buildPipelineBlocks = (startISO, endISO) => [
+    { block_type: "header", section: "pipeline", title: "Pipeline", content: null },
+    { block_type: "pipeline", section: "pipeline", title: null, content: JSON.stringify(buildPipelineSnapshot(startISO, endISO)) },
+  ];
+
   // One block per real meeting. A meeting with content gets an AI summary plus
   // talking points; a meeting with none gets an editable placeholder and its
   // calendar-event source, so "Add outcome" can jump there. Nothing is ever
@@ -3720,6 +3769,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     ]);
     return [
       ...buildMetricsBlocks(startISO, endISO),
+      ...buildPipelineBlocks(startISO, endISO),
       ...meetingB,
       ...conclB,
       ...buildNextUpBlocks(),
@@ -3776,6 +3826,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     const { startISO, endISO } = execPeriodISO(pres);
     const builders = {
       metrics: async () => buildMetricsBlocks(startISO, endISO),
+      pipeline: async () => buildPipelineBlocks(startISO, endISO),
       meetings: () => buildMeetingBlocks(startISO, endISO),
       conclusions: () => buildConclusionsBlocks(startISO, endISO),
       next_up: async () => buildNextUpBlocks(),
@@ -3872,6 +3923,29 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       if (block) await touchPresentation(block.presentation_id);
       return true;
     } catch { showToast("Could not save block. Please try again."); return false; }
+  };
+
+  // "Refresh pipeline" on a snapshot block: recompute the snapshot from the
+  // current pipeline for the presentation's own period, WITHOUT regenerating the
+  // whole deck and WITHOUT losing which deals Fahed hid (the hidden set is
+  // carried over, dropping ids that no longer exist). This is the one action
+  // that moves a snapshot forward to "now" before presenting.
+  const refreshExecPipeline = async (block) => {
+    if (refreshingPipelineId) return;
+    const pres = execPresentations.find((p) => p.id === block.presentation_id);
+    if (!pres) return;
+    setRefreshingPipelineId(block.id);
+    try {
+      const { startISO, endISO } = execPeriodISO(pres);
+      const snap = buildPipelineSnapshot(startISO, endISO);
+      let prevHidden = [];
+      try { prevHidden = JSON.parse(block.content || "{}").hidden || []; } catch { prevHidden = []; }
+      const liveIds = new Set(snap.deals.map((d) => d.id));
+      snap.hidden = prevHidden.filter((id) => liveIds.has(id));
+      const ok = await updateExecBlock(block.id, { content: JSON.stringify(snap) });
+      if (ok !== false) showToast("Pipeline refreshed to current state");
+    } catch (e) { console.error("[Exec] pipeline refresh failed", e); showToast("Could not refresh the pipeline."); }
+    finally { setRefreshingPipelineId(null); }
   };
 
   const deleteExecBlock = async (id) => {
@@ -5017,6 +5091,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onRegenerateSection={regenerateExecSection}
           regeneratingSection={execRegenSection}
           onOpenEvent={openCalendarEventDetail}
+          onOpenInstitution={(name) => openInstitution(name)}
+          onRefreshPipeline={refreshExecPipeline}
+          refreshingPipelineId={refreshingPipelineId}
           onCleanupBlockers={cleanupExecBlockers}
           presenting={execPresenting}
           onPresent={() => setExecPresenting(true)}
@@ -6138,6 +6215,110 @@ function DeltaBadge({ current, prior }) {
    completely (edit, hide, reorder, delete, add) before presenting.
    ============================================================ */
 
+// The JSON snapshot stored on a pipeline block, parsed defensively (a
+// hand-edited or older block should degrade to an empty snapshot, never throw).
+function parsePipelineSnapshot(content) {
+  try {
+    const o = JSON.parse(content || "{}");
+    if (o && Array.isArray(o.deals)) return { deals: o.deals, hidden: Array.isArray(o.hidden) ? o.hidden : [], generatedAt: o.generatedAt || null };
+  } catch { /* not JSON */ }
+  return { deals: [], hidden: [], generatedAt: null };
+}
+
+// The deals grouped by tier (strongest first), given the visible set.
+function pipelineTierGroups(deals) {
+  return DEAL_TIERS
+    .map((t) => ({ tier: t, deals: deals.filter((d) => (d.tier || "Untiered") === t.id) }))
+    .filter((g) => g.deals.length);
+}
+
+// The one-line "8 active deals . 3 Tier 1, 2 Tier 2 . 2 advanced" summary text.
+function pipelineSummaryParts(visibleDeals) {
+  const parts = [`${visibleDeals.length} active deal${visibleDeals.length === 1 ? "" : "s"}`];
+  const byTier = DEAL_TIERS
+    .filter((t) => t.id !== "Untiered")
+    .map((t) => ({ t, n: visibleDeals.filter((d) => (d.tier || "Untiered") === t.id).length }))
+    .filter((x) => x.n);
+  if (byTier.length) parts.push(byTier.map((x) => `${x.n} ${x.t.label}`).join(", "));
+  const adv = visibleDeals.filter((d) => d.advanced).length;
+  if (adv) parts.push(`${adv} advanced`);
+  return parts;
+}
+
+// Plain-text lines for a pipeline snapshot, used by both text exports. Hidden
+// deals are excluded, matching Present mode.
+function execPipelineToLines(content, bullet = "- ", sub = "    . ") {
+  const snap = parsePipelineSnapshot(content);
+  const hidden = new Set(snap.hidden);
+  const shown = snap.deals.filter((d) => !hidden.has(d.id));
+  const lines = [bullet + pipelineSummaryParts(shown).join(" . ")];
+  pipelineTierGroups(shown).forEach((g) => {
+    lines.push(`${sub}${g.tier.label}:`);
+    g.deals.forEach((d) => {
+      const bits = [stageLabel(d.stage), d.city, d.typeLabel].filter(Boolean).join(", ");
+      lines.push(`${sub}  ${d.company}${bits ? ` (${bits})` : ""}${d.advanced ? " [advanced]" : ""}`);
+    });
+  });
+  return lines;
+}
+
+// The visual pipeline snapshot, shown in the editor (editable = per-deal hide
+// toggles plus Refresh), in Present mode (large, hidden deals dropped), and in
+// Boss View (read-only, still clickable). Company names open the institution
+// sheet via onOpenInstitution, respecting the app's back-stack.
+function ExecPipelineBody({ content, presenting = false, editable = false, onOpenInstitution, onToggleHidden, onRefresh, refreshing }) {
+  const snap = parsePipelineSnapshot(content);
+  const hidden = new Set(snap.hidden);
+  // The editor shows every deal (hidden ones dimmed with a "show" toggle);
+  // Present mode and Boss View show only the visible ones.
+  const list = editable ? snap.deals : snap.deals.filter((d) => !hidden.has(d.id));
+  const visibleForSummary = snap.deals.filter((d) => !hidden.has(d.id));
+  const groups = pipelineTierGroups(list);
+  const open = (company) => onOpenInstitution && company && onOpenInstitution(company);
+
+  return (
+    <div className={`exec-pipeline ${presenting ? "exec-pipeline-present" : ""}`}>
+      <div className="exec-pipeline-summary">
+        {pipelineSummaryParts(visibleForSummary).map((p, i) => <span key={i} className="exec-pipeline-summary-part">{p}</span>)}
+        {editable && onRefresh && (
+          <button type="button" className="exec-pipeline-refresh" disabled={refreshing} onClick={onRefresh} title="Update this snapshot to the current pipeline">
+            {refreshing ? "Refreshing..." : "↻ Refresh pipeline"}
+          </button>
+        )}
+      </div>
+      {groups.length === 0 && <div className="exec-pipeline-empty">No active deals in the pipeline.</div>}
+      {groups.map((g) => (
+        <div key={g.tier.id} className="exec-pipeline-tier">
+          <div className="exec-pipeline-tier-head">
+            <span className="tier-badge" style={{ background: g.tier.bg, color: g.tier.fg }}>{g.tier.label}</span>
+            <span className="exec-pipeline-tier-count">{g.deals.length}</span>
+          </div>
+          <div className="exec-pipeline-deals">
+            {g.deals.map((d) => {
+              const st = STAGES.find((s) => s.id === d.stage);
+              const isHidden = hidden.has(d.id);
+              return (
+                <div key={d.id} className={`exec-pipeline-deal ${d.advanced ? "exec-pipeline-deal-adv" : ""} ${isHidden ? "exec-pipeline-deal-hidden" : ""}`}>
+                  <button type="button" className="exec-pipeline-company" onClick={() => open(d.company)} title={`Open ${d.company}`}>{d.company}</button>
+                  {st && <span className="exec-pipeline-stage" style={{ background: st.color + "22", color: st.color, border: `1px solid ${st.color}44` }}>{st.label}</span>}
+                  {d.city && <span className="exec-pipeline-city">📍 {d.city}</span>}
+                  {d.typeLabel && <span className="exec-pipeline-type" style={{ background: (d.typeColor || "#8A8072") + "22", color: d.typeColor || "#8A8072", border: `1px solid ${(d.typeColor || "#8A8072")}44` }}>{d.typeLabel}</span>}
+                  {d.advanced && <span className="exec-pipeline-adv-tag" title="Advanced a stage this period">▲ advanced</span>}
+                  {editable && onToggleHidden && (
+                    <button type="button" className="exec-pipeline-hide" onClick={() => onToggleHidden(d.id)} title={isHidden ? "Show in presentation" : "Hide from presentation"}>
+                      {isHidden ? "🚫" : "👁"}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // Plain-text export, for pasting into an email or a doc.
 function execPlainText(pres, blocks) {
   const lines = [pres.title || "Executive Update"];
@@ -6147,6 +6328,7 @@ function execPlainText(pres, blocks) {
     if (b.block_type === "header") { lines.push("", (b.title || execSectionLabel(b.section)).toUpperCase()); section = b.section; return; }
     if (b.section !== section && b.block_type !== "header") { /* keep flowing under the last header */ }
     if (b.block_type === "metric") { lines.push(`${b.title}: ${b.content || ""}`.trim()); return; }
+    if (b.block_type === "pipeline") { execPipelineToLines(b.content, "- ", "    ").forEach((l) => lines.push(l)); return; }
     const title = (b.title || "").trim();
     // Meetings and any block whose content is a bullet list (conclusions, next
     // up, blockers) export as a lead line plus indented sub-bullets, so the
@@ -6176,6 +6358,7 @@ function execSlideText(pres, blocks) {
     if (b.block_type === "header") { flush(); current = (b.title || execSectionLabel(b.section)); return; }
     if (!current) current = execSectionLabel(b.section);
     if (b.block_type === "metric") { buf.push(`• ${b.title}: ${b.content || ""}`.trim()); return; }
+    if (b.block_type === "pipeline") { execPipelineToLines(b.content, "• ", "   ").forEach((l) => buf.push(l)); return; }
     const title = (b.title || "").trim();
     const { lead, points } = splitMeetingContent(b.content);
     const outcome = stripHtmlToText(lead).trim();
@@ -6227,7 +6410,7 @@ function ExecMeetingBody({ content, presenting = false }) {
 // One editable block in EDIT MODE. Read state shows the rendered block with its
 // controls; editing swaps it for the inline form, matching the click-to-edit
 // pattern the rest of the app uses rather than opening a modal.
-function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDrop, isDragging, onMove, canMoveUp, canMoveDown, onRegenerate, regenerating, onOpenEvent, onCleanupBlockers, showToast }) {
+function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDrop, isDragging, onMove, canMoveUp, canMoveDown, onRegenerate, regenerating, onOpenEvent, onOpenInstitution, onRefreshPipeline, refreshingPipeline, onCleanupBlockers, showToast }) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(block.title || "");
   const [content, setContent] = useState(block.content || "");
@@ -6247,7 +6430,17 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
   const isHeader = block.block_type === "header";
   const isMetric = block.block_type === "metric";
   const isMeeting = block.block_type === "meeting";
+  const isPipeline = block.block_type === "pipeline";
   const isBlockers = block.section === "blockers" && !isHeader;
+
+  // Toggle one deal's visibility in the snapshot without touching the real
+  // pipeline: it only edits the block's stored hidden list.
+  const toggleDealHidden = (dealId) => {
+    const snap = parsePipelineSnapshot(block.content);
+    const set = new Set(snap.hidden);
+    if (set.has(dealId)) set.delete(dealId); else set.add(dealId);
+    onUpdate(block.id, { content: JSON.stringify({ ...snap, hidden: [...set] }) });
+  };
   const sectionMeta = EXEC_SECTIONS.find((s) => s.id === block.section);
   const canRegen = isHeader && sectionMeta?.regenerable && onRegenerate;
   const regenBusy = regenerating === block.section;
@@ -6273,7 +6466,7 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
     return (
       <div className="exec-block exec-block-editing" onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setEditing(false); } }}>
         <input className="input exec-edit-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder={isMetric ? "Metric label" : "Title"} autoFocus />
-        {isHeader ? null : isMetric ? (
+        {isPipeline ? <div className="exec-add-hint">The pipeline is a live snapshot. Use "Refresh pipeline" to update it, or hide individual deals below.</div> : isHeader ? null : isMetric ? (
           <input className="input exec-edit-metric" value={content} onChange={(e) => setContent(e.target.value)} placeholder="Value" />
         ) : (
           <>
@@ -6317,9 +6510,11 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
         ) : (
           <>
             {block.title && <div className="exec-block-title">{block.title}</div>}
-            {isMeeting
-              ? <ExecMeetingBody content={block.content} />
-              : block.content && <RichTextView value={block.content} className="exec-block-content" />}
+            {isPipeline
+              ? <ExecPipelineBody content={block.content} editable onOpenInstitution={onOpenInstitution} onToggleHidden={toggleDealHidden} onRefresh={() => onRefreshPipeline && onRefreshPipeline(block)} refreshing={refreshingPipeline} />
+              : isMeeting
+                ? <ExecMeetingBody content={block.content} />
+                : block.content && <RichTextView value={block.content} className="exec-block-content" />}
             {block.block_type === "commentary" && !isBlockers && <span className="exec-commentary-tag">Commentary</span>}
             {meetingEventId && onOpenEvent && (
               <button type="button" className={`link-btn exec-meeting-openbtn ${isPlaceholderMeeting ? "exec-meeting-addbtn" : ""}`} onClick={() => onOpenEvent(meetingEventId)}>
@@ -6402,7 +6597,7 @@ function ExecAddBlock({ onAdd }) {
 // PRESENT MODE: a clean full-screen render of the visible blocks only, sized
 // for screen-share. Escape exits. Deliberately shows no controls at all, so
 // nothing editable is on screen while executives are watching.
-function ExecPresentView({ pres, blocks, onExit }) {
+function ExecPresentView({ pres, blocks, onExit, onOpenInstitution }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onExit(); };
     window.addEventListener("keydown", onKey);
@@ -6447,9 +6642,11 @@ function ExecPresentView({ pres, blocks, onExit }) {
               {rest.map((b) => (
                 <div key={b.id} className={`exec-present-item ${b.block_type === "commentary" ? "exec-present-commentary" : ""}`}>
                   {b.title && <div className="exec-present-item-title">{b.title}</div>}
-                  {b.block_type === "meeting"
-                    ? <ExecMeetingBody content={b.content} presenting />
-                    : b.content && <RichTextView value={b.content} className="exec-present-item-body" />}
+                  {b.block_type === "pipeline"
+                    ? <ExecPipelineBody content={b.content} presenting onOpenInstitution={onOpenInstitution} />
+                    : b.block_type === "meeting"
+                      ? <ExecMeetingBody content={b.content} presenting />
+                      : b.content && <RichTextView value={b.content} className="exec-present-item-body" />}
                 </div>
               ))}
             </section>
@@ -6465,7 +6662,8 @@ function ExecUpdateTab({
   presentations, blocksFor, openId, onOpen, onCreate, generating,
   onUpdatePresentation, onDeletePresentation,
   onAddBlock, onUpdateBlock, onDeleteBlock, onReorder,
-  onRegenerateSection, regeneratingSection, onOpenEvent, onCleanupBlockers,
+  onRegenerateSection, regeneratingSection, onOpenEvent, onOpenInstitution,
+  onRefreshPipeline, refreshingPipelineId, onCleanupBlockers,
   presenting, onPresent, onExitPresent, showToast,
 }) {
   const readOnly = useReadOnly();
@@ -6478,7 +6676,7 @@ function ExecUpdateTab({
     catch { showToast("Could not copy"); }
   };
 
-  if (presenting && pres) return <ExecPresentView pres={pres} blocks={blocks} onExit={onExitPresent} />;
+  if (presenting && pres) return <ExecPresentView pres={pres} blocks={blocks} onExit={onExitPresent} onOpenInstitution={onOpenInstitution} />;
 
   // LIST VIEW
   if (!pres) {
@@ -6595,7 +6793,7 @@ function ExecUpdateTab({
               <div className="exec-block-body">
                 {b.block_type === "header" ? <div className="exec-block-header-text">{b.title || execSectionLabel(b.section)}</div>
                   : b.block_type === "metric" ? <div className="exec-metric-inline"><span className="exec-metric-value">{b.content}</span><span className="exec-metric-label">{b.title}</span></div>
-                  : <>{b.title && <div className="exec-block-title">{b.title}</div>}{b.block_type === "meeting" ? <ExecMeetingBody content={b.content} /> : b.content && <RichTextView value={b.content} className="exec-block-content" />}</>}
+                  : <>{b.title && <div className="exec-block-title">{b.title}</div>}{b.block_type === "pipeline" ? <ExecPipelineBody content={b.content} onOpenInstitution={onOpenInstitution} /> : b.block_type === "meeting" ? <ExecMeetingBody content={b.content} /> : b.content && <RichTextView value={b.content} className="exec-block-content" />}</>}
               </div>
             </div>
           ) : (
@@ -6614,6 +6812,9 @@ function ExecUpdateTab({
               onRegenerate={(section) => onRegenerateSection(pres, section)}
               regenerating={regeneratingSection}
               onOpenEvent={onOpenEvent}
+              onOpenInstitution={onOpenInstitution}
+              onRefreshPipeline={onRefreshPipeline}
+              refreshingPipeline={refreshingPipelineId === b.id}
               onCleanupBlockers={onCleanupBlockers}
               showToast={showToast}
             />
