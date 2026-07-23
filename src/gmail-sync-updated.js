@@ -74,9 +74,10 @@ function syncGmailToMango() {
   const deals = fetchTable_(config, "deals", "id,company,contact_id,contact_name");
   const contacts = fetchTable_(config, "contacts", "id,name,email,company");
   const enablers = fetchTable_(config, "enablers", "id,name,contact_id,contact_name");
+  const calendarEvents = fetchTable_(config, "calendar_events", "id,title,start_time,matched_contact_id,matched_deal_id,matched_enabler_id,matched_organization_id");
 
   // Fathom recaps run first (matched by sender, independent of the synced label).
-  processFathomRecaps_(config, contacts, deals, enablers);
+  processFathomRecaps_(config, contacts, deals, enablers, calendarEvents);
 
   const label = getOrCreateLabel_(GMAIL_LABEL_NAME);
   const threads = GmailApp.search(
@@ -154,7 +155,7 @@ function logActivityForMessage_(config, message, deals, contacts, enablers) {
 // Scans for Fathom recap emails and logs each as a structured meeting activity
 // (plus todos for the owner's action items). Matched by sender, so it works
 // regardless of the MangoOS/Synced label the generic pass applies.
-function processFathomRecaps_(config, contacts, deals, enablers) {
+function processFathomRecaps_(config, contacts, deals, enablers, calendarEvents) {
   const query = `from:${FATHOM_SENDER} subject:"Recap for" ${SYNC_LOOKBACK_QUERY}`;
   const threads = GmailApp.search(query, 0, MAX_THREADS_PER_RUN);
   let logged = 0;
@@ -163,14 +164,14 @@ function processFathomRecaps_(config, contacts, deals, enablers) {
       if (extractEmail_(message.getFrom()) !== FATHOM_SENDER) return;
       const subject = message.getSubject() || "";
       if (!/recap for/i.test(subject)) return;
-      if (processOneFathomRecap_(config, message, subject, contacts, deals, enablers)) logged++;
+      if (processOneFathomRecap_(config, message, subject, contacts, deals, enablers, calendarEvents)) logged++;
     });
   });
   Logger.log(`Fathom: ${threads.length} thread(s) scanned, ${logged} recap(s) logged.`);
   return logged;
 }
 
-function processOneFathomRecap_(config, message, subject, contacts, deals, enablers) {
+function processOneFathomRecap_(config, message, subject, contacts, deals, enablers, calendarEvents) {
   const title = fathomTitleFromSubject_(subject);
   const dateLabel = Utilities.formatDate(message.getDate(), Session.getScriptTimeZone(), "MMM d");
 
@@ -208,10 +209,93 @@ function processOneFathomRecap_(config, message, subject, contacts, deals, enabl
   if (enabler) patchTable_(config, "enablers", `id=eq.${enabler.id}`, { last_activity_at: now });
   if (contactId) patchTable_(config, "contacts", `id=eq.${contactId}`, { last_contacted_at: now });
 
+  // Step 4b: also save the FULL recap as a note, so the complete write-up
+  // (purpose, every takeaway, every action item, topics) lives as an openable,
+  // editable card on the meeting module and on the contact/institution sheets,
+  // while the activity above stays the short timeline entry. The note is tagged
+  // to the matching calendar event when one exists (so it becomes that
+  // meeting's report) and to the same contact/deal/enabler as the activity. It
+  // is only ever created in the same run that first logs the activity: on later
+  // runs the activity-exists gate above returns early, so no duplicate note.
+  const event = matchFathomEvent_(title, message.getDate(), contactId, deal, enabler, calendarEvents);
+  const noteBody = {
+    title: `Fathom Recap, ${title}, ${dateLabel}`,
+    content: fathomNotesToHtml_(notes),
+    contact_id: contactId,
+    deal_id: deal ? deal.id : null,
+    enabler_id: enabler ? enabler.id : null,
+    organization_id: event && event.matched_organization_id ? event.matched_organization_id : null,
+    calendar_event_id: event ? event.id : null,
+    updated_at: now,
+  };
+  postTable_(config, "notes", noteBody);
+
   // Step 5: turn the owner's action items into todos.
   createFathomTodos_(config, sections.actionItems, deal ? deal.id : null, enabler ? enabler.id : null, contactId);
 
   return true;
+}
+
+// Finds the calendar event this recap is the report for: an event on the SAME
+// day whose matched contact/deal/enabler is the one we resolved, or whose title
+// overlaps the recap title. Returns null when nothing lines up (the note is
+// still created, just left unlinked for the user to attach manually).
+function matchFathomEvent_(title, dateObj, contactId, deal, enabler, calendarEvents) {
+  if (!calendarEvents || !calendarEvents.length) return null;
+  const tz = Session.getScriptTimeZone();
+  const day = Utilities.formatDate(dateObj, tz, "yyyy-MM-dd");
+  const sameDay = calendarEvents.filter((e) => {
+    if (!e.start_time) return false;
+    return Utilities.formatDate(new Date(e.start_time), tz, "yyyy-MM-dd") === day;
+  });
+  if (!sameDay.length) return null;
+  const byContact = contactId && sameDay.find((e) => e.matched_contact_id === contactId);
+  if (byContact) return byContact;
+  const byDeal = deal && sameDay.find((e) => e.matched_deal_id === deal.id);
+  if (byDeal) return byDeal;
+  const byEnabler = enabler && sameDay.find((e) => e.matched_enabler_id === enabler.id);
+  if (byEnabler) return byEnabler;
+  const words = title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
+  const byTitle = sameDay.find((e) => {
+    const et = (e.title || "").toLowerCase();
+    return words.some((w) => et.indexOf(w) !== -1);
+  });
+  return byTitle || null;
+}
+
+// Converts the flattened recap text into the sanitized HTML the notes editor
+// stores, preserving structure: recognized section names become headings,
+// bullet lines become list items, everything else becomes a paragraph. The
+// FULL recap is kept here (nothing capped), unlike the condensed activity.
+function fathomNotesToHtml_(notes) {
+  const headingFor = (line) => {
+    const t = line.trim().toLowerCase().replace(/[:*_#]+$/, "").trim();
+    if (t === "meeting purpose" || t === "purpose") return "Meeting Purpose";
+    if (t === "key takeaways" || t === "takeaways") return "Key Takeaways";
+    if (t === "action items" || t === "action item" || t === "next steps") return "Action Items";
+    if (t === "topics" || t === "topic") return "Topics";
+    return null;
+  };
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const html = [];
+  let inList = false;
+  const closeList = () => { if (inList) { html.push("</ul>"); inList = false; } };
+  (notes || "").split("\n").forEach((raw) => {
+    const t = raw.trim();
+    if (!t) return;
+    const h = headingFor(t);
+    if (h) { closeList(); html.push(`<h3>${esc(h)}</h3>`); return; }
+    if (/^[-•*]\s+/.test(t) || /^\d+[.)]\s+/.test(t)) {
+      if (!inList) { html.push("<ul>"); inList = true; }
+      html.push(`<li>${esc(t.replace(/^[-•*]\s+/, "").replace(/^\d+[.)]\s+/, ""))}</li>`);
+      return;
+    }
+    closeList();
+    html.push(`<p>${esc(t)}</p>`);
+  });
+  closeList();
+  return html.join("");
 }
 
 // "Recap for \"Fahed / Gavin\"" -> "Fahed / Gavin".

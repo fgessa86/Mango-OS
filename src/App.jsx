@@ -1333,6 +1333,42 @@ function TagPickerWithCustom({ options, value, onToggle }) {
   );
 }
 
+// ---- URL routing (hash based) --------------------------------------------
+// The current view and any open sheet or meeting module are reflected in the
+// location hash so a refresh, a bookmark, or the browser Back/Forward buttons
+// all land on the exact same place. The hash is used (not the path) so no
+// server rewrite is needed on the static host, and the search string
+// (?view=boss) is left untouched, so Boss View survives every navigation.
+const ROUTE_TAB_VIEWS = new Set([
+  "home", "calendar", "pipeline", "network", "map", "tasks",
+  "notes", "materials", "outreach", "reports", "exec",
+]);
+
+// A route: { view, instKey, personId, eventId }. Institution/person sheets get
+// their own path segment; an open meeting module rides as an ?event= param on
+// whatever base view it was opened over, so closing it reveals that view.
+function routeToHash(r) {
+  let base;
+  if (r.view === "institution-sheet" && r.instKey) base = `/institution/${encodeURIComponent(r.instKey)}`;
+  else if (r.view === "person-sheet" && r.personId) base = `/person/${r.personId}`;
+  else base = `/${ROUTE_TAB_VIEWS.has(r.view) ? r.view : "home"}`;
+  const q = r.eventId ? `?event=${encodeURIComponent(r.eventId)}` : "";
+  return `#${base}${q}`;
+}
+
+function hashToRoute(hash) {
+  const raw = String(hash || "").replace(/^#/, "");
+  if (!raw) return null;
+  const [path, query] = raw.split("?");
+  const params = new URLSearchParams(query || "");
+  const eventId = params.get("event") || null;
+  const seg = path.replace(/^\//, "").split("/");
+  if (seg[0] === "institution" && seg[1]) return { view: "institution-sheet", instKey: decodeURIComponent(seg.slice(1).join("/")), personId: null, eventId };
+  if (seg[0] === "person" && seg[1]) return { view: "person-sheet", instKey: null, personId: decodeURIComponent(seg[1]), eventId };
+  const view = ROUTE_TAB_VIEWS.has(seg[0]) ? seg[0] : "home";
+  return { view, instKey: null, personId: null, eventId };
+}
+
 export default function App() {
   // Boss View's homepage is the Week in Review (Andy's default landing page),
   // not Home. Fahed still lands on Home.
@@ -1392,8 +1428,6 @@ export default function App() {
   const [institutionSheetKey, setInstitutionSheetKey] = useState(null);
   const [sheetOrigin, setSheetOrigin] = useState("network");
   const [personSheetId, setPersonSheetId] = useState(null);
-  // Sheet navigation history: where each open sheet was navigated from.
-  const [navStack, setNavStack] = useState([]);
   // Global search overlay (Cmd+K / Ctrl+K, or the sidebar / Home buttons).
   const [searchOpen, setSearchOpen] = useState(false);
   const [customOptions, setCustomOptions] = useState([]);
@@ -3022,7 +3056,13 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // separate from the synced calendar_events row, so the hourly Google
   // Calendar sync never touches them.
   const openCalendarEventDetail = (id) => setEventDetailId(id);
-  const closeCalendarEventDetail = () => setEventDetailId(null);
+  // The open meeting module rides as an ?event= entry in history, so closing it
+  // pops that entry (revealing the view it was opened over) when there is one,
+  // and otherwise just clears the state (a fresh deep link into the module).
+  const closeCalendarEventDetail = () => {
+    if (window.history.state?.back && /[?&]event=/.test(window.location.hash)) window.history.back();
+    else setEventDetailId(null);
+  };
 
   // pick: { type: "deal"|"enabler"|"organization", id }. One row per tag, like
   // material_links: exactly one of the three FKs is set.
@@ -4242,18 +4282,18 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const lastSyncedActivity = activities.find((a) => a.type === "email" || a.type === "meeting");
 
   // NAVIGATION: institutions are keyed by normalized name; people by contact id.
-  // A history stack records where each sheet was opened from, so Back always
-  // returns to the actual origin (another sheet, Home, Tasks, the Map, etc.).
-  // Switching tabs from the sidebar / tab bar clears the stack.
-  const pushNav = () => setNavStack((s) => [...s.slice(-19), { view, institutionSheetKey, personSheetId, sheetOrigin }]);
+  // Navigation records history through the browser (pushState), so Back always
+  // returns to the actual origin (another sheet, Home, Tasks, the Map, etc.)
+  // and the browser Back/Forward buttons work too. See the routing effects
+  // below for how each state change becomes a history entry.
   const openInstitution = (name, origin = null) => {
     if (!name) return;
-    pushNav();
-    setInstitutionSheetKey(name.trim().toLowerCase());
     if (origin) setSheetOrigin(origin);
+    setInstitutionSheetKey(name.trim().toLowerCase());
+    setPersonSheetId(null);
     setView("institution-sheet");
   };
-  const openPerson = (id) => { pushNav(); setPersonSheetId(id); setView("person-sheet"); };
+  const openPerson = (id) => { setPersonSheetId(id); setInstitutionSheetKey(null); setView("person-sheet"); };
 
   // Navigate to whatever entity a mention chip references. One delegated
   // listener covers every chip on the page (rendered live in an editor, via
@@ -4311,17 +4351,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       return created?.preferred ? { name: name.trim(), type: created.preferred.type, id: created.preferred.id } : null;
     },
   };
-  const goBack = () => {
-    const prev = navStack[navStack.length - 1];
-    setNavStack((s) => s.slice(0, -1));
-    if (!prev) { setView(sheetOrigin === "pipeline" ? "pipeline" : "network"); setInstitutionSheetKey(null); setPersonSheetId(null); return; }
-    setView(prev.view);
-    setInstitutionSheetKey(prev.institutionSheetKey);
-    setPersonSheetId(prev.personSheetId);
-    setSheetOrigin(prev.sheetOrigin);
-  };
-  // Tab-level navigation resets the sheet history.
-  const navigateTab = (v) => { setNavStack([]); setInstitutionSheetKey(null); setPersonSheetId(null); setEventDetailId(null); setView(v); };
+  // Tab-level navigation always starts a fresh sheet context.
+  const navigateTab = (v) => { setInstitutionSheetKey(null); setPersonSheetId(null); setEventDetailId(null); setView(v); };
   // Boss View's sidebar is now just Week in Review / Pipeline / Ecosystem /
   // Calendar / Tasks; if it ever lands elsewhere (deep link, stale URL) send
   // it back to the Week in Review, Andy's homepage, rather than a tab that is
@@ -4329,15 +4360,82 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   useEffect(() => {
     if (bossMode && ["outreach", "notes", "home", "map", "materials", "exec"].includes(view)) setView("reports");
   }, [bossMode, view]);
-  const VIEW_BACK_LABELS = { home: "Home", calendar: "Calendar", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports" };
-  const backTarget = navStack[navStack.length - 1];
-  const backLabel = (() => {
-    if (!backTarget) return sheetOrigin === "pipeline" ? "Back to Pipeline" : "Back to Ecosystem";
-    if (backTarget.view === "institution-sheet") { const i = institutions.find((x) => x.key === backTarget.institutionSheetKey); return i ? `Back to ${i.name}` : "Back"; }
-    if (backTarget.view === "person-sheet") { const c = contacts.find((x) => x.id === backTarget.personSheetId); return c ? `Back to ${c.name}` : "Back"; }
-    if (backTarget.view === "reports") return `Back to ${bossMode ? "Week in Review" : "Reports"}`;
-    return `Back to ${VIEW_BACK_LABELS[backTarget.view] || "Ecosystem"}`;
-  })();
+
+  const VIEW_BACK_LABELS = { home: "Home", calendar: "Calendar", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports", exec: "Exec Update" };
+  // Human label for the place a route points at, stored on each history entry as
+  // state.back so Back on any sheet/module can name where it returns to.
+  const describeRoute = useCallback((r) => {
+    if (!r) return null;
+    if (r.eventId) { const ev = calendarEvents.find((e) => e.id === r.eventId); return `Back to ${ev?.title || "meeting"}`; }
+    if (r.view === "institution-sheet") { const i = institutions.find((x) => x.key === r.instKey); return i ? `Back to ${i.name}` : "Back"; }
+    if (r.view === "person-sheet") { const c = contacts.find((x) => x.id === r.personId); return c ? `Back to ${c.name}` : "Back"; }
+    if (r.view === "reports") return `Back to ${bossMode ? "Week in Review" : "Reports"}`;
+    return `Back to ${VIEW_BACK_LABELS[r.view] || "Ecosystem"}`;
+  }, [institutions, contacts, calendarEvents, bossMode]);
+
+  const currentRoute = () => ({ view, instKey: institutionSheetKey, personId: personSheetId, eventId: eventDetailId });
+  const [backInfo, setBackInfo] = useState(null);
+  const prevRouteRef = useRef(null);
+  const routeReadyRef = useRef(false);
+
+  // Set React state to match a decoded route (used on reload and popstate).
+  const applyRoute = useCallback((r) => {
+    if (!r) return;
+    if (r.view === "institution-sheet") { setInstitutionSheetKey(r.instKey); setPersonSheetId(null); }
+    else if (r.view === "person-sheet") { setPersonSheetId(r.personId); setInstitutionSheetKey(null); }
+    else { setInstitutionSheetKey(null); setPersonSheetId(null); }
+    setEventDetailId(r.eventId || null);
+    setView(r.view);
+  }, []);
+
+  // On mount: restore the view/sheet/module encoded in the URL, or stamp the
+  // current route onto the entry so a later Back has somewhere to land.
+  useEffect(() => {
+    const r = hashToRoute(window.location.hash);
+    if (r) applyRoute(r);
+    const back = window.history.state?.back ?? null;
+    window.history.replaceState({ back }, "", window.location.hash || routeToHash(currentRoute()));
+    setBackInfo(back);
+    prevRouteRef.current = r || currentRoute();
+    routeReadyRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Whenever the view/sheet/module changes by in-app navigation, push a new
+  // history entry carrying a label for going back. Changes that came from a
+  // popstate or the restore above already match location.hash, so they no-op.
+  useEffect(() => {
+    if (!routeReadyRef.current) return;
+    const hash = routeToHash(currentRoute());
+    if (hash === window.location.hash) { prevRouteRef.current = currentRoute(); return; }
+    const back = describeRoute(prevRouteRef.current);
+    window.history.pushState({ back }, "", hash);
+    setBackInfo(back);
+    prevRouteRef.current = currentRoute();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, institutionSheetKey, personSheetId, eventDetailId, describeRoute]);
+
+  // Browser Back/Forward: decode the target hash back into state.
+  useEffect(() => {
+    const onPop = () => {
+      const r = hashToRoute(window.location.hash);
+      if (r) applyRoute(r);
+      setBackInfo(window.history.state?.back ?? null);
+      prevRouteRef.current = r || currentRoute();
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applyRoute]);
+
+  // Back on a sheet/module: pop the in-app history entry if there is one,
+  // else (a fresh deep link with no history) fall back to a sensible tab.
+  const goBack = () => {
+    if (backInfo) { window.history.back(); return; }
+    if (eventDetailId) { setEventDetailId(null); return; }
+    navigateTab(sheetOrigin === "pipeline" ? "pipeline" : "network");
+  };
+  const backLabel = backInfo || (eventDetailId ? "Back" : (sheetOrigin === "pipeline" ? "Back to Pipeline" : "Back to Ecosystem"));
 
   // Ref to the Pipeline kanban so the mobile stage nav can scroll-snap columns.
   const kanbanRef = useRef(null);
@@ -5065,6 +5163,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onSaveMeetingNote={saveMeetingNote}
             onOpenNote={(id) => { closeCalendarEventDetail(); openNote(id); }}
             onClose={closeCalendarEventDetail}
+            backLabel={backLabel}
             showToast={showToast}
           />
         );
@@ -5707,7 +5806,7 @@ function EventDetailPanel({
   onTagInstitution, onUntagInstitution, onTagPerson, onUntagPerson,
   onSavePrepNotes, onSaveOutcomeNotes, onGenerateBrief, briefGenerating,
   onLogOutcome, onExtractTasks, onClose, showToast,
-  meetingNote, otherEventNotes = [], onSaveMeetingNote, onOpenNote,
+  meetingNote, otherEventNotes = [], onSaveMeetingNote, onOpenNote, backLabel = "Back",
 }) {
   const readOnly = useReadOnly();
   const isMobile = useIsMobile();
@@ -5841,6 +5940,7 @@ function EventDetailPanel({
   return (
     <div className="overlay event-detail-overlay" onClick={onClose}>
       <div className="modal event-detail-panel" onClick={(e) => e.stopPropagation()}>
+        <button onClick={onClose} className="sheet-back event-detail-back">← {backLabel}</button>
         <div className="modal-header">
           <div>
             <div className="modal-title">{ev.title || "Untitled event"}</div>
