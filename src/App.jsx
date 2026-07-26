@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, createContext, useContext, Fr
 import { api } from "./supabase";
 import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, generateMeetingSummary, generateConclusions, cleanupBlockers, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
-import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, toDateTimeLocal, fromDateTimeLocal, FATHOM_MARKER, isFathomActivity, stripFathomMarker, activityCalendarEventId, cleanActivityText } from "./utils";
+import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, toDateTimeLocal, fromDateTimeLocal, FATHOM_MARKER, isFathomActivity, isFathomText, stripFathomMarker, activityCalendarEventId, cleanActivityText } from "./utils";
 import MapTab from "./MapTab";
 import VoiceRecorder from "./VoiceRecorder";
 import RichTextEditor, { RichTextView, RichTextField } from "./RichTextEditor";
@@ -3440,7 +3440,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       const noteText = linkedNote
         ? [linkedNote.title, stripHtmlToText(linkedNote.content || "")].filter(Boolean).join(": ").trim()
         : "";
-      const outcome = [ (ev?.outcome_notes || "").trim(), noteText ]
+      const outcome = [ stripFathomMarker(ev?.outcome_notes || "").trim(), noteText ]
         .filter(Boolean).join(" ")
         || cleanActivityText(m.activity.description || "").trim();
       return { ...m, event: ev || null, outcome, note: linkedNote || null, sourceType: ev ? "calendar_event" : "activity", sourceId: ev ? ev.id : m.activity.id };
@@ -3553,7 +3553,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       if (d) parts.push(`Notes: ${d}`);
     }
     if ((ev?.prep_notes || "").trim()) parts.push(`Prep notes: ${ev.prep_notes.trim()}`);
-    if ((ev?.outcome_notes || "").trim()) parts.push(`Outcome notes: ${ev.outcome_notes.trim()}`);
+    if ((ev?.outcome_notes || "").trim()) parts.push(`Outcome notes: ${stripFathomMarker(ev.outcome_notes).trim()}`);
     // Prefer the note tagged to this event; fall back to an entity-linked note.
     const evNote = ev ? notes.find((n) => n.calendar_event_id === ev.id) : null;
     const noteRow = evNote || m.note;
@@ -5239,6 +5239,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             otherEventNotes={notesForEvent(ev.id).filter((n) => n.id !== meetingNoteFor(ev.id)?.id)}
             onSaveMeetingNote={saveMeetingNote}
             onOpenNote={(id) => { closeCalendarEventDetail(); openNote(id); }}
+            noteCandidates={notes.filter((n) => n.calendar_event_id !== ev.id).sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at))}
+            onAttachExistingNote={(noteId) => linkNoteToEvent(noteId, ev.id)}
             onClose={closeCalendarEventDetail}
             backLabel={backLabel}
             showToast={showToast}
@@ -5883,12 +5885,19 @@ function EventDetailPanel({
   onTagInstitution, onUntagInstitution, onTagPerson, onUntagPerson,
   onSavePrepNotes, onSaveOutcomeNotes, onGenerateBrief, briefGenerating,
   onLogOutcome, onExtractTasks, onClose, showToast,
-  meetingNote, otherEventNotes = [], onSaveMeetingNote, onOpenNote, backLabel = "Back",
+  meetingNote, otherEventNotes = [], onSaveMeetingNote, onOpenNote, noteCandidates = [], onAttachExistingNote, backLabel = "Back",
 }) {
   const readOnly = useReadOnly();
   const isMobile = useIsMobile();
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [attachQuery, setAttachQuery] = useState("");
   const [prepDraft, setPrepDraft] = useState(ev.prep_notes || "");
-  const [outcomeDraft, setOutcomeDraft] = useState(ev.outcome_notes || "");
+  // The outcome may have been filled by the Fathom sync, which prefixes it with
+  // the marker; strip that for display and editing, and show a Fathom badge
+  // while the SAVED value still carries the marker (once the user edits and
+  // saves, the clean text is written and the badge goes away).
+  const outcomeIsFathom = isFathomText(ev.outcome_notes);
+  const [outcomeDraft, setOutcomeDraft] = useState(stripFathomMarker(ev.outcome_notes || ""));
   const [noteDraft, setNoteDraft] = useState(meetingNote?.content || "");
   const [noteSaving, setNoteSaving] = useState(false);
   const [extracting, setExtracting] = useState(false);
@@ -5897,7 +5906,7 @@ function EventDetailPanel({
   const noteTimer = useRef(null);
   const noteDraftRef = useRef(noteDraft);
 
-  useEffect(() => { setPrepDraft(ev.prep_notes || ""); setOutcomeDraft(ev.outcome_notes || ""); }, [ev.id, ev.prep_notes, ev.outcome_notes]);
+  useEffect(() => { setPrepDraft(ev.prep_notes || ""); setOutcomeDraft(stripFathomMarker(ev.outcome_notes || "")); }, [ev.id, ev.prep_notes, ev.outcome_notes]);
   // Reload the draft only when switching events, never on every keystroke's
   // round trip, so the editor does not fight the user's cursor.
   const noteBaselineRef = useRef(meetingNote?.content || "");
@@ -5982,7 +5991,10 @@ function EventDetailPanel({
 
   const attendees = Array.isArray(ev.attendees) ? ev.attendees.filter(Boolean) : [];
   const savePrep = () => { if ((ev.prep_notes || "") !== prepDraft) onSavePrepNotes(ev.id, prepDraft); };
-  const saveOutcomeDraft = () => { if ((ev.outcome_notes || "") !== outcomeDraft) onSaveOutcomeNotes(ev.id, outcomeDraft); };
+  // Compare against the STRIPPED saved value so opening a Fathom-filled outcome
+  // and blurring without editing is a no-op (it never rewrites the clean text
+  // over the marked one and so never silently drops the Fathom badge).
+  const saveOutcomeDraft = () => { if (stripFathomMarker(ev.outcome_notes || "") !== outcomeDraft) onSaveOutcomeNotes(ev.id, outcomeDraft); };
 
   const doLogOutcome = async () => {
     if (logging) return;
@@ -6114,10 +6126,40 @@ function EventDetailPanel({
               {otherEventNotes.map((n) => <NoteCard key={n.id} note={n} onOpen={onOpenNote} />)}
             </div>
           )}
+          {/* Attach an existing note (e.g. a Fathom recap the sync could not
+              auto-match to this meeting). Only offered when the meeting has no
+              note yet, since a meeting holds at most one note. */}
+          {!readOnly && !meetingNote && onAttachExistingNote && (
+            attachOpen ? (
+              <div className="event-detail-attach">
+                <input className="input" autoFocus placeholder="Search notes to attach..." value={attachQuery} onChange={(e) => setAttachQuery(e.target.value)} />
+                <div className="event-detail-attach-list">
+                  {noteCandidates
+                    .filter((n) => !attachQuery.trim() || (n.title || "").toLowerCase().includes(attachQuery.trim().toLowerCase()))
+                    .slice(0, 8)
+                    .map((n) => (
+                      <button key={n.id} type="button" className="event-detail-attach-item" onClick={async () => { await onAttachExistingNote(n.id); setAttachOpen(false); setAttachQuery(""); }}>
+                        <span className="event-detail-attach-title">{n.title || "Untitled"}</span>
+                        <span className="event-detail-attach-date">{formatDate(n.updated_at || n.created_at)}</span>
+                      </button>
+                    ))}
+                  {noteCandidates.filter((n) => !attachQuery.trim() || (n.title || "").toLowerCase().includes(attachQuery.trim().toLowerCase())).length === 0 && (
+                    <div className="event-detail-attach-empty">No notes to attach.</div>
+                  )}
+                </div>
+                <button type="button" className="link-btn" onClick={() => { setAttachOpen(false); setAttachQuery(""); }}>Cancel</button>
+              </div>
+            ) : (
+              <button type="button" className="link-btn event-detail-attach-btn" onClick={() => setAttachOpen(true)}>📎 Attach existing note</button>
+            )
+          )}
         </div>
 
         <div className="event-detail-section event-detail-outcome">
-          <div className="section-label">Outcome</div>
+          <div className="event-detail-notes-head">
+            <div className="section-label">Outcome</div>
+            {outcomeIsFathom && <span className="fathom-badge sm" title="Filled from a Fathom recap. Edit to make it yours.">Fathom</span>}
+          </div>
           <div className="event-detail-outcome-row">
             <MentionField className="textarea event-detail-textarea" placeholder="What happened, decisions made, next steps... use @ to mention" value={outcomeDraft} onChange={setOutcomeDraft} onSave={saveOutcomeDraft} readOnly={readOnly} isMobile={isMobile} />
             {!readOnly && <VoiceRecorder mode="digest" onDigest={onOutcomeVoiceDigest} showToast={showToast} title="Record outcome by voice" />}

@@ -43,6 +43,10 @@ export const fromDateTimeLocal = (value) => {
 // Shared so any surface that renders a raw description can strip it (M11).
 export const FATHOM_MARKER = "[[FATHOM]]";
 export const isFathomActivity = (a) => typeof a?.description === "string" && a.description.startsWith(FATHOM_MARKER);
+// True when a plain text value (e.g. a calendar event's outcome_notes) was
+// written by the Fathom sync, so the app can show a Fathom badge and strip the
+// marker for display and editing.
+export const isFathomText = (s) => typeof s === "string" && s.startsWith(FATHOM_MARKER);
 export const stripFathomMarker = (desc) => {
   const d = desc || "";
   return d.startsWith(FATHOM_MARKER) ? d.slice(FATHOM_MARKER.length).replace(/^[ \t]+/, "") : d;

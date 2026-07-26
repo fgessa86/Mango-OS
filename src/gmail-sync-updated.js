@@ -74,7 +74,7 @@ function syncGmailToMango() {
   const deals = fetchTable_(config, "deals", "id,company,contact_id,contact_name");
   const contacts = fetchTable_(config, "contacts", "id,name,email,company");
   const enablers = fetchTable_(config, "enablers", "id,name,contact_id,contact_name");
-  const calendarEvents = fetchTable_(config, "calendar_events", "id,title,start_time,matched_contact_id,matched_deal_id,matched_enabler_id,matched_organization_id");
+  const calendarEvents = fetchTable_(config, "calendar_events", "id,title,start_time,outcome_notes,matched_contact_id,matched_deal_id,matched_enabler_id,matched_organization_id");
 
   // Fathom recaps run first (matched by sender, independent of the synced label).
   processFathomRecaps_(config, contacts, deals, enablers, calendarEvents);
@@ -218,17 +218,33 @@ function processOneFathomRecap_(config, message, subject, contacts, deals, enabl
   // is only ever created in the same run that first logs the activity: on later
   // runs the activity-exists gate above returns early, so no duplicate note.
   const event = matchFathomEvent_(title, message.getDate(), contactId, deal, enabler, calendarEvents);
-  const noteBody = {
-    title: `Fathom Recap, ${title}, ${dateLabel}`,
-    content: fathomNotesToHtml_(notes),
-    contact_id: contactId,
-    deal_id: deal ? deal.id : null,
-    enabler_id: enabler ? enabler.id : null,
-    organization_id: event && event.matched_organization_id ? event.matched_organization_id : null,
-    calendar_event_id: event ? event.id : null,
-    updated_at: now,
-  };
-  postTable_(config, "notes", noteBody);
+  const noteTitle = `Fathom Recap, ${title}, ${dateLabel}`;
+  // Idempotency backup: the activity-exists gate above already prevents a second
+  // pass from reaching here, but guard the note directly too (match by the
+  // event, or by the deterministic title) so a re-run can never create a second
+  // copy even if that gate is ever bypassed.
+  if (!fathomNoteExists_(config, event, noteTitle)) {
+    postTable_(config, "notes", {
+      title: noteTitle,
+      content: fathomNotesToHtml_(notes),
+      contact_id: contactId,
+      deal_id: deal ? deal.id : null,
+      enabler_id: enabler ? enabler.id : null,
+      organization_id: event && event.matched_organization_id ? event.matched_organization_id : null,
+      calendar_event_id: event ? event.id : null,
+      updated_at: now,
+    });
+  }
+
+  // Step 4c: when the recap matches a calendar event, fill that meeting's
+  // outcome_notes with a short Fathom summary (marker-prefixed so the app shows
+  // a Fathom badge and strips it for editing). Only write when the outcome is
+  // empty or was itself Fathom-filled, so a real outcome the user typed is
+  // never overwritten, and a re-run just rewrites the same marked text.
+  if (event && (!event.outcome_notes || event.outcome_notes.indexOf(FATHOM_MARKER) === 0)) {
+    const outcome = buildFathomOutcome_(sections);
+    if (outcome) patchTable_(config, "calendar_events", `id=eq.${event.id}`, { outcome_notes: `${FATHOM_MARKER} ${outcome}` });
+  }
 
   // Step 5: turn the owner's action items into todos.
   createFathomTodos_(config, sections.actionItems, deal ? deal.id : null, enabler ? enabler.id : null, contactId);
@@ -261,6 +277,32 @@ function matchFathomEvent_(title, dateObj, contactId, deal, enabler, calendarEve
     return words.some((w) => et.indexOf(w) !== -1);
   });
   return byTitle || null;
+}
+
+// True when a note for this recap already exists, so a re-run does not create a
+// second copy: matched by the calendar event (one note per meeting) when there
+// is one, otherwise by the deterministic "Fathom Recap, ..." title.
+function fathomNoteExists_(config, event, noteTitle) {
+  const query = event
+    ? `calendar_event_id=eq.${event.id}&select=id&limit=1`
+    : `title=eq.${encodeURIComponent(noteTitle)}&select=id&limit=1`;
+  const res = UrlFetchApp.fetch(`${config.supabaseUrl}/rest/v1/notes?${query}`, {
+    method: "get",
+    headers: supabaseHeaders_(config),
+    muteHttpExceptions: true,
+  });
+  if (res.getResponseCode() >= 300) return false;
+  return JSON.parse(res.getContentText()).length > 0;
+}
+
+// A short, readable outcome summary for the matched meeting: the condensed
+// purpose plus a few takeaways and action items. The caller prefixes the marker.
+function buildFathomOutcome_(sections) {
+  const parts = [];
+  if (sections.purpose) parts.push(condenseSentences_(sections.purpose, 2));
+  if (sections.takeaways.length) parts.push("Key takeaways: " + sections.takeaways.slice(0, 5).join("; "));
+  if (sections.actionItems.length) parts.push("Action items: " + sections.actionItems.slice(0, 5).join("; "));
+  return parts.join("\n\n").trim();
 }
 
 // Converts the flattened recap text into the sanitized HTML the notes editor
