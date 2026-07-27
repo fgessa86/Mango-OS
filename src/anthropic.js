@@ -248,7 +248,7 @@ export const researchClinicalTrials = async (name) => {
 export const generateMeetingBrief = async (context) => {
   const prompt = `Generate a concise meeting prep brief. Include: 1) WHO: name, role, relationship warmth, last interaction date. 2) CONTEXT: 3-4 sentence summary of the relationship history and recent discussions. 3) OPEN ITEMS: pending tasks or commitments involving this person. 4) SUGGESTED TALKING POINTS: 2-3 recommendations based on the history. Keep it scannable and short.
 
-Format the response as plain text with exactly these four heading lines: "WHO:", "CONTEXT:", "OPEN ITEMS:", "SUGGESTED TALKING POINTS:". Under each heading use short plain sentences or "- " bullet lines. No markdown, no asterisks, no backticks. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.
+Format the response as plain text with these heading lines in order: "WHO:", "CONTEXT:", "OPEN ITEMS:", "SUGGESTED TALKING POINTS:". Under each heading use short plain sentences or "- " bullet lines. If, and ONLY if, the data below contains a section labeled "DISCUSSION POINTS to raise", add one more heading line "DISCUSSION POINTS:" immediately before "SUGGESTED TALKING POINTS:" and list each of those points verbatim as a "- " bullet (do not invent any). No markdown, no asterisks, no backticks. Do not use em dashes anywhere; use commas, periods, colons, or parentheses instead.
 
 Here is the data:
 ${context}`;

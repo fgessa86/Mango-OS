@@ -6,7 +6,7 @@ import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo,
 import MapTab from "./MapTab";
 import VoiceRecorder from "./VoiceRecorder";
 import RichTextEditor, { RichTextView, RichTextField } from "./RichTextEditor";
-import { stripHtmlToText, isContentEmpty, toDisplayHtml, looksLikeHtml } from "./richtext";
+import { stripHtmlToText, isContentEmpty, toDisplayHtml, looksLikeHtml, plainTextToHtml } from "./richtext";
 import MentionEditor, { MentionText, MentionContext, MentionField } from "./MentionEditor";
 import { extractMentionRefs, mentionsToPlainText, detectFullNameMentions } from "./mentions";
 import "./styles.css";
@@ -1418,6 +1418,8 @@ export default function App() {
   const [enablerContacts, setEnablerContacts] = useState([]);
   const [todos, setTodos] = useState([]);
   const [todoContacts, setTodoContacts] = useState([]);
+  const [discussionPoints, setDiscussionPoints] = useState([]);
+  const [topOfMind, setTopOfMind] = useState([]);
   const [taskFilter, setTaskFilter] = useState("all");
   const [organizations, setOrganizations] = useState([]);
   const [dealEnablers, setDealEnablers] = useState([]);
@@ -1458,7 +1460,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1486,6 +1488,8 @@ export default function App() {
         api("event_contacts", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
         api("exec_presentations", "GET", null, "?select=*&order=period_end.desc,created_at.desc").catch(() => []),
         api("exec_blocks", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("discussion_points", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
+        api("top_of_mind", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []); setTodoContacts(tdc || []);
@@ -1494,6 +1498,7 @@ export default function App() {
       setMaterials(mat || []); setMaterialLinks(ml || []); setMeetingBriefs(mb || []); setEmailTemplates(et || []); setCalendarEvents(cal || []);
       setEventInstitutions(evinst || []); setEventContacts(evcon || []);
       setExecPresentations(xp || []); setExecBlocks(xb || []);
+      setDiscussionPoints(dp || []); setTopOfMind(tom || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -1939,6 +1944,7 @@ export default function App() {
       await api("network_edges", "DELETE", null, `?source_type=eq.contact&source_id=eq.${id}`);
       await api("network_edges", "DELETE", null, `?target_type=eq.contact&target_id=eq.${id}`);
       await api("material_links", "DELETE", null, `?contact_id=eq.${id}`);
+      await api("discussion_points", "DELETE", null, `?contact_id=eq.${id}`).catch(() => {});
       await api("activities", "PATCH", { contact_id: null }, `?contact_id=eq.${id}`).catch(() => {});
       await api("todos", "PATCH", { contact_id: null }, `?contact_id=eq.${id}`).catch(() => {});
       await api("notes", "PATCH", { contact_id: null }, `?contact_id=eq.${id}`).catch(() => {});
@@ -2167,6 +2173,7 @@ export default function App() {
     await api("boss_comments", "PATCH", { deal_id: null }, `?deal_id=eq.${id}`).catch(() => {});
     await api("calendar_events", "PATCH", { matched_deal_id: null }, `?matched_deal_id=eq.${id}`).catch(() => {});
     await api("material_links", "DELETE", null, `?deal_id=eq.${id}`).catch(() => {});
+    await api("discussion_points", "DELETE", null, `?deal_id=eq.${id}`).catch(() => {});
     await api("deal_contacts", "DELETE", null, `?deal_id=eq.${id}`).catch(() => {});
     await api("contact_roles", "DELETE", null, `?entity_type=eq.deal&entity_id=eq.${id}`).catch(() => {});
     await api("deal_enablers", "DELETE", null, `?deal_id=eq.${id}`).catch(() => {});
@@ -2184,6 +2191,7 @@ export default function App() {
     await api("boss_comments", "PATCH", { enabler_id: null }, `?enabler_id=eq.${id}`).catch(() => {});
     await api("calendar_events", "PATCH", { matched_enabler_id: null }, `?matched_enabler_id=eq.${id}`).catch(() => {});
     await api("material_links", "DELETE", null, `?enabler_id=eq.${id}`).catch(() => {});
+    await api("discussion_points", "DELETE", null, `?enabler_id=eq.${id}`).catch(() => {});
     await api("enabler_contacts", "DELETE", null, `?enabler_id=eq.${id}`).catch(() => {});
     await api("contact_roles", "DELETE", null, `?entity_type=eq.enabler&entity_id=eq.${id}`).catch(() => {});
     await api("deal_enablers", "DELETE", null, `?enabler_id=eq.${id}`).catch(() => {});
@@ -2282,6 +2290,7 @@ export default function App() {
         await api("boss_comments", "PATCH", { organization_id: null }, `?organization_id=eq.${inst.orgId}`).catch(() => {});
         await api("calendar_events", "PATCH", { matched_organization_id: null }, `?matched_organization_id=eq.${inst.orgId}`).catch(() => {});
         await api("material_links", "DELETE", null, `?organization_id=eq.${inst.orgId}`).catch(() => {});
+        await api("discussion_points", "DELETE", null, `?organization_id=eq.${inst.orgId}`).catch(() => {});
         await api("network_edges", "DELETE", null, `?source_type=eq.organization&source_id=eq.${inst.orgId}`);
         await api("network_edges", "DELETE", null, `?target_type=eq.organization&target_id=eq.${inst.orgId}`);
         await api("contact_roles", "DELETE", null, `?entity_type=eq.organization&entity_id=eq.${inst.orgId}`);
@@ -2629,6 +2638,84 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Error updating to-do"); }
   };
 
+  // DISCUSSION POINTS: quick one-line things to raise with a person/institution
+  // next time. Linked to a single entity FK. All writes patch local state.
+  const addDiscussionPoint = async (fks, content) => {
+    const text = (content || "").trim();
+    if (!text) return null;
+    try {
+      const rows = await api("discussion_points", "POST", { content: text, priority: "normal", is_discussed: false, ...fks });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setDiscussionPoints((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not add discussion point"); return null; }
+  };
+  const updateDiscussionPoint = async (id, patch) => {
+    try {
+      await api("discussion_points", "PATCH", patch, `?id=eq.${id}`);
+      setDiscussionPoints((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+    } catch { showToast("Could not update discussion point"); }
+  };
+  const toggleDiscussionPoint = (dp) =>
+    updateDiscussionPoint(dp.id, { is_discussed: !dp.is_discussed, discussed_at: dp.is_discussed ? null : new Date().toISOString() });
+  const toggleDiscussionPriority = (dp) =>
+    updateDiscussionPoint(dp.id, { priority: dp.priority === "high" ? "normal" : "high" });
+  const deleteDiscussionPoint = async (id) => {
+    try {
+      await api("discussion_points", "DELETE", null, `?id=eq.${id}`);
+      setDiscussionPoints((prev) => prev.filter((p) => p.id !== id));
+    } catch { showToast("Could not delete discussion point"); }
+  };
+
+  // TOP OF MIND: a lightweight holding area for loose thoughts on the Tasks tab.
+  // Not tasks (no due dates). status: open / promoted (converted) / archived.
+  const addTopOfMind = async (content) => {
+    const text = (content || "").trim();
+    if (!text) return null;
+    try {
+      const maxOrder = topOfMind.reduce((m, t) => Math.max(m, t.sort_order ?? 0), -1);
+      const rows = await api("top_of_mind", "POST", { content: text, status: "open", sort_order: maxOrder + 1 });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setTopOfMind((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not add"); return null; }
+  };
+  const updateTopOfMind = async (id, patch) => {
+    try {
+      await api("top_of_mind", "PATCH", patch, `?id=eq.${id}`);
+      setTopOfMind((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+    } catch { showToast("Could not update"); }
+  };
+  const reorderTopOfMind = async (orderedIds) => {
+    const next = orderedIds.map((id, i) => ({ id, sort_order: i }));
+    setTopOfMind((prev) => prev.map((t) => { const hit = next.find((n) => n.id === t.id); return hit ? { ...t, sort_order: hit.sort_order } : t; }));
+    try { await Promise.all(next.map((n) => api("top_of_mind", "PATCH", { sort_order: n.sort_order }, `?id=eq.${n.id}`))); }
+    catch { showToast("Could not save the new order"); }
+  };
+  // Convert a Top of Mind item, then flip it out of the active list. "task" and
+  // "note" create the record; "discussion" links a discussion point to the
+  // picked entity; "archive" just hides it.
+  const convertTopOfMind = async (item, kind, payload = {}) => {
+    try {
+      if (kind === "task") {
+        await saveTodo({ title: item.content });
+        await updateTopOfMind(item.id, { status: "promoted" });
+        showToast("Made into a task");
+      } else if (kind === "note") {
+        const rows = await api("notes", "POST", { title: firstLine(item.content).slice(0, 80) || "Untitled", content: plainTextToHtml(item.content), updated_at: new Date().toISOString() });
+        const row = Array.isArray(rows) ? rows[0] : rows;
+        if (row) setNotes((prev) => [row, ...prev]);
+        await updateTopOfMind(item.id, { status: "promoted" });
+        showToast("Made into a note");
+      } else if (kind === "discussion") {
+        const created = await addDiscussionPoint(payload.fks || {}, item.content);
+        if (created) { await updateTopOfMind(item.id, { status: "promoted" }); showToast(`Assigned to ${payload.label || "entity"}`); }
+      } else if (kind === "archive") {
+        await updateTopOfMind(item.id, { status: "archived" });
+      }
+    } catch { showToast("Could not convert"); }
+  };
+
   // NOTES. The `notes` table has no updated_at trigger, so every write stamps
   // updated_at manually. Writes patch local state (rather than a full reload) so
   // the editor stays snappy and the cursor never jumps while typing.
@@ -2921,6 +3008,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       (contact && t.contact_id === contact.id) || (deal && t.deal_id === deal.id) ||
       (enabler && t.enabler_id === enabler.id) || (org && t.organization_id === org.id)));
     if (openTasks.length) lines.push(`Open tasks:\n${openTasks.map((t) => `- ${t.title}${t.due_date ? ` (due ${formatDate(t.due_date)})` : ""} [${t.priority}]`).join("\n")}`);
+    const openDPs = discussionPoints.filter((p) => !p.is_discussed && (
+      (contact && p.contact_id === contact.id) || (deal && p.deal_id === deal.id) ||
+      (enabler && p.enabler_id === enabler.id) || (org && p.organization_id === org.id)));
+    if (openDPs.length) lines.push(`DISCUSSION POINTS to raise with them:\n${openDPs.map((p) => `- ${mentionsToPlainText(p.content)}${p.priority === "high" ? " (high priority)" : ""}`).join("\n")}`);
     const linkIds = new Set(materialLinks
       .filter((l) => (deal && l.deal_id === deal.id) || (enabler && l.enabler_id === enabler.id) || (org && l.organization_id === org.id) || (contact && l.contact_id === contact.id))
       .map((l) => l.material_id));
@@ -3157,6 +3248,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       taggedContacts.some((c) => t.contact_id === c.id) ||
       taggedInstEntities.some(({ deal, enabler, org }) => (deal && t.deal_id === deal.id) || (enabler && t.enabler_id === enabler.id) || (org && t.organization_id === org.id))));
     if (openTasks.length) lines.push(`Open tasks:\n${openTasks.map((t) => `- ${t.title}${t.due_date ? ` (due ${formatDate(t.due_date)})` : ""} [${t.priority}]`).join("\n")}`);
+    const openDPs = discussionPoints.filter((p) => !p.is_discussed && (
+      taggedContacts.some((c) => p.contact_id === c.id) ||
+      taggedInstEntities.some(({ deal, enabler, org }) => (deal && p.deal_id === deal.id) || (enabler && p.enabler_id === enabler.id) || (org && p.organization_id === org.id))));
+    if (openDPs.length) lines.push(`DISCUSSION POINTS to raise:\n${openDPs.map((p) => `- ${mentionsToPlainText(p.content)}${p.priority === "high" ? " (high priority)" : ""}`).join("\n")}`);
     return lines.join("\n\n") || "No history on file yet.";
   };
 
@@ -4540,6 +4635,21 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const homeMeetings = calendarEvents
     .filter((ev) => ev.start_time && isToday(ev.start_time))
     .sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+  // Open discussion points to raise at a meeting: prefer the matched person,
+  // fall back to the matched institution. Drives the "N points to discuss"
+  // hint on Home's agenda and the meeting module.
+  const eventDiscussionHint = (ev) => {
+    if (ev.matched_contact_id) {
+      const n = discussionPoints.filter((p) => !p.is_discussed && p.contact_id === ev.matched_contact_id).length;
+      if (n) return { count: n, name: contacts.find((c) => c.id === ev.matched_contact_id)?.name || "them" };
+    }
+    const instCol = ev.matched_deal_id ? ["deal_id", ev.matched_deal_id] : ev.matched_enabler_id ? ["enabler_id", ev.matched_enabler_id] : ev.matched_organization_id ? ["organization_id", ev.matched_organization_id] : null;
+    if (instCol) {
+      const n = discussionPoints.filter((p) => !p.is_discussed && p[instCol[0]] === instCol[1]).length;
+      if (n) return { count: n, name: entityName(eventEntityRow(ev)) || "this institution" };
+    }
+    return null;
+  };
   // "Last synced" = the most recent time the Apps Script wrote an event row.
   const calendarLastSynced = (() => {
     const times = calendarEvents.map((e) => e.updated_at).filter(Boolean).sort();
@@ -4638,6 +4748,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onSummarizeEmail={summarizeEmailActivity}
             summarizingActivityId={summarizingActivityId}
             linkedNotes={notes.filter((n) => (inst.dealId && n.deal_id === inst.dealId) || (inst.enablerId && n.enabler_id === inst.enablerId) || (inst.orgId && n.organization_id === inst.orgId))}
+            discussionPoints={discussionPoints.filter((p) => (inst.orgId && p.organization_id === inst.orgId) || (inst.dealId && p.deal_id === inst.dealId) || (inst.enablerId && p.enabler_id === inst.enablerId))}
+            onAddDiscussionPoint={(content) => addDiscussionPoint(inst.orgId ? { organization_id: inst.orgId } : (inst.dealId ? { deal_id: inst.dealId } : { enabler_id: inst.enablerId }), content)}
+            onUpdateDiscussionPoint={updateDiscussionPoint}
+            onToggleDiscussed={toggleDiscussionPoint}
+            onTogglePriority={toggleDiscussionPriority}
+            onDeleteDiscussionPoint={deleteDiscussionPoint}
             materials={materials}
             materialLinks={materialLinks.filter((l) => (inst.dealId && l.deal_id === inst.dealId) || (inst.enablerId && l.enabler_id === inst.enablerId) || (inst.orgId && l.organization_id === inst.orgId))}
             onAttachMaterial={(materialId) => { const p = institutionPrimaryEntity(inst); return p ? attachMaterial(materialId, { [`${p.type}_id`]: p.id }) : undefined; }}
@@ -4720,6 +4836,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onNavigateTask={openTaskLink}
             linkedNotes={notes.filter((n) => n.contact_id === sheetContact.id)}
             onOpenNote={openNote}
+            discussionPoints={discussionPoints.filter((p) => p.contact_id === sheetContact.id)}
+            onAddDiscussionPoint={(content) => addDiscussionPoint({ contact_id: sheetContact.id }, content)}
+            onUpdateDiscussionPoint={updateDiscussionPoint}
+            onToggleDiscussed={toggleDiscussionPoint}
+            onTogglePriority={toggleDiscussionPriority}
+            onDeleteDiscussionPoint={deleteDiscussionPoint}
             onAddRole={addPersonRole}
             onRemoveRole={removePersonRole}
             onConnectPerson={({ sourceId, targetId, relationship, direction, notes }) => addNetworkEdge({ source_type: "contact", source_id: sourceId, target_type: "contact", target_id: targetId, relationship, strength: "medium", direction: direction || "bidirectional", notes })}
@@ -4754,6 +4876,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onAddCustomOption={addCustomOption}
           meetings={homeMeetings}
           eventEntityRow={eventEntityRow}
+          eventDiscussionHint={eventDiscussionHint}
           onPrepBriefEvent={prepBriefForEvent}
           onOpenCalendarEvent={openCalendarEventDetail}
           onOpenCalendar={() => navigateTab("calendar")}
@@ -4946,6 +5069,18 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
               <div className="page-sub">Everything that needs your attention</div>
             </div>
           </div>
+          <TopOfMindArea
+            items={topOfMind}
+            onAdd={addTopOfMind}
+            onUpdate={updateTopOfMind}
+            onReorder={reorderTopOfMind}
+            onConvert={convertTopOfMind}
+            deals={deals}
+            enablers={enablers}
+            organizations={organizations}
+            contacts={contacts}
+            showToast={showToast}
+          />
           {!bossMode && (
             <div className="tasks-quickadd">
               <TaskForm deals={deals} enablers={enablers} organizations={organizations} contacts={contacts} customOptions={customOptions} onAddCustomOption={addCustomOption} onCreateInstitution={createInstitutionInline} onSave={saveTodo} submitLabel="Add Task" showToast={showToast} />
@@ -5241,6 +5376,18 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onOpenNote={(id) => { closeCalendarEventDetail(); openNote(id); }}
             noteCandidates={notes.filter((n) => n.calendar_event_id !== ev.id).sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at))}
             onAttachExistingNote={(noteId) => linkNoteToEvent(noteId, ev.id)}
+            discussionPoints={(() => {
+              const cIds = new Set(eventContacts.filter((r) => r.calendar_event_id === ev.id).map((r) => r.contact_id));
+              if (ev.matched_contact_id) cIds.add(ev.matched_contact_id);
+              const instRows = eventInstitutions.filter((r) => r.calendar_event_id === ev.id);
+              const dIds = new Set(instRows.filter((r) => r.deal_id).map((r) => r.deal_id)); if (ev.matched_deal_id) dIds.add(ev.matched_deal_id);
+              const eIds = new Set(instRows.filter((r) => r.enabler_id).map((r) => r.enabler_id)); if (ev.matched_enabler_id) eIds.add(ev.matched_enabler_id);
+              const oIds = new Set(instRows.filter((r) => r.organization_id).map((r) => r.organization_id)); if (ev.matched_organization_id) oIds.add(ev.matched_organization_id);
+              return discussionPoints
+                .filter((p) => (p.contact_id && cIds.has(p.contact_id)) || (p.deal_id && dIds.has(p.deal_id)) || (p.enabler_id && eIds.has(p.enabler_id)) || (p.organization_id && oIds.has(p.organization_id)))
+                .map((p) => ({ ...p, _entityLabel: p.contact_id ? (contacts.find((c) => c.id === p.contact_id)?.name || "") : entityName({ deal_id: p.deal_id, enabler_id: p.enabler_id, organization_id: p.organization_id }) }));
+            })()}
+            onToggleDiscussionPoint={toggleDiscussionPoint}
             onClose={closeCalendarEventDetail}
             backLabel={backLabel}
             showToast={showToast}
@@ -5279,7 +5426,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, onPrepBriefEvent, onOpenCalendarEvent, onOpenCalendar, urgentTasks, onToggleTodo, onNavigateTask, recentActivities, onUpdateActivity, onDeleteActivity, activityLinkOptions = {}, customOptions = [], onAddCustomOption = () => {}, deals, enablers, organizations, contacts, todoContacts = [], dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, eventDiscussionHint, onPrepBriefEvent, onOpenCalendarEvent, onOpenCalendar, urgentTasks, onToggleTodo, onNavigateTask, recentActivities, onUpdateActivity, onDeleteActivity, activityLinkOptions = {}, customOptions = [], onAddCustomOption = () => {}, deals, enablers, organizations, contacts, todoContacts = [], dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
@@ -5357,6 +5504,7 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
                       {ev.location && <span>{ev.location}</span>}
                       {ent && <button type="button" className="home-meeting-entity home-meeting-entity-btn" onClick={(e) => { e.stopPropagation(); onOpenEntity(entRow); }}>{ent}</button>}
                     </div>
+                    {(() => { const hint = eventDiscussionHint && eventDiscussionHint(ev); return hint ? <div className="home-meeting-dp">💬 {hint.count} point{hint.count === 1 ? "" : "s"} to discuss with {hint.name}</div> : null; })()}
                   </div>
                   {!bossMode && onPrepBriefEvent && canPrepBrief && (
                     <button className="home-prep-btn" disabled={!!briefGenerating} onClick={(e) => { e.stopPropagation(); onPrepBriefEvent(ev); }}>Prep Brief</button>
@@ -5676,8 +5824,9 @@ const agendaDayLabel = (d) => {
 };
 
 const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
-// Monday-based start of the week containing `d`.
-const startOfWeek = (d) => { const x = startOfDay(d); const day = (x.getDay() + 6) % 7; x.setDate(x.getDate() - day); return x; };
+// Sunday-based start of the week containing `d` (Saudi/GCC convention: the week
+// runs Sunday through Saturday).
+const startOfWeek = (d) => { const x = startOfDay(d); x.setDate(x.getDate() - x.getDay()); return x; };
 
 // One event row shared by Agenda and the Week popover: time, title, location,
 // attendees, matched-entity pill, and a Prep Brief / Link action.
@@ -5885,7 +6034,8 @@ function EventDetailPanel({
   onTagInstitution, onUntagInstitution, onTagPerson, onUntagPerson,
   onSavePrepNotes, onSaveOutcomeNotes, onGenerateBrief, briefGenerating,
   onLogOutcome, onExtractTasks, onClose, showToast,
-  meetingNote, otherEventNotes = [], onSaveMeetingNote, onOpenNote, noteCandidates = [], onAttachExistingNote, backLabel = "Back",
+  meetingNote, otherEventNotes = [], onSaveMeetingNote, onOpenNote, noteCandidates = [], onAttachExistingNote,
+  discussionPoints = [], onToggleDiscussionPoint, backLabel = "Back",
 }) {
   const readOnly = useReadOnly();
   const isMobile = useIsMobile();
@@ -6076,6 +6226,21 @@ function EventDetailPanel({
             <MultiContactPicker options={contactOptions} value={taggedContactValues} onChange={handleContactChange} placeholder="+ Tag person..." />
           )}
         </div>
+
+        {discussionPoints.length > 0 && (
+          <div className="event-detail-section event-detail-dp">
+            <div className="section-label">Discussion Points</div>
+            <div className="event-dp-list">
+              {[...discussionPoints].sort((a, b) => (a.is_discussed ? 1 : 0) - (b.is_discussed ? 1 : 0) || (b.priority === "high" ? 1 : 0) - (a.priority === "high" ? 1 : 0)).map((p) => (
+                <label key={p.id} className={`event-dp-row ${p.is_discussed ? "dp-done" : ""} ${p.priority === "high" ? "dp-high" : ""}`}>
+                  <input type="checkbox" checked={!!p.is_discussed} disabled={readOnly || !onToggleDiscussionPoint} onChange={() => onToggleDiscussionPoint && onToggleDiscussionPoint(p)} />
+                  <span className="event-dp-text"><MentionText text={p.content} />{p._entityLabel ? <span className="event-dp-who"> · {p._entityLabel}</span> : null}</span>
+                </label>
+              ))}
+            </div>
+            {!readOnly && <div className="event-dp-hint">Tick off what you covered. Unchecked points carry forward to next time.</div>}
+          </div>
+        )}
 
         <div className="event-detail-section">
           <div className="section-label">Prep Notes</div>
@@ -8829,6 +8994,256 @@ function LinkedNotesSection({ notes, onOpenNote }) {
   );
 }
 
+// One quick line to raise with a person/institution next time. Fast-add input
+// (Enter or voice), inline editable text, a priority flag, and a "discussed"
+// checkbox that moves the point to a collapsed struck-through subsection. Shared
+// by the Person and Institution sheets and, in a ticklist variant, the meeting
+// module. Boss View is read-only.
+function DiscussionPointsSection({ points = [], onAdd, onUpdate, onToggleDiscussed, onTogglePriority, onDelete, showToast }) {
+  const readOnly = useReadOnly();
+  const [draft, setDraft] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [showDiscussed, setShowDiscussed] = useState(false);
+
+  const open = points.filter((p) => !p.is_discussed)
+    .sort((a, b) => (a.priority === "high" ? -1 : 0) - (b.priority === "high" ? -1 : 0) || new Date(a.created_at) - new Date(b.created_at));
+  const discussed = points.filter((p) => p.is_discussed)
+    .sort((a, b) => new Date(b.discussed_at || 0) - new Date(a.discussed_at || 0));
+
+  const submit = async () => {
+    const text = draft.trim();
+    if (!text || adding) return;
+    setAdding(true);
+    try { await onAdd(text); setDraft(""); } finally { setAdding(false); }
+  };
+
+  return (
+    <div className="people-section dp-section">
+      <div className="section-label">Discussion Points</div>
+      {!readOnly && (
+        <div className="dp-add">
+          <input
+            className="input dp-add-input"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } }}
+            placeholder="Something to discuss..."
+          />
+          <VoiceRecorder mode="plain" compact showToast={showToast} title="Dictate a discussion point"
+            onPlainText={(t) => setDraft((d) => (d ? `${d} ${t}` : t))} />
+          <button type="button" className="btn-sec dp-add-btn" disabled={adding || !draft.trim()} onClick={submit}>Add</button>
+        </div>
+      )}
+      {open.length === 0 && discussed.length === 0 && <div className="dp-empty">Nothing to raise yet.</div>}
+      <div className="dp-list">
+        {open.map((p) => (
+          <DiscussionPointRow key={p.id} dp={p} readOnly={readOnly}
+            onUpdate={onUpdate} onToggleDiscussed={onToggleDiscussed} onTogglePriority={onTogglePriority} onDelete={onDelete} />
+        ))}
+      </div>
+      {discussed.length > 0 && (
+        <div className="dp-discussed">
+          <button type="button" className="dp-discussed-toggle" onClick={() => setShowDiscussed((v) => !v)}>
+            <span className={`exec-chevron ${showDiscussed ? "open" : ""}`}>›</span> Discussed ({discussed.length})
+          </button>
+          {showDiscussed && (
+            <div className="dp-list">
+              {discussed.map((p) => (
+                <DiscussionPointRow key={p.id} dp={p} readOnly={readOnly}
+                  onUpdate={onUpdate} onToggleDiscussed={onToggleDiscussed} onTogglePriority={onTogglePriority} onDelete={onDelete} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiscussionPointRow({ dp, readOnly, onUpdate, onToggleDiscussed, onTogglePriority, onDelete }) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(dp.content || "");
+  useEffect(() => { setText(dp.content || ""); }, [dp.content]);
+  const save = () => {
+    const t = text.trim();
+    setEditing(false);
+    if (t && t !== dp.content) onUpdate(dp.id, { content: t });
+    else setText(dp.content || "");
+  };
+  const high = dp.priority === "high";
+  return (
+    <div className={`dp-row ${high ? "dp-high" : ""} ${dp.is_discussed ? "dp-done" : ""}`}>
+      <input type="checkbox" className="dp-check" checked={!!dp.is_discussed} disabled={readOnly} onChange={() => onToggleDiscussed(dp)} title={dp.is_discussed ? "Bring back" : "Mark discussed"} />
+      {!readOnly && !dp.is_discussed && (
+        <button type="button" className={`dp-flag ${high ? "on" : ""}`} onClick={() => onTogglePriority(dp)} title={high ? "High priority" : "Normal priority"}>⚑</button>
+      )}
+      {editing && !readOnly ? (
+        <input className="input dp-edit" autoFocus value={text} onChange={(e) => setText(e.target.value)}
+          onBlur={save} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); save(); } if (e.key === "Escape") { setText(dp.content || ""); setEditing(false); } }} />
+      ) : (
+        <span className="dp-text" onClick={() => !readOnly && !dp.is_discussed && setEditing(true)}><MentionText text={dp.content} /></span>
+      )}
+      {!readOnly && <button type="button" className="dp-del" onClick={() => onDelete(dp.id)} title="Delete">✕</button>}
+    </div>
+  );
+}
+
+// Top of Mind: a lightweight holding area on the Tasks tab for loose thoughts,
+// open questions, things being mulled. NOT tasks (no due dates, no nagging).
+// Fast capture (Enter or voice), drag reorder, inline edit, and a per-item
+// convert menu (task / note / discussion point / archive). Open items only;
+// archived and promoted are hidden behind a toggle. Read-only in Boss View.
+function TopOfMindArea({ items = [], onAdd, onUpdate, onReorder, onConvert, deals = [], enablers = [], organizations = [], contacts = [], showToast }) {
+  const readOnly = useReadOnly();
+  const [draft, setDraft] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [dragId, setDragId] = useState(null);
+
+  const openItems = items.filter((i) => i.status === "open").sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+  const hiddenItems = items.filter((i) => i.status !== "open").sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+  // Combined pick list (people + deduped institutions) for "assign as
+  // discussion point", value shaped "type:id" so the fk is resolvable.
+  const entityOptions = [
+    ...dedupeInstitutionOptions({ deals, enablers, organizations, prefer: ["organization", "deal", "enabler"] }),
+    ...contacts.filter((c) => c.name).map((c) => ({ value: `contact:${c.id}`, label: c.name })),
+  ];
+  const fksFor = (value) => {
+    const i = value.indexOf(":"); const type = value.slice(0, i); const id = value.slice(i + 1);
+    return { fks: { [`${type === "contact" ? "contact" : type}_id`]: id }, label: entityOptions.find((o) => o.value === value)?.label };
+  };
+
+  const submit = async () => {
+    const t = draft.trim();
+    if (!t || adding) return;
+    setAdding(true);
+    try { await onAdd(t); setDraft(""); } finally { setAdding(false); }
+  };
+
+  const onDrop = (targetId) => {
+    if (!dragId || dragId === targetId) { setDragId(null); return; }
+    const ids = openItems.map((i) => i.id);
+    const from = ids.indexOf(dragId), to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) { setDragId(null); return; }
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    onReorder(ids);
+    setDragId(null);
+  };
+
+  return (
+    <div className="tom-area">
+      <div className="tom-head">
+        <div className="tom-title">Top of Mind</div>
+        <div className="tom-sub">Loose thoughts and open questions. Not tasks.</div>
+      </div>
+      {!readOnly && (
+        <div className="tom-add">
+          <input
+            className="input tom-add-input"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } }}
+            placeholder="What's on your mind..."
+          />
+          <VoiceRecorder mode="plain" compact showToast={showToast} title="Dictate a thought"
+            onPlainText={(t) => setDraft((d) => (d ? `${d} ${t}` : t))} />
+          <button type="button" className="btn-sec" disabled={adding || !draft.trim()} onClick={submit}>Add</button>
+        </div>
+      )}
+      <div className="tom-list">
+        {openItems.length === 0 && <div className="tom-empty">Nothing on your mind right now.</div>}
+        {openItems.map((item) => (
+          <TopOfMindRow key={item.id} item={item} readOnly={readOnly} onUpdate={onUpdate} onConvert={onConvert}
+            entityOptions={entityOptions} fksFor={fksFor}
+            isDragging={dragId === item.id}
+            onDragStart={() => setDragId(item.id)}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => { e.preventDefault(); onDrop(item.id); }} />
+        ))}
+      </div>
+      {hiddenItems.length > 0 && (
+        <div className="tom-archived">
+          <button type="button" className="link-btn" onClick={() => setShowArchived((v) => !v)}>
+            {showArchived ? "▾" : "▸"} Show archived and converted ({hiddenItems.length})
+          </button>
+          {showArchived && (
+            <div className="tom-list tom-list-archived">
+              {hiddenItems.map((item) => (
+                <div key={item.id} className="tom-row tom-row-archived">
+                  <span className="tom-status-tag">{item.status === "promoted" ? "converted" : "archived"}</span>
+                  <span className="tom-text"><MentionText text={item.content} /></span>
+                  {!readOnly && item.status === "archived" && (
+                    <button type="button" className="link-btn tom-restore" onClick={() => onUpdate(item.id, { status: "open" })}>Restore</button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TopOfMindRow({ item, readOnly, onUpdate, onConvert, entityOptions, fksFor, isDragging, onDragStart, onDragOver, onDrop }) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(item.content || "");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [assigning, setAssigning] = useState(false);
+  const menuRef = useRef(null);
+  useEffect(() => { setText(item.content || ""); }, [item.content]);
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onDown = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) { setMenuOpen(false); setAssigning(false); } };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [menuOpen]);
+
+  const save = () => {
+    const t = text.trim();
+    setEditing(false);
+    if (t && t !== item.content) onUpdate(item.id, { content: t });
+    else setText(item.content || "");
+  };
+  const convert = (kind, payload) => { setMenuOpen(false); setAssigning(false); onConvert(item, kind, payload); };
+
+  return (
+    <div className={`tom-row ${isDragging ? "tom-row-dragging" : ""}`}
+      draggable={!readOnly && !editing}
+      onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop}>
+      {!readOnly && <span className="tom-drag" title="Drag to reorder">⠿</span>}
+      {editing && !readOnly ? (
+        <input className="input tom-edit" autoFocus value={text} onChange={(e) => setText(e.target.value)}
+          onBlur={save} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); save(); } if (e.key === "Escape") { setText(item.content || ""); setEditing(false); } }} />
+      ) : (
+        <span className="tom-text" onClick={() => !readOnly && setEditing(true)}><MentionText text={item.content} /></span>
+      )}
+      {!readOnly && (
+        <div className="tom-menu-wrap" ref={menuRef}>
+          <button type="button" className="tom-menu-btn" onClick={() => setMenuOpen((v) => !v)} title="Convert">⋯</button>
+          {menuOpen && !assigning && (
+            <div className="tom-menu">
+              <button type="button" onClick={() => convert("task")}>Make it a task</button>
+              <button type="button" onClick={() => convert("note")}>Make it a note</button>
+              <button type="button" onClick={() => setAssigning(true)}>Assign as discussion point</button>
+              <button type="button" className="tom-menu-danger" onClick={() => convert("archive")}>Archive</button>
+            </div>
+          )}
+          {menuOpen && assigning && (
+            <div className="tom-menu tom-menu-assign">
+              <div className="tom-menu-label">Assign to...</div>
+              <EntityPicker placeholder="Person or institution..." options={entityOptions} value=""
+                onChange={(value) => { if (!value) return; const { fks, label } = fksFor(value); convert("discussion", { fks, label }); }} />
+              <button type="button" className="link-btn" onClick={() => setAssigning(false)}>Cancel</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DealForm({ deal, contacts, customOptions, onAddCustomOption, onSave, onClose }) {
   const isEdit = !!deal.id;
   const [f, setF] = useState({ id:deal.id||"", company:deal.company||"", type:deal.type||"hospital", contact_id:deal.contact_id||"", contact_name:deal.contact_name||"", contact_role:deal.contact_role||"", value:deal.value||"", stage:deal.stage||"prospecting", tier:deal.tier||"Untiered", city:deal.city||"", region:deal.region||"", notes:deal.notes||"", next_action:deal.next_action||"" });
@@ -9013,7 +9428,7 @@ function ContactConnectPicker({ contacts, value, onChange, onCreateContact, plac
   );
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onUpdateActivity, onDeleteActivity, onAddTimelineEntry, activityLinkOptions = {}, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, onAddRole, onRemoveRole, onConnectPerson, onAddIntroducedPerson, onCreateBareContact, onRemoveConnection, onSwapConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onUpdateActivity, onDeleteActivity, onAddTimelineEntry, activityLinkOptions = {}, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, discussionPoints = [], onAddDiscussionPoint, onUpdateDiscussionPoint, onToggleDiscussed, onTogglePriority, onDeleteDiscussionPoint, onAddRole, onRemoveRole, onConnectPerson, onAddIntroducedPerson, onCreateBareContact, onRemoveConnection, onSwapConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -9378,6 +9793,8 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
           onNavigate={onNavigateTask}
         />
       )}
+
+      <DiscussionPointsSection points={discussionPoints} onAdd={onAddDiscussionPoint} onUpdate={onUpdateDiscussionPoint} onToggleDiscussed={onToggleDiscussed} onTogglePriority={onTogglePriority} onDelete={onDeleteDiscussionPoint} showToast={showToast} />
 
       <LinkedNotesSection notes={linkedNotes} onOpenNote={onOpenNote} />
 
@@ -10321,7 +10738,7 @@ function institutionPeople(inst, { contactRoles, dealContacts, enablerContacts, 
 function InstitutionSheet({
   institution: inst, summaryEntity, activities, allActivities, contacts, deals, enablers, organizations,
   dealContacts, enablerContacts, networkEdges, contactRoles, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution,
-  onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, onSummarizeEmail, summarizingActivityId, onUpdateActivity, onDeleteActivity, onAddTimelineEntry, activityLinkOptions = {}, linkedNotes = [], onOpenNote, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
+  onUpdate, onUpdateCity, onRename, onAutoFill, onAutoFillIfEmpty, researching, onSetFlag, onDelete, onAddActivity, onSummarizeEmail, summarizingActivityId, onUpdateActivity, onDeleteActivity, onAddTimelineEntry, activityLinkOptions = {}, linkedNotes = [], onOpenNote, discussionPoints = [], onAddDiscussionPoint, onUpdateDiscussionPoint, onToggleDiscussed, onTogglePriority, onDeleteDiscussionPoint, onAddPersonRole, onAddPersonWithRoles, onRemoveRole, onRemoveNetworkEdge, onAddConnection,
   onResearchKeyPeople, onResearchTrials, onSaveResearch, onAddResearchedPerson, onAddResearchedPeople,
   onChangeStage, onChangeTier, onUpdateDeal, todos = [], todoContacts = [], taskInitial = {}, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
   materials = [], materialLinks = [], onAttachMaterial, onRemoveMaterialLink, onDownloadMaterial,
@@ -10750,6 +11167,8 @@ function InstitutionSheet({
       )}
 
       <MaterialsSection materials={materials} links={materialLinks} onAttach={onAttachMaterial} onRemoveLink={onRemoveMaterialLink} onDownload={onDownloadMaterial} />
+
+      <DiscussionPointsSection points={discussionPoints} onAdd={onAddDiscussionPoint} onUpdate={onUpdateDiscussionPoint} onToggleDiscussed={onToggleDiscussed} onTogglePriority={onTogglePriority} onDelete={onDeleteDiscussionPoint} showToast={showToast} />
 
       <LinkedNotesSection notes={linkedNotes} onOpenNote={onOpenNote} />
 

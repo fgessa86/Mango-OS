@@ -1898,6 +1898,69 @@ body.exec-presenting-body { overflow: hidden; }
 .event-detail-attach-date { font-size: 11px; color: var(--muted); flex-shrink: 0; }
 .event-detail-attach-empty { font-size: 12.5px; color: var(--muted); padding: 4px 2px; }
 
+/* ---- Discussion Points (Person/Institution sheets + meeting module) ---- */
+.dp-section { }
+.dp-add { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.dp-add-input { flex: 1; min-width: 0; }
+.dp-add-btn { flex-shrink: 0; }
+.dp-empty { font-size: 12.5px; color: var(--muted); padding: 2px 0; }
+.dp-list { display: flex; flex-direction: column; gap: 4px; }
+.dp-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.dp-row.dp-high { border-color: #EF444455; background: #EF44440d; }
+.dp-row.dp-done .dp-text { text-decoration: line-through; color: var(--muted); }
+.dp-check { flex-shrink: 0; width: 16px; height: 16px; cursor: pointer; }
+.dp-flag { flex-shrink: 0; border: none; background: none; cursor: pointer; font-size: 14px; line-height: 1; color: var(--muted-2); padding: 2px; }
+.dp-flag.on { color: #EF4444; }
+.dp-text { flex: 1; min-width: 0; font-size: 13.5px; color: var(--text); cursor: text; }
+.dp-edit { flex: 1; min-width: 0; }
+.dp-del { flex-shrink: 0; border: none; background: none; cursor: pointer; color: var(--muted); font-size: 13px; padding: 2px 4px; border-radius: 6px; opacity: .6; }
+.dp-del:hover { opacity: 1; color: #EF4444; background: var(--card); }
+.dp-discussed { margin-top: 8px; }
+.dp-discussed-toggle { display: inline-flex; align-items: center; gap: 6px; border: none; background: none; color: var(--muted-2); font-family: inherit; font-size: 12.5px; font-weight: 650; cursor: pointer; padding: 4px 2px; }
+.dp-discussed-toggle:hover { color: var(--text-2); }
+
+/* Meeting module discussion-point ticklist. */
+.event-dp-list { display: flex; flex-direction: column; gap: 4px; }
+.event-dp-row { display: flex; align-items: flex-start; gap: 8px; font-size: 13.5px; color: var(--text); cursor: pointer; padding: 3px 0; }
+.event-dp-row input { margin-top: 2px; flex-shrink: 0; }
+.event-dp-row.dp-done .event-dp-text { text-decoration: line-through; color: var(--muted); }
+.event-dp-row.dp-high .event-dp-text { font-weight: 600; }
+.event-dp-who { color: var(--muted); font-weight: 500; }
+.event-dp-hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+
+/* Home agenda "N points to discuss" hint. */
+.home-meeting-dp { font-size: 12px; color: var(--accent-strong, #B77400); margin-top: 4px; }
+
+/* ---- Top of Mind (Tasks tab) ---- */
+.tom-area { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 14px 16px; margin-bottom: 20px; }
+.tom-head { margin-bottom: 10px; }
+.tom-title { font-size: 14px; font-weight: 700; color: var(--text); }
+.tom-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.tom-add { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.tom-add-input { flex: 1; min-width: 0; }
+.tom-list { display: flex; flex-direction: column; gap: 5px; }
+.tom-empty { font-size: 12.5px; color: var(--muted); padding: 2px 0; }
+.tom-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--card); }
+.tom-row-dragging { opacity: .5; }
+.tom-drag { flex-shrink: 0; cursor: grab; color: var(--muted-2); font-size: 13px; line-height: 1; }
+.tom-text { flex: 1; min-width: 0; font-size: 13.5px; color: var(--text); cursor: text; }
+.tom-edit { flex: 1; min-width: 0; }
+.tom-menu-wrap { position: relative; flex-shrink: 0; }
+.tom-menu-btn { border: none; background: none; cursor: pointer; color: var(--muted-2); font-size: 18px; line-height: 1; padding: 0 6px; border-radius: 6px; }
+.tom-menu-btn:hover { color: var(--text); background: var(--surface); }
+.tom-menu { position: absolute; right: 0; top: 100%; z-index: 30; margin-top: 4px; min-width: 210px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.12); padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+.tom-menu > button { text-align: left; border: none; background: none; cursor: pointer; font-family: inherit; font-size: 13px; color: var(--text); padding: 7px 10px; border-radius: 7px; }
+.tom-menu > button:hover { background: var(--card); }
+.tom-menu-danger { color: #EF4444 !important; }
+.tom-menu-assign { padding: 10px; gap: 8px; }
+.tom-menu-label { font-size: 11.5px; font-weight: 650; color: var(--muted); }
+.tom-archived { margin-top: 10px; }
+.tom-list-archived { margin-top: 6px; }
+.tom-row-archived { background: transparent; border-style: dashed; }
+.tom-row-archived .tom-text { color: var(--muted); }
+.tom-status-tag { flex-shrink: 0; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; }
+.tom-restore { flex-shrink: 0; }
+
 /* The meeting pill in the note editor toolbar sits alongside the entity pill,
    since a note can be both a meeting report and linked to an institution. */
 .note-link-pill-meeting { background: #8B5CF614; border-color: #8B5CF633; color: #6D28D9; }
