@@ -3539,7 +3539,24 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         .filter(Boolean).join(" ")
         || cleanActivityText(m.activity.description || "").trim();
       return { ...m, event: ev || null, outcome, note: linkedNote || null, sourceType: ev ? "calendar_event" : "activity", sourceId: ev ? ev.id : m.activity.id };
-    }).sort((a, b) => (a.day < b.day ? 1 : -1));
+    })
+    // The exec update is external-facing only: drop internal meetings (our own
+    // team) so a sync like "Saudi Business Bi-Monthly Update" never appears.
+    .filter((m) => !execMeetingIsInternal(m))
+    .sort((a, b) => (a.day < b.day ? 1 : -1));
+  };
+
+  // True when a gathered meeting is internal (with our own Mango team): its
+  // resolved contact or institution is flagged is_internal, its resolved
+  // institution name matches an internal org, or every attendee on the matched
+  // calendar event is internal (isInternalMeeting).
+  const execMeetingIsInternal = (m) => {
+    const a = m.activity || {};
+    if (a.contact_id && contacts.find((c) => c.id === a.contact_id)?.is_internal) return true;
+    if (a.organization_id && organizations.find((o) => o.id === a.organization_id)?.is_internal) return true;
+    if (m.institution) { const o = organizations.find((o) => (o.name || "").trim().toLowerCase() === m.institution.trim().toLowerCase()); if (o?.is_internal) return true; }
+    if (m.event && isInternalMeeting(m.event, contacts)) return true;
+    return false;
   };
 
   // Gathers the raw two-week window and shapes it for the model. Deliberately
@@ -3719,11 +3736,16 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // control, not a live query). Type label/color are resolved here so the render
   // needs no customOptions; stage/tier are re-resolved from the constants.
   const buildPipelineSnapshot = (startISO, endISO) => {
-    const advancedIds = new Set(
-      buildStageTransitions(activities, deals)
-        .filter((t) => t.date && t.date >= startISO && t.date <= endISO)
-        .map((t) => t.dealId)
-    );
+    // Net movement per deal within the period: earliest fromStage to latest
+    // toStage, so a deal that jumped two stages shows the full "A to C" move.
+    const moveByDeal = new Map();
+    buildStageTransitions(activities, deals)
+      .filter((t) => t.date && t.date >= startISO && t.date <= endISO)
+      .sort((a, b) => new Date(a.date) - new Date(b.date))
+      .forEach((t) => {
+        const cur = moveByDeal.get(t.dealId);
+        moveByDeal.set(t.dealId, { from: cur ? cur.from : t.fromStage, to: t.toStage });
+      });
     const rows = deals
       .filter((d) => !["won", "lost"].includes(d.stage))
       .map((d) => {
@@ -3731,6 +3753,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         const typeMeta = inst?.type ? institutionTypeMeta(inst.type, customOptions) : null;
         const cities = parseCities(d.city || inst?.city);
         const city = cities.length ? (cities.length > 1 ? `${cities[0]} +${cities.length - 1}` : cities[0]) : "";
+        const mv = moveByDeal.get(d.id);
         return {
           id: d.id,
           company: d.company || "",
@@ -3739,7 +3762,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           city,
           typeLabel: typeMeta?.label || "",
           typeColor: typeMeta?.color || "",
-          advanced: advancedIds.has(d.id),
+          advanced: !!mv,
+          movedFrom: mv ? mv.from : null,
+          movedTo: mv ? mv.to : null,
         };
       })
       // Strongest tier first, then advanced deals surfaced within a tier.
@@ -3761,24 +3786,29 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // talking points; a meeting with none gets an editable placeholder and its
   // calendar-event source, so "Add outcome" can jump there. Nothing is ever
   // skipped and nothing is fabricated.
+  // One meeting block payload from a gathered meeting: an AI summary plus
+  // talking points when it has content, else an editable placeholder carrying
+  // its calendar-event source. Shared by create and the continuous sync.
+  const buildMeetingBlockForMeeting = async (m) => {
+    const src = { source_type: m.event ? "calendar_event" : "activity", source_id: m.event ? m.event.id : m.activity.id };
+    if (!execMeetingHasContent(m)) {
+      return { block_type: "meeting", section: "meetings", title: execMeetingTitleLine(m), content: buildMeetingContent(EXEC_MEETING_PLACEHOLDER, []), ...src };
+    }
+    let summary = null;
+    try { summary = await generateMeetingSummary(execMeetingContext(m)); }
+    catch (e) { console.error("[Exec] meeting summary failed", e); }
+    const lead = (summary?.summary || "").trim() || EXEC_MEETING_PLACEHOLDER;
+    const points = Array.isArray(summary?.talking_points) ? summary.talking_points : [];
+    return { block_type: "meeting", section: "meetings", title: execMeetingTitleLine(m), content: buildMeetingContent(lead, points), ...src };
+  };
+
   const buildMeetingBlocks = async (startISO, endISO) => {
     const meetings = gatherExecMeetings(startISO, endISO);
     const header = { block_type: "header", section: "meetings", title: "Meeting Summaries", content: null };
     if (!meetings.length) {
       return [header, { block_type: "item", section: "meetings", title: null, content: "<div>No meetings logged in this period. Add one below, or log meetings on the calendar.</div>" }];
     }
-    const rows = await Promise.all(meetings.map(async (m) => {
-      const src = { source_type: m.event ? "calendar_event" : "activity", source_id: m.event ? m.event.id : m.activity.id };
-      if (!execMeetingHasContent(m)) {
-        return { block_type: "meeting", section: "meetings", title: execMeetingTitleLine(m), content: buildMeetingContent(EXEC_MEETING_PLACEHOLDER, []), ...src };
-      }
-      let summary = null;
-      try { summary = await generateMeetingSummary(execMeetingContext(m)); }
-      catch (e) { console.error("[Exec] meeting summary failed", e); }
-      const lead = (summary?.summary || "").trim() || EXEC_MEETING_PLACEHOLDER;
-      const points = Array.isArray(summary?.talking_points) ? summary.talking_points : [];
-      return { block_type: "meeting", section: "meetings", title: execMeetingTitleLine(m), content: buildMeetingContent(lead, points), ...src };
-    }));
+    const rows = await Promise.all(meetings.map(buildMeetingBlockForMeeting));
     return [header, ...rows];
   };
 
@@ -3882,8 +3912,20 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // is thin. Metrics are computed locally; meetings and conclusions come from
   // the AI with editable fallbacks, so the deck is never empty or missing a
   // section. A failed AI call degrades to placeholders, it never aborts.
-  const createExecPresentation = async () => {
+  const createExecPresentation = async ({ force = false } = {}) => {
     if (execGenerating) return;
+    // One active presentation per period: if a draft is already open (not yet
+    // presented), reuse it rather than making a duplicate. It is a living
+    // document that Fahed curates across the two weeks, closed via "Close
+    // period and start new" when it is done. `force` skips the reuse (used right
+    // after closing the current period, whose local status may still be stale).
+    const existingDraft = force ? null : execPresentations.find((p) => p.status !== "presented");
+    if (existingDraft) {
+      setExecOpenId(existingDraft.id);
+      navigateTab("exec");
+      showToast("Opened your current period. Use Refresh to pull in the latest.");
+      return;
+    }
     setExecGenerating(true);
     const end = new Date();
     const start = new Date(end.getTime() - 14 * 86400000);
@@ -4041,6 +4083,79 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       if (ok !== false) showToast("Pipeline refreshed to current state");
     } catch (e) { console.error("[Exec] pipeline refresh failed", e); showToast("Could not refresh the pipeline."); }
     finally { setRefreshingPipelineId(null); }
+  };
+
+  // The Executive Update is a LIVING document: it is drafted once, then kept
+  // current across the two weeks. This sync (run on open and via Refresh) pulls
+  // in what changed WITHOUT overwriting Fahed's curation: it refreshes the
+  // computed data blocks (metric values, the pipeline snapshot, preserving his
+  // hidden deals) and APPENDS a block for any new external meeting, but never
+  // touches an existing meeting or narrative block he has edited.
+  const syncingExecRef = useRef(false);
+  const syncExecPresentation = async (pres, { silent = false } = {}) => {
+    if (!pres || bossMode || syncingExecRef.current) return;
+    syncingExecRef.current = true;
+    try {
+      const { startISO, endISO } = execPeriodISO(pres);
+      const existing = execBlocksFor(pres.id);
+      const patches = [];
+      let touched = 0;
+
+      // 1. Refresh the canonical metric values in place (numbers must stay exact).
+      const freshMetrics = execMetrics(startISO, endISO);
+      existing.filter((b) => b.section === "metrics" && b.block_type === "metric").forEach((mb) => {
+        const f = freshMetrics.find((x) => x.title === mb.title);
+        if (f && String(f.content) !== String(mb.content ?? "")) patches.push({ id: mb.id, patch: { content: String(f.content) } });
+      });
+
+      // 2. Refresh the pipeline snapshot, preserving Fahed's hidden deals.
+      const pipeBlock = existing.find((b) => b.block_type === "pipeline");
+      if (pipeBlock) {
+        const snap = buildPipelineSnapshot(startISO, endISO);
+        let prevHidden = [];
+        try { prevHidden = JSON.parse(pipeBlock.content || "{}").hidden || []; } catch { prevHidden = []; }
+        const liveIds = new Set(snap.deals.map((d) => d.id));
+        snap.hidden = prevHidden.filter((id) => liveIds.has(id));
+        const content = JSON.stringify(snap);
+        if (content !== pipeBlock.content) patches.push({ id: pipeBlock.id, patch: { content } });
+      }
+
+      for (const p of patches) { await api("exec_blocks", "PATCH", p.patch, `?id=eq.${p.id}`); touched++; }
+      if (patches.length) setExecBlocks((prev) => prev.map((b) => { const hit = patches.find((x) => x.id === b.id); return hit ? { ...b, ...hit.patch } : b; }));
+
+      // 3. Append a block for any new external meeting not already represented.
+      const meetings = gatherExecMeetings(startISO, endISO);
+      const presentKeys = new Set(existing.filter((b) => b.block_type === "meeting").map((b) => `${b.source_type}:${b.source_id}`));
+      const newMeetings = meetings.filter((m) => !presentKeys.has(`${m.event ? "calendar_event" : "activity"}:${m.event ? m.event.id : m.activity.id}`));
+      if (newMeetings.length) {
+        const built = await Promise.all(newMeetings.map(buildMeetingBlockForMeeting));
+        // Apply the metric/pipeline content patches to the working copy, so the
+        // append's setExecBlocks (which replaces this presentation's blocks)
+        // carries the refreshed content rather than reverting it.
+        const cur = execBlocksFor(pres.id).map((b) => { const hit = patches.find((x) => x.id === b.id); return hit ? { ...b, ...hit.patch } : b; });
+        const meetingIdxs = cur.map((b, i) => (b.section === "meetings" ? i : -1)).filter((i) => i !== -1);
+        const insertPos = meetingIdxs.length ? meetingIdxs[meetingIdxs.length - 1] + 1 : cur.length;
+        const toCreate = built.map((p) => ({ presentation_id: pres.id, is_hidden: false, source_type: null, source_id: null, ...p }));
+        const created = (await api("exec_blocks", "POST", toCreate)) || [];
+        const finalOrder = [...cur.slice(0, insertPos), ...created, ...cur.slice(insertPos)];
+        await Promise.all(finalOrder.map((b, i) => (b.sort_order === i ? null : api("exec_blocks", "PATCH", { sort_order: i }, `?id=eq.${b.id}`))).filter(Boolean));
+        const renumbered = finalOrder.map((b, i) => ({ ...b, sort_order: i }));
+        setExecBlocks((prev) => [...prev.filter((b) => b.presentation_id !== pres.id), ...renumbered]);
+        touched += created.length;
+      }
+
+      if (touched) { await touchPresentation(pres.id); if (!silent) showToast(`Pulled in ${touched} update${touched === 1 ? "" : "s"} from the period`); }
+      else if (!silent) showToast("Already up to date");
+    } catch (e) { console.error("[Exec] sync failed", e); if (!silent) showToast("Could not refresh the update."); }
+    finally { syncingExecRef.current = false; }
+  };
+
+  // "Close period and start new": mark the current document presented, then
+  // draft a fresh one for the next two weeks (createExecPresentation now has no
+  // active draft to reuse, so it builds a new one).
+  const closeExecPeriodAndStartNew = async (pres) => {
+    await updateExecPresentation(pres.id, { status: "presented" });
+    await createExecPresentation({ force: true });
   };
 
   const deleteExecBlock = async (id) => {
@@ -5229,6 +5344,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onOpenInstitution={(name) => openInstitution(name)}
           onRefreshPipeline={refreshExecPipeline}
           refreshingPipelineId={refreshingPipelineId}
+          onSync={syncExecPresentation}
+          onCloseAndStartNew={closeExecPeriodAndStartNew}
           onCleanupBlockers={cleanupExecBlockers}
           presenting={execPresenting}
           onPresent={() => setExecPresenting(true)}
@@ -6463,7 +6580,8 @@ function execPipelineToLines(content, bullet = "- ", sub = "    . ") {
     lines.push(`${sub}${g.tier.label}:`);
     g.deals.forEach((d) => {
       const bits = [stageLabel(d.stage), d.city, d.typeLabel].filter(Boolean).join(", ");
-      lines.push(`${sub}  ${d.company}${bits ? ` (${bits})` : ""}${d.advanced ? " [advanced]" : ""}`);
+      const move = d.advanced && d.movedTo ? ` [moved ${stageLabel(d.movedFrom)} to ${stageLabel(d.movedTo)}]` : "";
+      lines.push(`${sub}  ${d.company}${bits ? ` (${bits})` : ""}${move}`);
     });
   });
   return lines;
@@ -6494,34 +6612,52 @@ function ExecPipelineBody({ content, presenting = false, editable = false, onOpe
         )}
       </div>
       {groups.length === 0 && <div className="exec-pipeline-empty">No active deals in the pipeline.</div>}
-      {groups.map((g) => (
-        <div key={g.tier.id} className="exec-pipeline-tier">
-          <div className="exec-pipeline-tier-head">
-            <span className="tier-badge" style={{ background: g.tier.bg, color: g.tier.fg }}>{g.tier.label}</span>
-            <span className="exec-pipeline-tier-count">{g.deals.length}</span>
+      {groups.map((g) => {
+        // Within a tier, lay the deals out as pipeline stage columns (only
+        // stages that actually have a deal), so it reads as a pipeline.
+        const stagesHere = STAGES.filter((s) => !["won", "lost"].includes(s.id) && g.deals.some((d) => d.stage === s.id));
+        return (
+          <div key={g.tier.id} className="exec-pipeline-tier">
+            <div className="exec-pipeline-tier-head">
+              <span className="tier-badge" style={{ background: g.tier.bg, color: g.tier.fg }}>{g.tier.label}</span>
+              <span className="exec-pipeline-tier-count">{g.deals.length}</span>
+            </div>
+            <div className="exec-pipeline-stages">
+              {stagesHere.map((st) => {
+                const stageDeals = g.deals.filter((d) => d.stage === st.id);
+                return (
+                  <div key={st.id} className="exec-pipeline-col">
+                    <div className="exec-pipeline-col-head" style={{ borderColor: `${st.color}55`, color: st.color }}>
+                      <span>{st.label}</span><span className="exec-pipeline-col-count">{stageDeals.length}</span>
+                    </div>
+                    <div className="exec-pipeline-col-deals">
+                      {stageDeals.map((d) => {
+                        const isHidden = hidden.has(d.id);
+                        const moved = d.advanced && d.movedTo;
+                        return (
+                          <div key={d.id} className={`exec-pipeline-card ${moved ? "exec-pipeline-card-moved" : ""} ${isHidden ? "exec-pipeline-deal-hidden" : ""}`}>
+                            <div className="exec-pipeline-card-top">
+                              <button type="button" className="exec-pipeline-company" onClick={() => open(d.company)} title={`Open ${d.company}`}>{d.company}</button>
+                              {editable && onToggleHidden && (
+                                <button type="button" className="exec-pipeline-hide" onClick={() => onToggleHidden(d.id)} title={isHidden ? "Show in presentation" : "Hide from presentation"}>{isHidden ? "🚫" : "👁"}</button>
+                              )}
+                            </div>
+                            {moved && <span className="exec-pipeline-moved" title="Advanced this period">↑ {stageLabel(d.movedFrom)} to {stageLabel(d.movedTo)}</span>}
+                            <div className="exec-pipeline-card-meta">
+                              {d.city && <span className="exec-pipeline-city">📍 {d.city}</span>}
+                              {d.typeLabel && <span className="exec-pipeline-type" style={{ background: (d.typeColor || "#8A8072") + "22", color: d.typeColor || "#8A8072", border: `1px solid ${(d.typeColor || "#8A8072")}44` }}>{d.typeLabel}</span>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-          <div className="exec-pipeline-deals">
-            {g.deals.map((d) => {
-              const st = STAGES.find((s) => s.id === d.stage);
-              const isHidden = hidden.has(d.id);
-              return (
-                <div key={d.id} className={`exec-pipeline-deal ${d.advanced ? "exec-pipeline-deal-adv" : ""} ${isHidden ? "exec-pipeline-deal-hidden" : ""}`}>
-                  <button type="button" className="exec-pipeline-company" onClick={() => open(d.company)} title={`Open ${d.company}`}>{d.company}</button>
-                  {st && <span className="exec-pipeline-stage" style={{ background: st.color + "22", color: st.color, border: `1px solid ${st.color}44` }}>{st.label}</span>}
-                  {d.city && <span className="exec-pipeline-city">📍 {d.city}</span>}
-                  {d.typeLabel && <span className="exec-pipeline-type" style={{ background: (d.typeColor || "#8A8072") + "22", color: d.typeColor || "#8A8072", border: `1px solid ${(d.typeColor || "#8A8072")}44` }}>{d.typeLabel}</span>}
-                  {d.advanced && <span className="exec-pipeline-adv-tag" title="Advanced a stage this period">▲ advanced</span>}
-                  {editable && onToggleHidden && (
-                    <button type="button" className="exec-pipeline-hide" onClick={() => onToggleHidden(d.id)} title={isHidden ? "Show in presentation" : "Hide from presentation"}>
-                      {isHidden ? "🚫" : "👁"}
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -6871,12 +7007,25 @@ function ExecUpdateTab({
   onAddBlock, onUpdateBlock, onDeleteBlock, onReorder,
   onRegenerateSection, regeneratingSection, onOpenEvent, onOpenInstitution,
   onRefreshPipeline, refreshingPipelineId, onCleanupBlockers,
+  onSync, onCloseAndStartNew,
   presenting, onPresent, onExitPresent, showToast,
 }) {
   const readOnly = useReadOnly();
   const [dragId, setDragId] = useState(null);
+  const [syncing, setSyncing] = useState(false);
   const pres = presentations.find((p) => p.id === openId) || null;
   const blocks = pres ? blocksFor(pres.id) : [];
+
+  // A living document: on open, quietly pull in what changed during the period
+  // (new external meetings, refreshed metrics and pipeline), once per open.
+  const syncedRef = useRef(null);
+  useEffect(() => {
+    if (pres && !readOnly && onSync && syncedRef.current !== pres.id) {
+      syncedRef.current = pres.id;
+      onSync(pres, { silent: true });
+    }
+  }, [pres, readOnly, onSync]);
+  const runSync = async () => { if (!pres || syncing) return; setSyncing(true); try { await onSync(pres); } finally { setSyncing(false); } };
 
   const copy = async (text, label) => {
     try { await navigator.clipboard.writeText(text); showToast(`${label} copied`); }
@@ -6962,6 +7111,7 @@ function ExecUpdateTab({
             />
           )}
           <div className="exec-period">
+            <span className="exec-period-label">Current period:</span>
             {readOnly ? (
               <span>{formatDate(pres.period_start)} to {formatDate(pres.period_end)}</span>
             ) : (
@@ -6971,20 +7121,25 @@ function ExecUpdateTab({
                 <input type="date" className="input exec-date" defaultValue={pres.period_end || ""} onBlur={(e) => onUpdatePresentation(pres.id, { period_end: e.target.value || null })} />
               </>
             )}
+            {!readOnly && <span className={`exec-living-tag ${pres.status === "presented" ? "closed" : ""}`}>{pres.status === "presented" ? "Closed" : "Live, updating"}</span>}
           </div>
         </div>
         <div className="exec-editor-actions">
+          {!readOnly && onSync && <button className="btn-ghost" disabled={syncing} onClick={runSync} title="Pull in new meetings and refresh the metrics and pipeline for this period">{syncing ? "Refreshing..." : "↻ Refresh from period"}</button>}
           <button className="btn-primary" onClick={onPresent}>Present</button>
           <button className="btn-ghost" onClick={() => copy(execPlainText(pres, blocks), "Update")}>Copy as text</button>
           <button className="btn-ghost" onClick={() => copy(execSlideText(pres, blocks), "Slides")}>Copy for slides</button>
           <button className="btn-ghost" onClick={() => window.print()}>Print</button>
           {!readOnly && (
             <>
+              {onCloseAndStartNew && pres.status !== "presented" && (
+                <button className="btn-ghost" onClick={() => { if (window.confirm("Close this period and start a new two-week update? This one is marked presented and kept.")) onCloseAndStartNew(pres); }}>Close period and start new</button>
+              )}
               <button
                 className="btn-ghost"
                 onClick={() => onUpdatePresentation(pres.id, { status: pres.status === "presented" ? "draft" : "presented" })}
               >
-                {pres.status === "presented" ? "Mark as draft" : "Mark as presented"}
+                {pres.status === "presented" ? "Reopen" : "Mark as presented"}
               </button>
               <button className="btn-ghost exec-action-danger" onClick={() => { if (window.confirm("Delete this update and all of its blocks?")) onDeletePresentation(pres.id); }}>Delete</button>
             </>
