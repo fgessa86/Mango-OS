@@ -1392,6 +1392,9 @@ export default function App() {
   // the Week in Review, which is a live auto-dashboard nobody edits.
   const [execPresentations, setExecPresentations] = useState([]);
   const [execBlocks, setExecBlocks] = useState([]);
+  const [execInitiatives, setExecInitiatives] = useState([]);
+  const [execTracked, setExecTracked] = useState([]);
+  const [execQuestions, setExecQuestions] = useState([]);
   const [execOpenId, setExecOpenId] = useState(null);
   const [execPresenting, setExecPresenting] = useState(false);
   const [execGenerating, setExecGenerating] = useState(false);
@@ -1460,7 +1463,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1490,6 +1493,9 @@ export default function App() {
         api("exec_blocks", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("discussion_points", "GET", null, "?select=*&order=created_at.asc").catch(() => []),
         api("top_of_mind", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("exec_initiatives", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("exec_tracked_institutions", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("exec_questions", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []); setTodoContacts(tdc || []);
@@ -1499,6 +1505,7 @@ export default function App() {
       setEventInstitutions(evinst || []); setEventContacts(evcon || []);
       setExecPresentations(xp || []); setExecBlocks(xb || []);
       setDiscussionPoints(dp || []); setTopOfMind(tom || []);
+      setExecInitiatives(xi || []); setExecTracked(xti || []); setExecQuestions(xq || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -4029,11 +4036,16 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
   const deleteExecPresentation = async (id) => {
     try {
-      // No guaranteed ON DELETE CASCADE, so blocks go first (same convention
-      // as every other delete in this app).
+      // No guaranteed ON DELETE CASCADE, so per-presentation children go first
+      // (same convention as every other delete in this app). exec_tracked
+      // persists across presentations, so it is deliberately NOT cascaded.
       await api("exec_blocks", "DELETE", null, `?presentation_id=eq.${id}`);
+      await api("exec_initiatives", "DELETE", null, `?presentation_id=eq.${id}`).catch(() => {});
+      await api("exec_questions", "DELETE", null, `?presentation_id=eq.${id}`).catch(() => {});
       await api("exec_presentations", "DELETE", null, `?id=eq.${id}`);
       setExecBlocks((prev) => prev.filter((b) => b.presentation_id !== id));
+      setExecInitiatives((prev) => prev.filter((x) => x.presentation_id !== id));
+      setExecQuestions((prev) => prev.filter((x) => x.presentation_id !== id));
       setExecPresentations((prev) => prev.filter((p) => p.id !== id));
       setExecOpenId((cur) => (cur === id ? null : cur));
       showToast("Update deleted");
@@ -4180,6 +4192,110 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       await Promise.all(next.map((n) => api("exec_blocks", "PATCH", { sort_order: n.sort_order }, `?id=eq.${n.id}`)));
       await touchPresentation(presentationId);
     } catch { showToast("Could not save the new order."); }
+  };
+
+  /* ---- Exec Initiatives (Working On / In the Works / Completed columns),
+     per-presentation, fully manual. All writes patch local state. ---- */
+  const execInitiativesFor = (pid) => execInitiatives.filter((x) => x.presentation_id === pid).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+  const addExecInitiative = async (presentationId, status, content = "") => {
+    try {
+      const siblings = execInitiatives.filter((x) => x.presentation_id === presentationId && x.status === status);
+      const sort_order = siblings.length ? Math.max(...siblings.map((x) => x.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("exec_initiatives", "POST", { presentation_id: presentationId, status, content: content ? plainTextToHtml(content) : "", sort_order });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setExecInitiatives((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not add item"); return null; }
+  };
+  const updateExecInitiative = async (id, patch) => {
+    try {
+      await api("exec_initiatives", "PATCH", patch, `?id=eq.${id}`);
+      setExecInitiatives((prev) => prev.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+    } catch { showToast("Could not save item"); }
+  };
+  const deleteExecInitiative = async (id) => {
+    try {
+      await api("exec_initiatives", "DELETE", null, `?id=eq.${id}`);
+      setExecInitiatives((prev) => prev.filter((x) => x.id !== id));
+    } catch { showToast("Could not delete item"); }
+  };
+  // Move an initiative to a column (status) at the end of that column, and/or
+  // reorder within a column: renumbers the target column densely.
+  const moveExecInitiative = async (id, status, orderedIds) => {
+    setExecInitiatives((prev) => prev.map((x) => {
+      if (x.id === id) x = { ...x, status };
+      const idx = orderedIds.indexOf(x.id);
+      return idx === -1 ? x : { ...x, sort_order: idx };
+    }));
+    try {
+      await api("exec_initiatives", "PATCH", { status }, `?id=eq.${id}`);
+      await Promise.all(orderedIds.map((oid, i) => api("exec_initiatives", "PATCH", { sort_order: i }, `?id=eq.${oid}`)));
+    } catch { showToast("Could not move item"); }
+  };
+
+  /* ---- Exec Tracked institutions: a PERSISTENT watchlist, not tied to any
+     presentation. Carries over week over week. ---- */
+  const addExecTracked = async (fks) => {
+    // Do not double-track the same institution.
+    const dup = execTracked.find((t) => t.is_active !== false && ((fks.deal_id && t.deal_id === fks.deal_id) || (fks.enabler_id && t.enabler_id === fks.enabler_id) || (fks.organization_id && t.organization_id === fks.organization_id)));
+    if (dup) { showToast("Already tracked"); return dup; }
+    try {
+      const sort_order = execTracked.length ? Math.max(...execTracked.map((t) => t.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("exec_tracked_institutions", "POST", { ...fks, custom_note: "", sort_order, is_active: true });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setExecTracked((prev) => [...prev, row]);
+      showToast("Added to tracking");
+      return row;
+    } catch { showToast("Could not track institution"); return null; }
+  };
+  const updateExecTracked = async (id, patch) => {
+    try {
+      await api("exec_tracked_institutions", "PATCH", patch, `?id=eq.${id}`);
+      setExecTracked((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+    } catch { showToast("Could not save"); }
+  };
+  const removeExecTracked = async (id) => {
+    try {
+      await api("exec_tracked_institutions", "DELETE", null, `?id=eq.${id}`);
+      setExecTracked((prev) => prev.filter((t) => t.id !== id));
+    } catch { showToast("Could not remove"); }
+  };
+  const reorderExecTracked = async (orderedIds) => {
+    setExecTracked((prev) => prev.map((t) => { const i = orderedIds.indexOf(t.id); return i === -1 ? t : { ...t, sort_order: i }; }));
+    try { await Promise.all(orderedIds.map((id, i) => api("exec_tracked_institutions", "PATCH", { sort_order: i }, `?id=eq.${id}`))); }
+    catch { showToast("Could not save the new order"); }
+  };
+
+  /* ---- Exec Questions for the team, per-presentation. ---- */
+  const execQuestionsFor = (pid) => execQuestions.filter((x) => x.presentation_id === pid).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+  const addExecQuestion = async (presentationId, content) => {
+    const text = (content || "").trim();
+    if (!text) return null;
+    try {
+      const siblings = execQuestions.filter((x) => x.presentation_id === presentationId);
+      const sort_order = siblings.length ? Math.max(...siblings.map((x) => x.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("exec_questions", "POST", { presentation_id: presentationId, content: text, is_resolved: false, sort_order });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setExecQuestions((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not add question"); return null; }
+  };
+  const updateExecQuestion = async (id, patch) => {
+    try {
+      await api("exec_questions", "PATCH", patch, `?id=eq.${id}`);
+      setExecQuestions((prev) => prev.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+    } catch { showToast("Could not save question"); }
+  };
+  const deleteExecQuestion = async (id) => {
+    try {
+      await api("exec_questions", "DELETE", null, `?id=eq.${id}`);
+      setExecQuestions((prev) => prev.filter((x) => x.id !== id));
+    } catch { showToast("Could not delete question"); }
+  };
+  const reorderExecQuestions = async (orderedIds) => {
+    setExecQuestions((prev) => prev.map((x) => { const i = orderedIds.indexOf(x.id); return i === -1 ? x : { ...x, sort_order: i }; }));
+    try { await Promise.all(orderedIds.map((id, i) => api("exec_questions", "PATCH", { sort_order: i }, `?id=eq.${id}`))); }
+    catch { showToast("Could not save the new order"); }
   };
 
   // "Extract tasks from outcome": reuses the voice-note digest prompt (it
@@ -4578,6 +4694,61 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setView("institution-sheet");
   };
   const openPerson = (id) => { setPersonSheetId(id); setInstitutionSheetKey(null); setView("person-sheet"); };
+
+  // ---- Exec Update: initiative link + tracked-institution resolution ----
+  // Options for an initiative's optional hyperlink: institutions, people, notes.
+  const execLinkOptions = [
+    ...dedupeInstitutionOptions({ deals, enablers, organizations, prefer: ["deal", "enabler", "organization"] }),
+    ...contacts.filter((c) => c.name).map((c) => ({ value: `contact:${c.id}`, label: c.name })),
+    ...notes.filter((n) => n.title).map((n) => ({ value: `note:${n.id}`, label: `Note: ${n.title}` })),
+  ];
+  // Institutions-only options for the tracking picker.
+  const execTrackOptions = dedupeInstitutionOptions({ deals, enablers, organizations, prefer: ["deal", "enabler", "organization"] });
+  // Resolve a stored initiative link to a display name and a navigation action.
+  const resolveExecLink = (linkType, linkId) => {
+    if (!linkType || !linkId) return null;
+    if (linkType === "contact") { const c = contacts.find((x) => x.id === linkId); return c ? { label: c.name, onOpen: () => openPerson(c.id) } : null; }
+    if (linkType === "note") { const n = notes.find((x) => x.id === linkId); return n ? { label: n.title || "Untitled note", onOpen: () => openNote(n.id) } : null; }
+    const inst = linkType === "deal" ? institutions.find((i) => i.dealId === linkId)
+      : linkType === "enabler" ? institutions.find((i) => i.enablerId === linkId)
+      : institutions.find((i) => i.orgId === linkId);
+    return inst ? { label: inst.name, onOpen: () => openInstitution(inst.name) } : null;
+  };
+  // Resolve a tracked row to a card: institution meta plus recent system
+  // updates (activities, notes, stage moves) since `sinceISO`.
+  const resolveTrackedCard = (t, sinceISO) => {
+    const inst = t.deal_id ? institutions.find((i) => i.dealId === t.deal_id)
+      : t.enabler_id ? institutions.find((i) => i.enablerId === t.enabler_id)
+      : institutions.find((i) => i.orgId === t.organization_id);
+    const since = sinceISO || new Date(Date.now() - 14 * 86400000).toISOString();
+    const updates = [];
+    if (inst) {
+      activities
+        .filter((a) => a.created_at >= since && ((inst.dealId && a.deal_id === inst.dealId) || (inst.enablerId && a.enabler_id === inst.enablerId) || (inst.orgId && a.organization_id === inst.orgId)) && !(a.type === "note" && /^Moved to /.test(a.description || "")))
+        .slice(0, 8)
+        .forEach((a) => updates.push({ kind: "activity", type: a.type, text: firstLine(cleanActivityText(a.description || "")), date: a.created_at }));
+      if (inst.dealId) {
+        buildStageTransitions(activities, deals)
+          .filter((tr) => tr.dealId === inst.dealId && tr.date >= since)
+          .forEach((tr) => updates.push({ kind: "stage", text: `Moved ${stageLabel(tr.fromStage)} to ${stageLabel(tr.toStage)}`, date: tr.date }));
+      }
+      notes
+        .filter((n) => (n.updated_at || n.created_at) >= since && ((inst.dealId && n.deal_id === inst.dealId) || (inst.enablerId && n.enabler_id === inst.enablerId) || (inst.orgId && n.organization_id === inst.orgId)))
+        .forEach((n) => updates.push({ kind: "note", text: n.title || "Untitled note", date: n.updated_at || n.created_at, noteId: n.id }));
+    }
+    updates.sort((a, b) => new Date(b.date) - new Date(a.date));
+    return {
+      id: t.id,
+      custom_note: t.custom_note || "",
+      inst,
+      name: inst?.name || "(institution not found)",
+      instKey: inst?.key || null,
+      typeMeta: inst?.type ? institutionTypeMeta(inst.type, customOptions) : null,
+      tier: inst?.deal?.tier && inst.deal.tier !== "Untiered" ? inst.deal.tier : null,
+      stage: inst?.stage || null,
+      updates: updates.slice(0, 10),
+    };
+  };
 
   // Navigate to whatever entity a mention chip references. One delegated
   // listener covers every chip on the page (rendered live in an editor, via
@@ -5346,6 +5517,27 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           refreshingPipelineId={refreshingPipelineId}
           onSync={syncExecPresentation}
           onCloseAndStartNew={closeExecPeriodAndStartNew}
+          initiativesFor={execInitiativesFor}
+          onAddInitiative={addExecInitiative}
+          onUpdateInitiative={updateExecInitiative}
+          onDeleteInitiative={deleteExecInitiative}
+          onMoveInitiative={moveExecInitiative}
+          execLinkOptions={execLinkOptions}
+          resolveExecLink={resolveExecLink}
+          trackedRows={execTracked}
+          resolveTrackedCard={resolveTrackedCard}
+          onAddTracked={addExecTracked}
+          onUpdateTrackedNote={(id, note) => updateExecTracked(id, { custom_note: note })}
+          onRemoveTracked={removeExecTracked}
+          onReorderTracked={reorderExecTracked}
+          execTrackOptions={execTrackOptions}
+          questionsFor={execQuestionsFor}
+          onAddQuestion={addExecQuestion}
+          onUpdateQuestion={updateExecQuestion}
+          onDeleteQuestion={deleteExecQuestion}
+          onReorderQuestions={reorderExecQuestions}
+          onOpenPerson={openPerson}
+          onOpenNote={openNote}
           onCleanupBlockers={cleanupExecBlockers}
           presenting={execPresenting}
           onPresent={() => setExecPresenting(true)}
@@ -6940,7 +7132,7 @@ function ExecAddBlock({ onAdd }) {
 // PRESENT MODE: a clean full-screen render of the visible blocks only, sized
 // for screen-share. Escape exits. Deliberately shows no controls at all, so
 // nothing editable is on screen while executives are watching.
-function ExecPresentView({ pres, blocks, onExit, onOpenInstitution }) {
+function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson, onOpenNote, initiatives = [], trackedCards = [], questions = [], resolveExecLink }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onExit(); };
     window.addEventListener("keydown", onKey);
@@ -6995,8 +7187,242 @@ function ExecPresentView({ pres, blocks, onExit, onOpenInstitution }) {
             </section>
           );
         })}
-        {visible.length === 0 && <div className="exec-present-empty">Nothing to present yet. Add or unhide some blocks.</div>}
+        {initiatives.length > 0 && (
+          <section className="exec-present-section">
+            <h2>Initiatives</h2>
+            <ExecInitiatives items={initiatives} readOnly presenting resolveLink={resolveExecLink} />
+          </section>
+        )}
+        {trackedCards.length > 0 && (
+          <section className="exec-present-section">
+            <h2>Tracking</h2>
+            <ExecTracking cards={trackedCards} readOnly presenting onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} />
+          </section>
+        )}
+        {questions.some((q) => !q.is_resolved) && (
+          <section className="exec-present-section exec-present-section-questions">
+            <h2>Questions for the Team</h2>
+            <ExecQuestions items={questions} readOnly presenting />
+          </section>
+        )}
+        {visible.length === 0 && initiatives.length === 0 && trackedCards.length === 0 && questions.length === 0 && <div className="exec-present-empty">Nothing to present yet. Add or unhide some blocks.</div>}
       </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   Exec Update: three curated sections that sit alongside the blocks.
+   Initiatives (3 columns, per-presentation), Tracking (persistent
+   institution watchlist), Questions for the team (per-presentation).
+   All editable only by Fahed; render clean and clickable read-only.
+   ============================================================ */
+const EXEC_INIT_COLUMNS = [
+  { id: "working_on", label: "Working On" },
+  { id: "in_the_works", label: "In the Works" },
+  { id: "completed", label: "Completed" },
+];
+
+// Rich text field for the exec sections: keeps a local draft and persists only
+// on blur (not per keystroke), matching the meeting-notes pattern, with a voice
+// dictation option in the edit toolbar.
+function ExecRichField({ value, onSave, readOnly, placeholder, showToast }) {
+  const [draft, setDraft] = useState(value || "");
+  useEffect(() => { setDraft(value || ""); }, [value]);
+  return (
+    <RichTextField value={draft} onChange={setDraft} onBlur={() => { if ((draft || "") !== (value || "")) onSave(draft); }}
+      mini placeholder={placeholder} readOnly={readOnly}
+      editExtras={<VoiceRecorder mode="plain" compact showToast={showToast} title="Dictate" onPlainText={(t) => setDraft((d) => `${d || ""}<div>${execEscapeHtml(t)}</div>`)} />} />
+  );
+}
+
+function ExecInitiativeAdd({ onAdd, showToast }) {
+  const [draft, setDraft] = useState("");
+  const [adding, setAdding] = useState(false);
+  const submit = async () => { const t = draft.trim(); if (!t || adding) return; setAdding(true); try { await onAdd(t); setDraft(""); } finally { setAdding(false); } };
+  return (
+    <div className="exec-init-add">
+      <input className="input" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } }} placeholder="Add an item..." />
+      <VoiceRecorder mode="plain" compact showToast={showToast} title="Dictate an item" onPlainText={(x) => setDraft((d) => (d ? `${d} ${x}` : x))} />
+      <button type="button" className="btn-sec" disabled={adding || !draft.trim()} onClick={submit}>Add</button>
+    </div>
+  );
+}
+
+function ExecInitiativeCard({ item, readOnly, onUpdate, onDelete, linkOptions, resolveLink, showToast, onDragStart, isDragging, onDropBefore }) {
+  const [linking, setLinking] = useState(false);
+  const link = resolveLink ? resolveLink(item.link_type, item.link_id) : null;
+  const setLink = (value) => {
+    if (!value) { onUpdate(item.id, { link_type: null, link_id: null }); setLinking(false); return; }
+    const i = value.indexOf(":"); const type = value.slice(0, i); const id = value.slice(i + 1);
+    onUpdate(item.id, { link_type: type, link_id: id }); setLinking(false);
+  };
+  return (
+    <div className={`exec-init-card ${isDragging ? "dragging" : ""}`}
+      draggable={!readOnly} onDragStart={readOnly ? undefined : onDragStart}
+      onDragOver={readOnly ? undefined : (e) => e.preventDefault()}
+      onDrop={readOnly ? undefined : (e) => { e.preventDefault(); e.stopPropagation(); onDropBefore(); }}>
+      {!readOnly && <span className="exec-init-drag" title="Drag to move or reorder">⠿</span>}
+      <div className="exec-init-card-body">
+        <ExecRichField value={item.content} onSave={(html) => onUpdate(item.id, { content: html })} readOnly={readOnly} placeholder="Describe this initiative..." showToast={showToast} />
+        {link ? (
+          <div className="exec-init-link">
+            <button type="button" className="exec-link-chip" onClick={link.onOpen}>{link.label}</button>
+            {!readOnly && <button type="button" className="exec-link-x" onClick={() => setLink("")} title="Remove link">✕</button>}
+          </div>
+        ) : (!readOnly && (linking
+          ? <div className="exec-init-linkpick"><EntityPicker placeholder="Link to institution, person, or note..." options={linkOptions} value="" onChange={setLink} /><button type="button" className="link-btn" onClick={() => setLinking(false)}>Cancel</button></div>
+          : <button type="button" className="link-btn exec-init-linkbtn" onClick={() => setLinking(true)}>🔗 Link entity</button>))}
+      </div>
+      {!readOnly && <button type="button" className="exec-init-del" onClick={() => onDelete(item.id)} title="Delete">✕</button>}
+    </div>
+  );
+}
+
+function ExecInitiatives({ items = [], readOnly = false, presenting = false, onAdd, onUpdate, onDelete, onMove, linkOptions = [], resolveLink, showToast }) {
+  const [dragId, setDragId] = useState(null);
+  const drop = (status, beforeId) => {
+    if (!dragId) return;
+    const col = items.filter((i) => i.status === status && i.id !== dragId).map((i) => i.id);
+    const at = beforeId ? col.indexOf(beforeId) : col.length;
+    col.splice(at === -1 ? col.length : at, 0, dragId);
+    onMove(dragId, status, col);
+    setDragId(null);
+  };
+  return (
+    <div className={`exec-init-cols ${presenting ? "exec-init-present" : ""}`}>
+      {EXEC_INIT_COLUMNS.map((col) => {
+        const colItems = items.filter((i) => i.status === col.id);
+        return (
+          <div key={col.id} className="exec-init-col"
+            onDragOver={readOnly ? undefined : (e) => e.preventDefault()}
+            onDrop={readOnly ? undefined : (e) => { e.preventDefault(); drop(col.id, null); }}>
+            <div className="exec-init-col-head">{col.label}<span className="exec-init-col-count">{colItems.length}</span></div>
+            <div className="exec-init-col-list">
+              {colItems.map((it) => (
+                <ExecInitiativeCard key={it.id} item={it} readOnly={readOnly} onUpdate={onUpdate} onDelete={onDelete}
+                  linkOptions={linkOptions} resolveLink={resolveLink} showToast={showToast}
+                  onDragStart={() => setDragId(it.id)} isDragging={dragId === it.id} onDropBefore={() => drop(col.id, it.id)} />
+              ))}
+              {colItems.length === 0 && <div className="exec-init-empty">Nothing here yet.</div>}
+            </div>
+            {!readOnly && <ExecInitiativeAdd onAdd={(text) => onAdd(col.id, text)} showToast={showToast} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ExecTracking({ cards = [], readOnly = false, presenting = false, onAdd, onUpdateNote, onRemove, onReorder, trackOptions = [], onOpenInstitution, onOpenNote, showToast }) {
+  const [dragId, setDragId] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const drop = (beforeId) => {
+    if (!dragId) return;
+    const ids = cards.map((c) => c.id).filter((id) => id !== dragId);
+    const at = beforeId ? ids.indexOf(beforeId) : ids.length;
+    ids.splice(at === -1 ? ids.length : at, 0, dragId);
+    onReorder(ids); setDragId(null);
+  };
+  const pick = (value) => { if (!value) { setAdding(false); return; } const i = value.indexOf(":"); const type = value.slice(0, i); const id = value.slice(i + 1); onAdd({ [`${type}_id`]: id }); setAdding(false); };
+  return (
+    <div className={`exec-track ${presenting ? "exec-track-present" : ""}`}>
+      {!readOnly && (adding
+        ? <div className="exec-track-add"><EntityPicker placeholder="Search institutions to track..." options={trackOptions} value="" onChange={pick} /><button type="button" className="link-btn" onClick={() => setAdding(false)}>Cancel</button></div>
+        : <button type="button" className="btn-sec exec-track-addbtn" onClick={() => setAdding(true)}>+ Add institution to track</button>)}
+      {cards.length === 0 && <div className="exec-track-empty">No institutions tracked yet. Add priority accounts to follow them period over period.</div>}
+      <div className="exec-track-list">
+        {cards.map((card) => {
+          const tierMeta = card.tier ? DEAL_TIERS.find((t) => t.id === card.tier) : null;
+          const stageMeta = card.stage ? STAGES.find((s) => s.id === card.stage) : null;
+          return (
+            <div key={card.id} className="exec-track-card"
+              draggable={!readOnly} onDragStart={readOnly ? undefined : () => setDragId(card.id)}
+              onDragOver={readOnly ? undefined : (e) => e.preventDefault()} onDrop={readOnly ? undefined : (e) => { e.preventDefault(); drop(card.id); }}>
+              <div className="exec-track-head">
+                {!readOnly && <span className="exec-init-drag" title="Drag to reorder">⠿</span>}
+                <button type="button" className="exec-track-name" onClick={() => card.instKey && onOpenInstitution(card.name)}>{card.name}</button>
+                {card.typeMeta && <span className="badge" style={{ background: card.typeMeta.color + "22", color: card.typeMeta.color, border: `1px solid ${card.typeMeta.color}44` }}>{card.typeMeta.label}</span>}
+                {tierMeta && <span className="tier-badge" style={{ background: tierMeta.bg, color: tierMeta.fg }}>{tierMeta.label}</span>}
+                {stageMeta && <span className="badge" style={{ background: stageMeta.color + "22", color: stageMeta.color, border: `1px solid ${stageMeta.color}44` }}>{stageMeta.label}</span>}
+                {!readOnly && <button type="button" className="exec-track-remove" onClick={() => onRemove(card.id)} title="Stop tracking">✕</button>}
+              </div>
+              {card.updates.length > 0 && (
+                <div className="exec-track-updates">
+                  <div className="exec-track-updates-label">Recent updates</div>
+                  {card.updates.map((u, i) => (
+                    <div key={i} className="exec-track-update">
+                      <span className="exec-track-update-date">{formatDate(u.date)}</span>
+                      {u.kind === "note"
+                        ? <button type="button" className="exec-link-chip" onClick={() => onOpenNote(u.noteId)}>Note: {u.text}</button>
+                        : <span className="exec-track-update-text">{u.kind === "stage" ? "↑ " : ""}<MentionText text={u.text} /></span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="exec-track-commentary">
+                <div className="exec-track-updates-label">Your commentary</div>
+                <ExecRichField value={card.custom_note} onSave={(html) => onUpdateNote(card.id, html)} readOnly={readOnly} placeholder="Your framing for the executives..." showToast={showToast} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ExecQuestions({ items = [], readOnly = false, presenting = false, onAdd, onUpdate, onDelete, onReorder, showToast }) {
+  const [draft, setDraft] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [dragId, setDragId] = useState(null);
+  const [showResolved, setShowResolved] = useState(false);
+  const open = items.filter((q) => !q.is_resolved);
+  const resolved = items.filter((q) => q.is_resolved);
+  const submit = async () => { const t = draft.trim(); if (!t || adding) return; setAdding(true); try { await onAdd(t); setDraft(""); } finally { setAdding(false); } };
+  const drop = (beforeId) => {
+    if (!dragId) return;
+    const ids = open.map((q) => q.id).filter((id) => id !== dragId);
+    const at = beforeId ? ids.indexOf(beforeId) : ids.length;
+    ids.splice(at === -1 ? ids.length : at, 0, dragId);
+    onReorder(ids); setDragId(null);
+  };
+  return (
+    <div className={`exec-questions ${presenting ? "exec-questions-present" : ""}`}>
+      {!readOnly && (
+        <div className="exec-q-add">
+          <input className="input" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } }} placeholder="Ask the team a question..." />
+          <VoiceRecorder mode="plain" compact showToast={showToast} title="Dictate a question" onPlainText={(x) => setDraft((d) => (d ? `${d} ${x}` : x))} />
+          <button type="button" className="btn-sec" disabled={adding || !draft.trim()} onClick={submit}>Add</button>
+        </div>
+      )}
+      {open.length === 0 && resolved.length === 0 && <div className="exec-q-empty">No questions yet.</div>}
+      <div className="exec-q-list">
+        {open.map((q) => (
+          <div key={q.id} className="exec-q-row"
+            draggable={!readOnly} onDragStart={readOnly ? undefined : () => setDragId(q.id)}
+            onDragOver={readOnly ? undefined : (e) => e.preventDefault()} onDrop={readOnly ? undefined : (e) => { e.preventDefault(); drop(q.id); }}>
+            {!readOnly && <span className="exec-init-drag" title="Drag to reorder">⠿</span>}
+            <input type="checkbox" className="exec-q-check" checked={false} disabled={readOnly} onChange={() => onUpdate(q.id, { is_resolved: true })} title="Mark resolved" />
+            <div className="exec-q-text"><ExecRichField value={q.content} onSave={(html) => onUpdate(q.id, { content: html })} readOnly={readOnly} placeholder="Question..." showToast={showToast} /></div>
+            {!readOnly && <button type="button" className="exec-init-del" onClick={() => onDelete(q.id)} title="Delete">✕</button>}
+          </div>
+        ))}
+      </div>
+      {resolved.length > 0 && (
+        <div className="exec-q-resolved">
+          <button type="button" className="dp-discussed-toggle" onClick={() => setShowResolved((v) => !v)}>
+            <span className={`exec-chevron ${showResolved ? "open" : ""}`}>›</span> Resolved ({resolved.length})
+          </button>
+          {showResolved && resolved.map((q) => (
+            <div key={q.id} className="exec-q-row exec-q-done">
+              <input type="checkbox" checked disabled={readOnly} onChange={() => onUpdate(q.id, { is_resolved: false })} title="Reopen" />
+              <div className="exec-q-text"><RichTextView value={q.content} /></div>
+              {!readOnly && <button type="button" className="exec-init-del" onClick={() => onDelete(q.id)} title="Delete">✕</button>}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -7007,6 +7433,10 @@ function ExecUpdateTab({
   onAddBlock, onUpdateBlock, onDeleteBlock, onReorder,
   onRegenerateSection, regeneratingSection, onOpenEvent, onOpenInstitution,
   onRefreshPipeline, refreshingPipelineId, onCleanupBlockers,
+  initiativesFor, onAddInitiative, onUpdateInitiative, onDeleteInitiative, onMoveInitiative, execLinkOptions = [], resolveExecLink,
+  trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNote, onRemoveTracked, onReorderTracked, execTrackOptions = [],
+  questionsFor, onAddQuestion, onUpdateQuestion, onDeleteQuestion, onReorderQuestions,
+  onOpenPerson, onOpenNote,
   onSync, onCloseAndStartNew,
   presenting, onPresent, onExitPresent, showToast,
 }) {
@@ -7015,6 +7445,15 @@ function ExecUpdateTab({
   const [syncing, setSyncing] = useState(false);
   const pres = presentations.find((p) => p.id === openId) || null;
   const blocks = pres ? blocksFor(pres.id) : [];
+  // The three curated sections for the open presentation. Tracked institutions
+  // persist across presentations; they are resolved to cards against this
+  // period's start so "recent updates" means since the period began.
+  const initiatives = pres ? initiativesFor(pres.id) : [];
+  const questions = pres ? questionsFor(pres.id) : [];
+  const sinceISO = pres?.period_start ? new Date(`${pres.period_start}T00:00:00`).toISOString() : null;
+  const trackedCards = (trackedRows || []).filter((t) => t.is_active !== false)
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+    .map((t) => resolveTrackedCard(t, sinceISO));
 
   // A living document: on open, quietly pull in what changed during the period
   // (new external meetings, refreshed metrics and pipeline), once per open.
@@ -7032,7 +7471,11 @@ function ExecUpdateTab({
     catch { showToast("Could not copy"); }
   };
 
-  if (presenting && pres) return <ExecPresentView pres={pres} blocks={blocks} onExit={onExitPresent} onOpenInstitution={onOpenInstitution} />;
+  if (presenting && pres) return (
+    <ExecPresentView pres={pres} blocks={blocks} onExit={onExitPresent}
+      onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} onOpenNote={onOpenNote}
+      initiatives={initiatives} trackedCards={trackedCards} questions={questions} resolveExecLink={resolveExecLink} />
+  );
 
   // LIST VIEW
   if (!pres) {
@@ -7185,6 +7628,30 @@ function ExecUpdateTab({
       </div>
 
       {!readOnly && <ExecAddBlock onAdd={(fields) => onAddBlock(pres.id, fields)} />}
+
+      {/* Three curated sections alongside the blocks. Editable only by Fahed;
+          render clean and clickable in the read-only executive view. */}
+      <div className="exec-extra-section">
+        <div className="exec-extra-head">Initiatives</div>
+        <ExecInitiatives items={initiatives} readOnly={readOnly}
+          onAdd={(status, text) => onAddInitiative(pres.id, status, text)}
+          onUpdate={onUpdateInitiative} onDelete={onDeleteInitiative} onMove={onMoveInitiative}
+          linkOptions={execLinkOptions} resolveLink={resolveExecLink} showToast={showToast} />
+      </div>
+
+      <div className="exec-extra-section">
+        <div className="exec-extra-head">Tracking</div>
+        <ExecTracking cards={trackedCards} readOnly={readOnly}
+          onAdd={onAddTracked} onUpdateNote={onUpdateTrackedNote} onRemove={onRemoveTracked} onReorder={onReorderTracked}
+          trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
+      </div>
+
+      <div className="exec-extra-section">
+        <div className="exec-extra-head">Questions for the Team</div>
+        <ExecQuestions items={questions} readOnly={readOnly}
+          onAdd={(text) => onAddQuestion(pres.id, text)} onUpdate={onUpdateQuestion} onDelete={onDeleteQuestion} onReorder={onReorderQuestions}
+          showToast={showToast} />
+      </div>
     </div>
   );
 }

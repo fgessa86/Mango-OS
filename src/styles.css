@@ -1877,6 +1877,77 @@ body.exec-presenting-body { overflow: hidden; }
 .exec-living-tag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: #10B981; background: #10B98118; border: 1px solid #10B98140; border-radius: 999px; padding: 1px 8px; }
 .exec-living-tag.closed { color: var(--muted); background: var(--card); border-color: var(--border); }
 
+/* ---- Exec Update curated sections: Initiatives, Tracking, Questions ---- */
+.exec-extra-section { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 16px; }
+.exec-extra-head { font-size: 15px; font-weight: 750; color: var(--text); margin-bottom: 12px; }
+.exec-link-chip { border: none; background: #E4EDFB; color: #2A6FDB; font-family: inherit; font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; cursor: pointer; }
+.exec-link-chip:hover { text-decoration: underline; }
+.exec-link-x { border: none; background: none; cursor: pointer; color: var(--muted); font-size: 12px; padding: 0 2px; }
+
+/* Initiatives: three columns. */
+.exec-init-cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.exec-init-col { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.exec-init-col-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); padding: 2px 2px 6px; border-bottom: 1px solid var(--border); }
+.exec-init-col-count { font-size: 11px; color: var(--muted); }
+.exec-init-col-list { display: flex; flex-direction: column; gap: 8px; min-height: 24px; }
+.exec-init-empty { font-size: 12px; color: var(--muted); padding: 6px 2px; }
+.exec-init-card { display: flex; align-items: flex-start; gap: 6px; background: var(--card); border: 1px solid var(--border); border-radius: 9px; padding: 8px; }
+.exec-init-card.dragging { opacity: .5; }
+.exec-init-drag { cursor: grab; color: var(--muted-2); font-size: 13px; line-height: 1.4; flex-shrink: 0; }
+.exec-init-card-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.exec-init-link { display: flex; align-items: center; gap: 4px; }
+.exec-init-linkbtn { font-size: 11.5px; }
+.exec-init-linkpick { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.exec-init-del { border: none; background: none; cursor: pointer; color: var(--muted); font-size: 12px; padding: 2px 4px; opacity: .6; flex-shrink: 0; }
+.exec-init-del:hover { opacity: 1; color: #EF4444; }
+.exec-init-add { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.exec-init-add .input { flex: 1; min-width: 0; font-size: 12.5px; }
+
+/* Tracking: persistent watchlist cards. */
+.exec-track-addbtn { margin-bottom: 12px; }
+.exec-track-add { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.exec-track-empty { font-size: 12.5px; color: var(--muted); }
+.exec-track-list { display: flex; flex-direction: column; gap: 12px; }
+.exec-track-card { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 12px 14px; }
+.exec-track-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; }
+.exec-track-name { border: none; background: none; padding: 0; font-family: inherit; font-size: 15px; font-weight: 700; color: #2A6FDB; cursor: pointer; }
+.exec-track-name:hover { text-decoration: underline; }
+.exec-track-remove { margin-left: auto; border: none; background: none; cursor: pointer; color: var(--muted); font-size: 13px; padding: 2px 4px; opacity: .6; }
+.exec-track-remove:hover { opacity: 1; color: #EF4444; }
+.exec-track-updates { margin-top: 10px; padding: 8px 10px; background: var(--card); border-radius: 9px; }
+.exec-track-updates-label { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 4px; }
+.exec-track-update { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; color: var(--text-2); padding: 2px 0; }
+.exec-track-update-date { font-size: 11px; color: var(--muted); flex-shrink: 0; min-width: 44px; }
+.exec-track-update-text { min-width: 0; }
+.exec-track-commentary { margin-top: 10px; }
+
+/* Questions for the team. */
+.exec-q-add { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.exec-q-add .input { flex: 1; min-width: 0; }
+.exec-q-empty { font-size: 12.5px; color: var(--muted); }
+.exec-q-list { display: flex; flex-direction: column; gap: 6px; }
+.exec-q-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
+.exec-q-row .exec-init-drag { align-self: center; }
+.exec-q-check { flex-shrink: 0; width: 16px; height: 16px; cursor: pointer; }
+.exec-q-text { flex: 1; min-width: 0; }
+.exec-q-done .exec-q-text { opacity: .6; text-decoration: line-through; }
+.exec-q-resolved { margin-top: 8px; }
+
+/* Present mode sizing for the three sections. */
+.exec-present .exec-init-cols { gap: 16px; }
+.exec-present .exec-init-col { background: transparent; }
+.exec-present .exec-init-card { padding: 10px 12px; }
+.exec-present .exec-track-name { font-size: 18px; }
+.exec-present .exec-track-update { font-size: 14px; }
+.exec-present .exec-q-row { padding: 10px 12px; font-size: 16px; }
+/* Questions read as "what I need from you": a highlighted panel in Present. */
+.exec-present-section-questions h2 { color: #B77400; }
+.exec-present-section-questions .exec-questions { border: 2px solid var(--mango, #F5A623); background: #F5A6230d; border-radius: 12px; padding: 16px; }
+
+@media (max-width: 768px) {
+  .exec-init-cols { grid-template-columns: 1fr; }
+}
+
 /* Notes surfaced away from the Notes tab render as compact openable cards
    (calendar event panel, institution and person sheets), never as a wall of
    text in someone else's view. */
