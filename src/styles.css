@@ -1877,6 +1877,38 @@ body.exec-presenting-body { overflow: hidden; }
 .exec-living-tag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: #10B981; background: #10B98118; border: 1px solid #10B98140; border-radius: 999px; padding: 1px 8px; }
 .exec-living-tag.closed { color: var(--muted); background: var(--card); border-color: var(--border); }
 
+/* Full-width Pipeline breakout: the pipeline section fills the whole content
+   area (editor) and the whole viewport (Present), so every stage column is
+   visible side by side; stages still scroll horizontally if they overflow. The
+   editor content column is flush-left in .main (which sits after the sidebar),
+   so the pipeline widens to the viewport minus the sidebar. */
+.exec-editor { --exec-side: 236px; }
+@media (max-width: 900px) { .exec-editor { --exec-side: 76px; } }
+@media (max-width: 768px) { .exec-editor { --exec-side: 0px; } }
+.exec-block-pipeline {
+  width: calc(100vw - var(--exec-side, 236px));
+  max-width: calc(100vw - var(--exec-side, 236px));
+  align-self: flex-start;
+  box-sizing: border-box;
+  padding-right: 24px;
+}
+@media (max-width: 768px) {
+  .exec-block-pipeline { width: 100%; max-width: 100%; padding-right: 0; }
+}
+/* Present mode is a full-screen overlay (no sidebar), so the pipeline section
+   breaks out to the full viewport width, centered. */
+.exec-present-section-pipeline {
+  position: relative;
+  width: 100vw;
+  left: 50%;
+  margin-left: -50vw;
+  padding-left: 56px; padding-right: 56px;
+  box-sizing: border-box;
+}
+@media (max-width: 768px) {
+  .exec-present-section-pipeline { width: 100%; left: 0; margin-left: 0; padding-left: 0; padding-right: 0; }
+}
+
 /* ---- Exec Update curated sections: Initiatives, Tracking, Questions ---- */
 .exec-extra-section { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 16px; }
 .exec-extra-head { font-size: 15px; font-weight: 750; color: var(--text); margin-bottom: 12px; }

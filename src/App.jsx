@@ -8,7 +8,7 @@ import VoiceRecorder from "./VoiceRecorder";
 import RichTextEditor, { RichTextView, RichTextField } from "./RichTextEditor";
 import { stripHtmlToText, isContentEmpty, toDisplayHtml, looksLikeHtml, plainTextToHtml } from "./richtext";
 import MentionEditor, { MentionText, MentionContext, MentionField } from "./MentionEditor";
-import { extractMentionRefs, mentionsToPlainText, detectFullNameMentions } from "./mentions";
+import { extractMentionRefs, mentionsToPlainText, detectFullNameMentions, mentionChipHtml } from "./mentions";
 import "./styles.css";
 
 // Boss View (?view=boss) renders the full app in read-only mode: same layout and
@@ -450,13 +450,16 @@ function FormattedActivityBody({ lines }) {
 // The Executive Update is always drafted with these five sections, in this
 // order, even when data is thin: no section is ever left missing. `regenerable`
 // marks sections whose header shows a "Regenerate" control.
+// Canonical order of the exec update's BLOCK sections. The full top-to-bottom
+// deck interleaves these with the three curated sections (Tracking, Initiatives,
+// Questions) which are not blocks: metrics, pipeline, new_relationships, then
+// Tracking / Initiatives / Questions, then meetings at the very bottom (the
+// editor and Present mode render meetings after the curated sections).
 const EXEC_SECTIONS = [
   { id: "metrics", label: "Headline Metrics", regenerable: true },
   { id: "pipeline", label: "Pipeline", regenerable: true },
+  { id: "new_relationships", label: "New Relationships", regenerable: true },
   { id: "meetings", label: "Meeting Summaries", regenerable: true },
-  { id: "conclusions", label: "Conclusions", regenerable: true },
-  { id: "next_up", label: "Next Up", regenerable: true },
-  { id: "blockers", label: "Blockers and Asks", regenerable: true },
 ];
 const execSectionLabel = (id) => EXEC_SECTIONS.find((s) => s.id === id)?.label || id || "Other";
 const execSectionOrder = (id) => { const i = EXEC_SECTIONS.findIndex((s) => s.id === id); return i === -1 ? EXEC_SECTIONS.length : i; };
@@ -3821,6 +3824,36 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
   // Reads across the whole window. Falls back to editable scaffolding bullets
   // (never nothing) when the AI is unavailable or the data is thin.
+  // People and institutions added to the system during the period (same logic
+  // as the Week in Review's New Relationships), external only (is_internal
+  // excluded). Names are rendered as clickable mention chips so an executive can
+  // open the sheet; the block is a normal item, editable and hideable.
+  const buildNewRelationshipsBlocks = (startISO, endISO) => {
+    const header = { block_type: "header", section: "new_relationships", title: "New Relationships", content: null };
+    const inRange = (d) => d && d >= startISO && d <= endISO;
+    const ctx = { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles };
+    const esc = (s) => execEscapeHtml(s);
+    const rows = [];
+    contacts.filter((c) => inRange(c.created_at) && !c.is_internal && c.name).forEach((c) => {
+      const roles = resolveContactRoles(c, ctx);
+      const primary = roles.find((r) => r.is_primary) || roles[0];
+      const inst = primary?.institutionName || c.company || "";
+      const chip = mentionChipHtml({ name: c.name, type: "person", id: c.id });
+      const meta = [c.role, inst].filter(Boolean).join(", ");
+      rows.push(`<li>${chip}${meta ? ` ${esc(`(${meta})`)}` : ""} ${esc(`- added ${formatDate(c.created_at)}`)}</li>`);
+    });
+    organizations.filter((o) => inRange(o.created_at) && !o.is_internal && o.name).forEach((o) => {
+      const inst = institutions.find((i) => i.orgId === o.id);
+      const linkType = inst?.dealId ? "deal" : inst?.enablerId ? "enabler" : "organization";
+      const linkId = inst?.dealId || inst?.enablerId || o.id;
+      const chip = mentionChipHtml({ name: o.name, type: linkType, id: linkId });
+      const typeLabel = o.type ? institutionTypeMeta(o.type, customOptions).label : "";
+      rows.push(`<li>${chip}${typeLabel ? ` ${esc(`(${typeLabel})`)}` : ""} ${esc(`- added ${formatDate(o.created_at)}`)}</li>`);
+    });
+    const content = rows.length ? `<ul>${rows.join("")}</ul>` : "<div>No new people or institutions added this period.</div>";
+    return [header, { block_type: "item", section: "new_relationships", title: null, content }];
+  };
+
   const buildConclusionsBlocks = async (startISO, endISO) => {
     const header = { block_type: "header", section: "conclusions", title: "Conclusions", content: null };
     let bullets = [];
@@ -3892,20 +3925,17 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     return [header, { block_type: "commentary", section: "blockers", title: null, content }];
   };
 
-  // Runs every section builder in canonical order and returns a flat payload
-  // list. Meetings and conclusions run in parallel since both hit the API.
+  // Runs the block-section builders in canonical order and returns a flat
+  // payload list. The three curated sections (Tracking, Initiatives, Questions)
+  // are not blocks; the editor and Present mode slot them in between
+  // new_relationships and meetings, which is why meetings is generated last.
   const buildAllExecSections = async (startISO, endISO) => {
-    const [meetingB, conclB] = await Promise.all([
-      buildMeetingBlocks(startISO, endISO),
-      buildConclusionsBlocks(startISO, endISO),
-    ]);
+    const meetingB = await buildMeetingBlocks(startISO, endISO);
     return [
       ...buildMetricsBlocks(startISO, endISO),
       ...buildPipelineBlocks(startISO, endISO),
+      ...buildNewRelationshipsBlocks(startISO, endISO),
       ...meetingB,
-      ...conclB,
-      ...buildNextUpBlocks(),
-      ...buildBlockersBlocks(),
     ];
   };
 
@@ -3971,7 +4001,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     const builders = {
       metrics: async () => buildMetricsBlocks(startISO, endISO),
       pipeline: async () => buildPipelineBlocks(startISO, endISO),
+      new_relationships: async () => buildNewRelationshipsBlocks(startISO, endISO),
       meetings: () => buildMeetingBlocks(startISO, endISO),
+      // Legacy sections kept so their Regenerate still works on older decks.
       conclusions: () => buildConclusionsBlocks(startISO, endISO),
       next_up: async () => buildNextUpBlocks(),
       blockers: async () => buildBlockersBlocks(),
@@ -4130,6 +4162,13 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         snap.hidden = prevHidden.filter((id) => liveIds.has(id));
         const content = JSON.stringify(snap);
         if (content !== pipeBlock.content) patches.push({ id: pipeBlock.id, patch: { content } });
+      }
+
+      // 3. Refresh the New Relationships list (auto-pulled for the period).
+      const nrBlock = existing.find((b) => b.section === "new_relationships" && b.block_type === "item");
+      if (nrBlock) {
+        const nr = buildNewRelationshipsBlocks(startISO, endISO).find((b) => b.block_type === "item");
+        if (nr && nr.content !== nrBlock.content) patches.push({ id: nrBlock.id, patch: { content: nr.content } });
       }
 
       for (const p of patches) { await api("exec_blocks", "PATCH", p.patch, `?id=eq.${p.id}`); touched++; }
@@ -7149,6 +7188,39 @@ function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson
     else groups[groups.length - 1].items.push(b);
   });
 
+  const renderGroup = (g, i) => {
+    const metrics = g.items.filter((b) => b.block_type === "metric");
+    const rest = g.items.filter((b) => b.block_type !== "metric");
+    const secId = g.header?.section || g.items[0]?.section;
+    // The Pipeline section breaks out to full browser width so every stage is
+    // readable side by side.
+    return (
+      <section key={i} className={`exec-present-section ${secId === "blockers" ? "exec-present-section-blockers" : ""} ${secId === "pipeline" ? "exec-present-section-pipeline" : ""}`}>
+        {g.header && <h2>{g.header.title || execSectionLabel(g.header.section)}</h2>}
+        {metrics.length > 0 && (
+          <div className="exec-present-metrics">
+            {metrics.map((m) => (
+              <div key={m.id} className="exec-present-metric">
+                <div className="exec-present-metric-value">{m.content}</div>
+                <div className="exec-present-metric-label">{m.title}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        {rest.map((b) => (
+          <div key={b.id} className={`exec-present-item ${b.block_type === "commentary" ? "exec-present-commentary" : ""}`}>
+            {b.title && <div className="exec-present-item-title">{b.title}</div>}
+            {b.block_type === "pipeline"
+              ? <ExecPipelineBody content={b.content} presenting onOpenInstitution={onOpenInstitution} />
+              : b.block_type === "meeting"
+                ? <ExecMeetingBody content={b.content} presenting />
+                : b.content && <RichTextView value={b.content} className="exec-present-item-body" />}
+          </div>
+        ))}
+      </section>
+    );
+  };
+
   return (
     <div className="exec-present">
       <button type="button" className="exec-present-exit" onClick={onExit} title="Exit presentation (Esc)">✕</button>
@@ -7157,46 +7229,19 @@ function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson
           <h1>{pres.title || "Executive Update"}</h1>
           <div className="exec-present-period">{formatDate(pres.period_start)} to {formatDate(pres.period_end)}</div>
         </header>
-        {groups.map((g, i) => {
-          const metrics = g.items.filter((b) => b.block_type === "metric");
-          const rest = g.items.filter((b) => b.block_type !== "metric");
-          const secId = g.header?.section || g.items[0]?.section;
-          return (
-            <section key={i} className={`exec-present-section ${secId === "blockers" ? "exec-present-section-blockers" : ""}`}>
-              {g.header && <h2>{g.header.title || execSectionLabel(g.header.section)}</h2>}
-              {metrics.length > 0 && (
-                <div className="exec-present-metrics">
-                  {metrics.map((m) => (
-                    <div key={m.id} className="exec-present-metric">
-                      <div className="exec-present-metric-value">{m.content}</div>
-                      <div className="exec-present-metric-label">{m.title}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {rest.map((b) => (
-                <div key={b.id} className={`exec-present-item ${b.block_type === "commentary" ? "exec-present-commentary" : ""}`}>
-                  {b.title && <div className="exec-present-item-title">{b.title}</div>}
-                  {b.block_type === "pipeline"
-                    ? <ExecPipelineBody content={b.content} presenting onOpenInstitution={onOpenInstitution} />
-                    : b.block_type === "meeting"
-                      ? <ExecMeetingBody content={b.content} presenting />
-                      : b.content && <RichTextView value={b.content} className="exec-present-item-body" />}
-                </div>
-              ))}
-            </section>
-          );
-        })}
+        {/* Non-meeting block groups first (metrics, pipeline, new relationships),
+            then the curated sections, then meetings at the bottom. */}
+        {groups.filter((g) => (g.header?.section || g.items[0]?.section) !== "meetings").map(renderGroup)}
+        {trackedCards.length > 0 && (
+          <section className="exec-present-section">
+            <h2>Tracking by Institution</h2>
+            <ExecTracking cards={trackedCards} readOnly presenting onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} />
+          </section>
+        )}
         {initiatives.length > 0 && (
           <section className="exec-present-section">
             <h2>Initiatives</h2>
             <ExecInitiatives items={initiatives} readOnly presenting resolveLink={resolveExecLink} />
-          </section>
-        )}
-        {trackedCards.length > 0 && (
-          <section className="exec-present-section">
-            <h2>Tracking</h2>
-            <ExecTracking cards={trackedCards} readOnly presenting onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} />
           </section>
         )}
         {questions.some((q) => !q.is_resolved) && (
@@ -7205,6 +7250,7 @@ function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson
             <ExecQuestions items={questions} readOnly presenting />
           </section>
         )}
+        {groups.filter((g) => (g.header?.section || g.items[0]?.section) === "meetings").map(renderGroup)}
         {visible.length === 0 && initiatives.length === 0 && trackedCards.length === 0 && questions.length === 0 && <div className="exec-present-empty">Nothing to present yet. Add or unhide some blocks.</div>}
       </div>
     </div>
@@ -7539,6 +7585,32 @@ function ExecUpdateTab({
     setDragId(null);
   };
 
+  // One block, either the read-only static render (Boss View) or the editable
+  // ExecBlockRow. Used to render the non-meeting and meeting groups separately,
+  // with the three curated sections slotted between them.
+  const renderBlock = (b) => readOnly ? (
+    <div key={b.id} className={`exec-block exec-block-${b.block_type} ${b.is_hidden ? "exec-block-hidden" : ""}`}>
+      <div className="exec-block-body">
+        {b.block_type === "header" ? <div className="exec-block-header-text">{b.title || execSectionLabel(b.section)}</div>
+          : b.block_type === "metric" ? <div className="exec-metric-inline"><span className="exec-metric-value">{b.content}</span><span className="exec-metric-label">{b.title}</span></div>
+          : <>{b.title && <div className="exec-block-title">{b.title}</div>}{b.block_type === "pipeline" ? <ExecPipelineBody content={b.content} onOpenInstitution={onOpenInstitution} /> : b.block_type === "meeting" ? <ExecMeetingBody content={b.content} /> : b.content && <RichTextView value={b.content} className="exec-block-content" />}</>}
+      </div>
+    </div>
+  ) : (
+    <ExecBlockRow
+      key={b.id} block={b} onUpdate={onUpdateBlock} onDelete={onDeleteBlock}
+      isDragging={dragId === b.id} onDragStart={() => setDragId(b.id)} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); onDrop(b.id); }}
+      onMove={move} canMoveUp={blocks.indexOf(b) > 0} canMoveDown={blocks.indexOf(b) < blocks.length - 1}
+      onRegenerate={(section) => onRegenerateSection(pres, section)} regenerating={regeneratingSection}
+      onOpenEvent={onOpenEvent} onOpenInstitution={onOpenInstitution}
+      onRefreshPipeline={onRefreshPipeline} refreshingPipeline={refreshingPipelineId === b.id}
+      onCleanupBlockers={onCleanupBlockers} showToast={showToast}
+    />
+  );
+  // Meetings sit at the very bottom, after the curated sections.
+  const nonMeetingBlocks = blocks.filter((b) => b.section !== "meetings");
+  const meetingBlocks = blocks.filter((b) => b.section === "meetings");
+
   return (
     <div className="exec-tab exec-editor">
       <div className="page-head exec-editor-head">
@@ -7590,47 +7662,20 @@ function ExecUpdateTab({
         </div>
       </div>
 
+      {/* Top-to-bottom order: metrics, pipeline, new relationships (blocks),
+          then Tracking / Initiatives / Questions (curated), then meetings. */}
       <div className="exec-blocks">
         {blocks.length === 0 && <div className="empty-small">No blocks yet. Add one below.</div>}
-        {blocks.map((b) => (
-          readOnly ? (
-            <div key={b.id} className={`exec-block exec-block-${b.block_type} ${b.is_hidden ? "exec-block-hidden" : ""}`}>
-              <div className="exec-block-body">
-                {b.block_type === "header" ? <div className="exec-block-header-text">{b.title || execSectionLabel(b.section)}</div>
-                  : b.block_type === "metric" ? <div className="exec-metric-inline"><span className="exec-metric-value">{b.content}</span><span className="exec-metric-label">{b.title}</span></div>
-                  : <>{b.title && <div className="exec-block-title">{b.title}</div>}{b.block_type === "pipeline" ? <ExecPipelineBody content={b.content} onOpenInstitution={onOpenInstitution} /> : b.block_type === "meeting" ? <ExecMeetingBody content={b.content} /> : b.content && <RichTextView value={b.content} className="exec-block-content" />}</>}
-              </div>
-            </div>
-          ) : (
-            <ExecBlockRow
-              key={b.id}
-              block={b}
-              onUpdate={onUpdateBlock}
-              onDelete={onDeleteBlock}
-              isDragging={dragId === b.id}
-              onDragStart={() => setDragId(b.id)}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => { e.preventDefault(); onDrop(b.id); }}
-              onMove={move}
-              canMoveUp={blocks.indexOf(b) > 0}
-              canMoveDown={blocks.indexOf(b) < blocks.length - 1}
-              onRegenerate={(section) => onRegenerateSection(pres, section)}
-              regenerating={regeneratingSection}
-              onOpenEvent={onOpenEvent}
-              onOpenInstitution={onOpenInstitution}
-              onRefreshPipeline={onRefreshPipeline}
-              refreshingPipeline={refreshingPipelineId === b.id}
-              onCleanupBlockers={onCleanupBlockers}
-              showToast={showToast}
-            />
-          )
-        ))}
+        {nonMeetingBlocks.map(renderBlock)}
       </div>
 
-      {!readOnly && <ExecAddBlock onAdd={(fields) => onAddBlock(pres.id, fields)} />}
+      <div className="exec-extra-section">
+        <div className="exec-extra-head">Tracking by Institution</div>
+        <ExecTracking cards={trackedCards} readOnly={readOnly}
+          onAdd={onAddTracked} onUpdateNote={onUpdateTrackedNote} onRemove={onRemoveTracked} onReorder={onReorderTracked}
+          trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
+      </div>
 
-      {/* Three curated sections alongside the blocks. Editable only by Fahed;
-          render clean and clickable in the read-only executive view. */}
       <div className="exec-extra-section">
         <div className="exec-extra-head">Initiatives</div>
         <ExecInitiatives items={initiatives} readOnly={readOnly}
@@ -7640,18 +7685,15 @@ function ExecUpdateTab({
       </div>
 
       <div className="exec-extra-section">
-        <div className="exec-extra-head">Tracking</div>
-        <ExecTracking cards={trackedCards} readOnly={readOnly}
-          onAdd={onAddTracked} onUpdateNote={onUpdateTrackedNote} onRemove={onRemoveTracked} onReorder={onReorderTracked}
-          trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
-      </div>
-
-      <div className="exec-extra-section">
         <div className="exec-extra-head">Questions for the Team</div>
         <ExecQuestions items={questions} readOnly={readOnly}
           onAdd={(text) => onAddQuestion(pres.id, text)} onUpdate={onUpdateQuestion} onDelete={onDeleteQuestion} onReorder={onReorderQuestions}
           showToast={showToast} />
       </div>
+
+      {meetingBlocks.length > 0 && <div className="exec-blocks exec-blocks-meetings">{meetingBlocks.map(renderBlock)}</div>}
+
+      {!readOnly && <ExecAddBlock onAdd={(fields) => onAddBlock(pres.id, fields)} />}
     </div>
   );
 }
