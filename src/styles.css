@@ -527,6 +527,22 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .stat-delta-down { color: #C42B30; }
 .stat-delta-flat { color: var(--muted); font-weight: 500; }
 .wir-section { background: var(--surface); border-radius: 16px; padding: 20px; box-shadow: var(--shadow-card); margin: 16px 34px 0 34px; }
+/* The Pipeline section breaks out of the standard 34px gutters (and the
+   section-pad padding) to fill the whole content area, so every stage column is
+   visible side by side; stages still scroll horizontally on overflow. The
+   report sits after the sidebar, so it widens to the viewport minus the
+   sidebar. */
+.wir { --wir-side: 236px; }
+@media (max-width: 900px) { .wir { --wir-side: 76px; } }
+.wir-section-pipeline {
+  width: calc(100vw - var(--wir-side, 236px));
+  max-width: calc(100vw - var(--wir-side, 236px));
+  margin-left: -68px;
+  box-sizing: border-box;
+}
+@media (max-width: 768px) {
+  .wir-section-pipeline { width: auto; max-width: none; margin-left: 16px; margin-right: 16px; }
+}
 .wir-section-title { font-size: 15px; font-weight: 800; color: var(--text); margin-bottom: 12px; }
 .wir-subhead { font-size: 12.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin: 14px 0 8px; }
 .wir-empty { font-size: 13px; color: var(--muted); padding: 4px 0; }

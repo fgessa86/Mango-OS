@@ -93,6 +93,34 @@ function isInternalMeeting(ev, contacts) {
   return true;
 }
 
+// The one internal-meeting test shared by the Executive Update and the Week in
+// Review. A meeting is internal (our own team) when its resolved contact or
+// organization is flagged is_internal, its resolved institution name matches an
+// internal org, or every attendee on the matched calendar event is internal
+// (isInternalMeeting). Both reports exclude these so a sync like the "Saudi
+// Business Bi-Monthly Update" or an Andy/Gavin/team call never appears.
+function meetingIsInternal({ activity, event, institutionName, contacts, organizations }) {
+  if (activity?.contact_id) { const c = contacts.find((x) => x.id === activity.contact_id); if (c?.is_internal) return true; }
+  if (activity?.organization_id) { const o = organizations.find((x) => x.id === activity.organization_id); if (o?.is_internal) return true; }
+  if (institutionName) { const o = organizations.find((x) => (x.name || "").trim().toLowerCase() === institutionName.trim().toLowerCase()); if (o?.is_internal) return true; }
+  if (event && isInternalMeeting(event, contacts)) return true;
+  return false;
+}
+
+// Resolves the calendar event a meeting-type activity belongs to: by its
+// calendar_event_id, else by matching an event on the same day whose title
+// equals the activity's (synced or hand-logged) title. Lets the Week in Review
+// apply the attendee-based internal test to a bare meeting activity.
+function matchMeetingEventForActivity(a, calendarEvents) {
+  if (!calendarEvents || !calendarEvents.length) return null;
+  if (a.calendar_event_id) return calendarEvents.find((e) => e.id === a.calendar_event_id) || null;
+  const synced = parseSyncMeeting(a.description);
+  const title = (synced ? synced.title : firstLine(cleanActivityText(a.description || ""))).trim().toLowerCase();
+  const day = (a.created_at || "").slice(0, 10);
+  if (!title) return null;
+  return calendarEvents.find((e) => (e.title || "").trim().toLowerCase() === title && (e.start_time || "").slice(0, 10) === day) || null;
+}
+
 // Renders an activity description. Fathom notes (and any description that looks
 // structured: "Heading:" lines and "- " bullets) get light formatting; a Fathom
 // badge marks auto-imported recaps. Email activities additionally get the
@@ -3556,18 +3584,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     .sort((a, b) => (a.day < b.day ? 1 : -1));
   };
 
-  // True when a gathered meeting is internal (with our own Mango team): its
-  // resolved contact or institution is flagged is_internal, its resolved
-  // institution name matches an internal org, or every attendee on the matched
-  // calendar event is internal (isInternalMeeting).
-  const execMeetingIsInternal = (m) => {
-    const a = m.activity || {};
-    if (a.contact_id && contacts.find((c) => c.id === a.contact_id)?.is_internal) return true;
-    if (a.organization_id && organizations.find((o) => o.id === a.organization_id)?.is_internal) return true;
-    if (m.institution) { const o = organizations.find((o) => (o.name || "").trim().toLowerCase() === m.institution.trim().toLowerCase()); if (o?.is_internal) return true; }
-    if (m.event && isInternalMeeting(m.event, contacts)) return true;
-    return false;
-  };
+  // True when a gathered meeting is internal, via the shared `meetingIsInternal`
+  // test the Week in Review uses too.
+  const execMeetingIsInternal = (m) =>
+    meetingIsInternal({ activity: m.activity, event: m.event, institutionName: m.institution, contacts, organizations });
 
   // Gathers the raw two-week window and shapes it for the model. Deliberately
   // compact: names, stages, and one-line summaries, not full descriptions, so
@@ -3900,28 +3920,13 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     return [header, { block_type: "item", section: "next_up", title: null, content }];
   };
 
-  // Auto-detected signals (stale deals, unresolved boss comments, overdue
-  // high-priority tasks) as starter bullets, in a commentary block that Fahed
-  // then writes into or dictates. The block editor offers voice plus AI cleanup.
+  // Blockers is NEVER auto-populated: it starts empty and holds only what Fahed
+  // types or dictates. (Legacy builder, no longer part of the generated deck;
+  // kept so an older presentation's Blockers header can still Regenerate to a
+  // clean empty block.)
   const buildBlockersBlocks = () => {
     const header = { block_type: "header", section: "blockers", title: "Blockers and Asks", content: null };
-    const bullets = [];
-    deals
-      .filter((d) => !["won", "lost"].includes(d.stage) && d.last_activity_at && daysAgo(d.last_activity_at) >= 14)
-      .sort((a, b) => daysAgo(b.last_activity_at) - daysAgo(a.last_activity_at))
-      .slice(0, 5)
-      .forEach((d) => bullets.push(`${d.company} has had no activity in ${daysAgo(d.last_activity_at)} days.`));
-    bossComments
-      .filter((c) => !c.is_read && (c.author || "") !== "Fahed Al Essa")
-      .slice(0, 5)
-      .forEach((c) => bullets.push(`Unresolved comment from Andy: ${firstLine(stripHtmlToText(c.content || "")) || "(attachment)"}`));
-    todos
-      .filter((t) => t.status !== "done" && t.priority === "high" && isOverdue(t.due_date))
-      .slice(0, 5)
-      .forEach((t) => bullets.push(`Overdue high-priority task: ${t.title}`));
-    const content = bullets.length
-      ? execBulletsToHtml(bullets)
-      : "<div>Add blockers, needs, and asks. You can dictate them and clean them up with AI.</div>";
+    const content = "<div>Add blockers, needs, and asks. You can dictate them and clean them up with AI.</div>";
     return [header, { block_type: "commentary", section: "blockers", title: null, content }];
   };
 
@@ -5607,8 +5612,17 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           institutions={institutions}
           onOpenInstitution={openInstitution}
           onOpenPerson={openPerson}
+          onOpenNote={openNote}
           onOpenTaskLink={openTaskLink}
           showToast={showToast}
+          buildPipelineSnapshot={buildPipelineSnapshot}
+          trackedRows={execTracked}
+          resolveTrackedCard={resolveTrackedCard}
+          onAddTracked={addExecTracked}
+          onUpdateTrackedNote={(id, note) => updateExecTracked(id, { custom_note: note })}
+          onRemoveTracked={removeExecTracked}
+          onReorderTracked={reorderExecTracked}
+          execTrackOptions={execTrackOptions}
         />
       )}
 
@@ -7698,7 +7712,8 @@ function ExecUpdateTab({
   );
 }
 
-function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, todoContacts = [], bossComments, commentAuthor, onPostComment, onMarkCommentRead, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, onOpenTaskLink, showToast }) {
+function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, todoContacts = [], bossComments, commentAuthor, onPostComment, onMarkCommentRead, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, institutions = [], onOpenInstitution, onOpenPerson, onOpenNote, onOpenTaskLink, showToast,
+  buildPipelineSnapshot, trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNote, onRemoveTracked, onReorderTracked, execTrackOptions = [] }) {
   const readOnly = useReadOnly();
   const [start, setStart] = useState(() => startOfWeek(new Date()));
   const [end, setEnd] = useState(() => addDaysLocal(startOfWeek(new Date()), 6));
@@ -7806,16 +7821,39 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
   const weekActs = activities.filter((a) => inWeekRange(a.created_at, start, end));
   const priorActs = activities.filter((a) => inWeekRange(a.created_at, priorStart, priorEnd));
 
-  // Section 1: headline metrics
-  const newContacts = contacts.filter((c) => inWeekRange(c.created_at, start, end)).length;
-  const priorNewContacts = contacts.filter((c) => inWeekRange(c.created_at, priorStart, priorEnd)).length;
+  // Internal exclusion, shared with the Executive Update: a meeting activity is
+  // internal when its resolved contact/org is is_internal, its institution is an
+  // internal org, or every attendee on the matched event is internal. An
+  // institution is internal when its org row is is_internal. Neither should
+  // inflate the external-facing report.
+  const orgIsInternal = (name) => !!organizations.find((o) => (o.name || "").trim().toLowerCase() === (name || "").trim().toLowerCase())?.is_internal;
+  const isInternalMeetingAct = (a) => {
+    if (!(a.type === "meeting" || a.type === "scheduled_meeting")) return false;
+    const inst = activityInstitutionInfo(a, ctx);
+    const ev = matchMeetingEventForActivity(a, calendarEvents);
+    return meetingIsInternal({ activity: a, event: ev, institutionName: inst?.name, contacts, organizations });
+  };
+  // Activities that count toward the external report: drops internal meetings
+  // and any activity whose institution is our own internal team.
+  const externalAct = (a) => {
+    if (isInternalMeetingAct(a)) return false;
+    const inst = activityInstitutionInfo(a, ctx);
+    if (inst && orgIsInternal(inst.name)) return false;
+    return true;
+  };
+  const weekActsExt = weekActs.filter(externalAct);
+  const priorActsExt = priorActs.filter(externalAct);
 
-  const meetingsHeld = weekActs.filter((a) => a.type === "meeting" || a.type === "scheduled_meeting").length;
-  const priorMeetingsHeld = priorActs.filter((a) => a.type === "meeting" || a.type === "scheduled_meeting").length;
+  // Section 1: headline metrics (external only)
+  const newContacts = contacts.filter((c) => inWeekRange(c.created_at, start, end) && !c.is_internal).length;
+  const priorNewContacts = contacts.filter((c) => inWeekRange(c.created_at, priorStart, priorEnd) && !c.is_internal).length;
+
+  const meetingsHeld = weekActs.filter((a) => (a.type === "meeting" || a.type === "scheduled_meeting") && !isInternalMeetingAct(a)).length;
+  const priorMeetingsHeld = priorActs.filter((a) => (a.type === "meeting" || a.type === "scheduled_meeting") && !isInternalMeetingAct(a)).length;
 
   const institutionKeySet = (acts) => {
     const set = new Set();
-    acts.forEach((a) => { const inst = activityInstitutionInfo(a, ctx); if (inst) set.add(inst.name.toLowerCase()); });
+    acts.forEach((a) => { const inst = activityInstitutionInfo(a, ctx); if (inst && !orgIsInternal(inst.name)) set.add(inst.name.toLowerCase()); });
     return set;
   };
   const institutionsEngaged = institutionKeySet(weekActs).size;
@@ -7833,9 +7871,9 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
   // Section 2: new deals this week
   const newDeals = deals.filter((d) => inWeekRange(d.created_at, start, end));
 
-  // Section 3: activity by institution
+  // Section 3: activity by institution (external only)
   const instGroups = new Map();
-  weekActs.forEach((a) => {
+  weekActsExt.forEach((a) => {
     const inst = activityInstitutionInfo(a, ctx);
     if (!inst) return;
     const key = inst.name.toLowerCase();
@@ -7848,13 +7886,13 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
   });
   const instActivity = [...instGroups.values()].sort((a, b) => b.count - a.count);
 
-  // Section 4: new relationships
-  const newPeople = contacts.filter((c) => inWeekRange(c.created_at, start, end)).map((c) => {
+  // Section 4: new relationships (external only, same exclusion as the exec update)
+  const newPeople = contacts.filter((c) => inWeekRange(c.created_at, start, end) && !c.is_internal).map((c) => {
     const roles = resolveContactRoles(c, ctx);
     const primary = roles.find((r) => r.is_primary) || roles[0];
     return { id: c.id, name: c.name, role: c.role, institutionName: primary?.institutionName || "" };
   });
-  const newInstitutions = organizations.filter((o) => inWeekRange(o.created_at, start, end)).map((o) => {
+  const newInstitutions = organizations.filter((o) => inWeekRange(o.created_at, start, end) && !o.is_internal).map((o) => {
     const deal = deals.find((d) => (d.company || "").trim().toLowerCase() === (o.name || "").trim().toLowerCase());
     return { id: o.id, name: o.name, type: o.type, tier: deal?.tier || null };
   });
@@ -7862,7 +7900,12 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
   // Section 5: coming up next week (the 7 days right after the selected range)
   const nextStart = addDaysLocal(end, 1);
   const nextEnd = addDaysLocal(nextStart, 6);
-  const upcomingEvents = calendarEvents.filter((e) => inWeekRange(e.start_time, nextStart, nextEnd)).sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+  // Exclude internal meetings from Coming Up (attendees all internal, or the
+  // matched entity is our own team).
+  const eventIsInternal = (e) => isInternalMeeting(e, contacts)
+    || (e.matched_contact_id && contacts.find((c) => c.id === e.matched_contact_id)?.is_internal)
+    || (e.matched_organization_id && organizations.find((o) => o.id === e.matched_organization_id)?.is_internal);
+  const upcomingEvents = calendarEvents.filter((e) => inWeekRange(e.start_time, nextStart, nextEnd) && !eventIsInternal(e)).sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
   const upcomingScheduled = activities.filter((a) => a.type === "scheduled_meeting" && inWeekRange(a.scheduled_for, nextStart, nextEnd)).sort((a, b) => new Date(a.scheduled_for) - new Date(b.scheduled_for));
   const upcomingTasks = todos.filter((t) => t.status === "open" && (t.priority === "high" || inWeekRange(t.due_date, nextStart, nextEnd)));
   const upcomingEventEntity = (e) => {
@@ -7872,9 +7915,17 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
     return null;
   };
 
-  // Section 6: blockers, plus auto-surfaced flags
-  const stuckDeals = deals.filter((d) => !["won", "lost"].includes(d.stage) && (!d.last_activity_at || daysAgo(d.last_activity_at) >= 14));
-  const unresolvedComments = bossComments.filter((c) => c.author !== "Fahed Al Essa" && !c.is_read);
+  // Section 2 (visual): the same pipeline snapshot the Executive Update renders,
+  // built for the selected range so movement borders highlight this period.
+  const rangeStartISO = startOfDay(start).toISOString();
+  const rangeEndISO = endOfDayLocal(end).toISOString();
+  const pipelineContent = buildPipelineSnapshot ? JSON.stringify(buildPipelineSnapshot(rangeStartISO, rangeEndISO)) : null;
+  // Tracking by Institution: the shared persistent watchlist, resolved to cards
+  // against the range start so "recent updates" means since the period began.
+  const trackedCards = (trackedRows || []).filter((t) => t.is_active !== false)
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+    .map((t) => (resolveTrackedCard ? resolveTrackedCard(t, rangeStartISO) : null))
+    .filter(Boolean);
 
   const rangeLabel = `${formatDate(start)} to ${formatDate(end)}, ${end.getFullYear()}`;
   const deltaText = (cur, pri) => `${cur - pri >= 0 ? "+" : ""}${cur - pri} vs last period`;
@@ -7917,10 +7968,8 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
     r += `\n`;
 
     r += `BLOCKERS AND DECISIONS NEEDED\n`;
-    if (blockers.length === 0 && stuckDeals.length === 0 && unresolvedComments.length === 0) r += `. None flagged.\n`;
+    if (blockers.length === 0) r += `. None flagged.\n`;
     blockers.forEach((b) => { r += `. ${b}\n`; });
-    stuckDeals.forEach((d) => { r += `. ${d.company}: no activity in ${d.last_activity_at ? `${daysAgo(d.last_activity_at)} days` : "a while"}, may need attention\n`; });
-    unresolvedComments.forEach((c) => { r += `. Unresolved comment from ${c.author}: ${firstLine(c.content)}\n`; });
 
     return r;
   };
@@ -7966,12 +8015,10 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
     }
 
     h += `<h3>Blockers and Decisions Needed</h3>`;
-    if (blockers.length === 0 && stuckDeals.length === 0 && unresolvedComments.length === 0) h += `<p>None flagged.</p>`;
+    if (blockers.length === 0) h += `<p>None flagged.</p>`;
     else {
       h += `<ul>`;
       blockers.forEach((b) => { h += `<li>${esc(b)}</li>`; });
-      stuckDeals.forEach((d) => { h += `<li>${esc(d.company)}: no activity in ${d.last_activity_at ? `${daysAgo(d.last_activity_at)} days` : "a while"}, may need attention</li>`; });
-      unresolvedComments.forEach((c) => { h += `<li>Unresolved comment from ${esc(c.author)}: ${esc(firstLine(c.content))}</li>`; });
       h += `</ul>`;
     }
 
@@ -8057,70 +8104,11 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
         </div>
       </div>
 
-      <div className="wir-section">
-        <div className="wir-section-title">Pipeline Movement</div>
-        {weekTransitions.length === 0 ? (
-          <div className="wir-empty">No stage changes this period.</div>
-        ) : (
-          <div className="wir-list">
-            {weekTransitions.map((t, i) => {
-              const tierMeta = DEAL_TIERS.find((x) => x.id === t.tier) || DEAL_TIERS[DEAL_TIERS.length - 1];
-              return (
-                <div key={i} className="wir-row-wrap">
-                  <div className="wir-row wir-row-click" onClick={() => onOpenInstitution(t.company)}>
-                    <div className="wir-row-main">
-                      <span className="wir-row-name">{t.company}</span>
-                      <span className="badge" style={{ background: tierMeta.bg, color: tierMeta.fg, border: `1px solid ${tierMeta.fg}44` }}>{tierMeta.label}</span>
-                      <CommentTagBadge name={t.company} />
-                    </div>
-                    <div className="wir-row-detail">{stageLabel(t.fromStage)} to {stageLabel(t.toStage)}</div>
-                    <div className="wir-row-date">{formatDate(t.date)}</div>
-                  </div>
-                  <CommentTagInline name={t.company} />
-                </div>
-              );
-            })}
-          </div>
-        )}
-        {newDeals.length > 0 && (
-          <>
-            <div className="wir-subhead">New to Pipeline</div>
-            <div className="wir-list">
-              {newDeals.map((d) => {
-                const tierMeta = DEAL_TIERS.find((x) => x.id === d.tier) || DEAL_TIERS[DEAL_TIERS.length - 1];
-                return (
-                  <div key={d.id} className="wir-row wir-row-click" onClick={() => onOpenInstitution(d.company)}>
-                    <div className="wir-row-main">
-                      <span className="wir-row-name">{d.company}</span>
-                      <span className="badge" style={{ background: tierMeta.bg, color: tierMeta.fg, border: `1px solid ${tierMeta.fg}44` }}>{tierMeta.label}</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </>
-        )}
-      </div>
-
-      <div className="wir-section">
-        <div className="wir-section-title">Activity by Institution</div>
-        {instActivity.length === 0 ? (
-          <div className="wir-empty">No activity logged this period.</div>
-        ) : (
-          <div className="wir-list">
-            {instActivity.map((g) => (
-              <div key={g.name} className="wir-row-wrap">
-                <div className="wir-row">
-                  <button type="button" className={`task-pill task-pill-${g.kind}`} onClick={() => onOpenInstitution(g.name)}>{g.name}</button>
-                  <CommentTagBadge name={g.name} />
-                  <div className="wir-row-detail">{Object.entries(g.byType).map(([t, c]) => `${c} ${activityNoun(t, c)}`).join(", ")}</div>
-                  {g.people.size > 0 && <div className="wir-row-people">{[...g.people.values()].join(", ")}</div>}
-                </div>
-                <CommentTagInline name={g.name} />
-              </div>
-            ))}
-          </div>
-        )}
+      {/* Pipeline: the same visual snapshot the Executive Update renders, full
+          width, with movement borders and clickable deals; read-only here. */}
+      <div className="wir-section wir-section-pipeline">
+        <div className="wir-section-title">Pipeline</div>
+        {pipelineContent ? <ExecPipelineBody content={pipelineContent} onOpenInstitution={onOpenInstitution} /> : <div className="wir-empty">Pipeline unavailable.</div>}
       </div>
 
       <div className="wir-section">
@@ -8155,6 +8143,37 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
             )}
           </>
         )}
+      </div>
+
+      <div className="wir-section">
+        <div className="wir-section-title">Activity by Institution</div>
+        {instActivity.length === 0 ? (
+          <div className="wir-empty">No activity logged this period.</div>
+        ) : (
+          <div className="wir-list">
+            {instActivity.map((g) => (
+              <div key={g.name} className="wir-row-wrap">
+                <div className="wir-row">
+                  <button type="button" className={`task-pill task-pill-${g.kind}`} onClick={() => onOpenInstitution(g.name)}>{g.name}</button>
+                  <CommentTagBadge name={g.name} />
+                  <div className="wir-row-detail">{Object.entries(g.byType).map(([t, c]) => `${c} ${activityNoun(t, c)}`).join(", ")}</div>
+                  {g.people.size > 0 && <div className="wir-row-people">{[...g.people.values()].join(", ")}</div>}
+                </div>
+                <CommentTagInline name={g.name} />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Tracking by Institution: the shared persistent watchlist (same
+          component and data as the Executive Update). Fahed adds/edits; Andy
+          sees it read-only. */}
+      <div className="wir-section">
+        <div className="wir-section-title">Tracking by Institution</div>
+        <ExecTracking cards={trackedCards} readOnly={readOnly}
+          onAdd={onAddTracked} onUpdateNote={onUpdateTrackedNote} onRemove={onRemoveTracked} onReorder={onReorderTracked}
+          trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
       </div>
 
       <div className="wir-section">
@@ -8213,31 +8232,8 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
         {!readOnly && (
           <div className="wir-blocker-add">
             <input type="text" value={newBlocker} onChange={(e) => setNewBlocker(e.target.value)} placeholder="Add an item for Andy's input..." onKeyDown={(e) => { if (e.key === "Enter") addBlocker(); }} />
+            <VoiceRecorder mode="plain" compact showToast={showToast} title="Dictate a blocker" onPlainText={(t) => setNewBlocker((d) => (d ? `${d} ${t}` : t))} />
             <button type="button" className="btn-copy" onClick={addBlocker}>Add</button>
-          </div>
-        )}
-        {(stuckDeals.length > 0 || unresolvedComments.length > 0) && <div className="wir-subhead">Auto-flagged</div>}
-        {stuckDeals.length > 0 && (
-          <div className="wir-list">
-            {stuckDeals.map((d) => (
-              <div key={d.id} className="wir-row wir-row-flag">
-                <div className="wir-row-click" onClick={() => onOpenInstitution(d.company)} style={{ flex: 1 }}>
-                  <span className="wir-row-name">{d.company}</span>
-                  <span className="wir-row-detail">May need attention: no activity in {d.last_activity_at ? `${daysAgo(d.last_activity_at)} days` : "a while"}</span>
-                </div>
-                {readOnly && <button type="button" className="btn-copy" onClick={() => respondTo(`${d.company}: no activity in ${d.last_activity_at ? `${daysAgo(d.last_activity_at)} days` : "a while"}`, institutionIdsFor(d.company))}>Respond</button>}
-              </div>
-            ))}
-          </div>
-        )}
-        {unresolvedComments.length > 0 && (
-          <div className="wir-list">
-            {unresolvedComments.map((c) => (
-              <div key={c.id} className="wir-row wir-row-flag">
-                <span className="wir-row-name">Comment from {c.author}</span>
-                <span className="wir-row-detail">{firstLine(c.content)}</span>
-              </div>
-            ))}
           </div>
         )}
       </div>
