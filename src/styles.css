@@ -2124,6 +2124,13 @@ body.exec-presenting-body { overflow: hidden; }
   color: #2A6FDB; background: #E4EDFB; border-color: #2A6FDB33;
 }
 .mention:hover { background: #D3E2FA; text-decoration: underline; }
+/* An intended "@Name" that matches several same-named entities: shown subtly
+   (not force-linked to a wrong one) with a dotted underline hinting it needs a
+   pick. */
+.mention-unresolved {
+  color: var(--dim, #8a8577); text-decoration: underline dotted;
+  text-underline-offset: 2px; cursor: help;
+}
 /* Inside a live editor a chip is an atomic, non-navigating unit (keeps blue). */
 [contenteditable="true"] .mention { cursor: default; }
 [contenteditable="true"] .mention:hover { text-decoration: none; background: #E4EDFB; }

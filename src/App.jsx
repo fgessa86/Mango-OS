@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, createContext, useContext, Fragment } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext, Fragment } from "react";
 import { api } from "./supabase";
 import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, generateMeetingSummary, generateConclusions, cleanupBlockers, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
@@ -8,7 +8,7 @@ import VoiceRecorder from "./VoiceRecorder";
 import RichTextEditor, { RichTextView, RichTextField } from "./RichTextEditor";
 import { stripHtmlToText, isContentEmpty, toDisplayHtml, looksLikeHtml, plainTextToHtml } from "./richtext";
 import MentionEditor, { MentionText, MentionContext, MentionField } from "./MentionEditor";
-import { extractMentionRefs, mentionsToPlainText, detectFullNameMentions, mentionChipHtml } from "./mentions";
+import { extractMentionRefs, mentionsToPlainText, detectFullNameMentions, mentionChipHtml, buildMentionIndex, resolveLiteralMentionsHtml, resolveLiteralMentionsTokens, hasLiteralMentions } from "./mentions";
 import "./styles.css";
 
 // Boss View (?view=boss) renders the full app in read-only mode: same layout and
@@ -1592,7 +1592,7 @@ export default function App() {
   }, []);
 
   const postBossComment = async ({ author, content, file_name, file_data, deal_id, enabler_id, organization_id }) => {
-    const text = (content || "").trim();
+    const text = upgradeTokenMentions((content || "").trim());
     if (!text && !file_data) return;
     try {
       const clean = { author, content: text };
@@ -2629,7 +2629,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
   const saveTodo = async (form) => {
     try {
-      const title = (form.title || "").trim();
+      const title = upgradeTokenMentions((form.title || "").trim());
       if (!title) { showToast("Title is required"); return; }
       const contactIds = resolveContactIds(form);
       const clean = { title, priority: form.priority || "medium", status: "open" };
@@ -2772,8 +2772,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     // from a mention in the body, so the note surfaces on the people and
     // institutions it names. Explicit links the user set are never overwritten.
     if ("content" in patch) {
+      // Upgrade any literal "@Name" to a real chip so it persists as a mention.
+      body.content = upgradeHtmlMentions(patch.content);
       const existing = notes.find((n) => n.id === id) || {};
-      const refs = extractMentionRefs(patch.content);
+      const refs = extractMentionRefs(body.content);
       ["contact_id", "deal_id", "enabler_id", "organization_id"].forEach((col) => {
         if (refs[col] && !existing[col] && body[col] == null) body[col] = refs[col];
       });
@@ -4102,6 +4104,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   };
 
   const updateExecBlock = async (id, patch) => {
+    // A pipeline block's content is a JSON snapshot, never prose; only run the
+    // mention upgrade on the HTML block types.
+    if ("content" in patch) {
+      const b = execBlocks.find((x) => x.id === id);
+      if (b && b.block_type !== "pipeline") patch = { ...patch, content: upgradeHtmlMentions(patch.content) };
+    }
     try {
       await api("exec_blocks", "PATCH", patch, `?id=eq.${id}`);
       setExecBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
@@ -4245,13 +4253,14 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     try {
       const siblings = execInitiatives.filter((x) => x.presentation_id === presentationId && x.status === status);
       const sort_order = siblings.length ? Math.max(...siblings.map((x) => x.sort_order ?? 0)) + 1 : 0;
-      const rows = await api("exec_initiatives", "POST", { presentation_id: presentationId, status, content: content ? plainTextToHtml(content) : "", sort_order });
+      const rows = await api("exec_initiatives", "POST", { presentation_id: presentationId, status, content: content ? upgradeHtmlMentions(plainTextToHtml(content)) : "", sort_order });
       const row = Array.isArray(rows) ? rows[0] : rows;
       if (row) setExecInitiatives((prev) => [...prev, row]);
       return row;
     } catch { showToast("Could not add item"); return null; }
   };
   const updateExecInitiative = async (id, patch) => {
+    if ("content" in patch) patch = { ...patch, content: upgradeHtmlMentions(patch.content) };
     try {
       await api("exec_initiatives", "PATCH", patch, `?id=eq.${id}`);
       setExecInitiatives((prev) => prev.map((x) => (x.id === id ? { ...x, ...patch } : x)));
@@ -4293,6 +4302,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Could not track institution"); return null; }
   };
   const updateExecTracked = async (id, patch) => {
+    if ("custom_note" in patch) patch = { ...patch, custom_note: upgradeHtmlMentions(patch.custom_note) };
     try {
       await api("exec_tracked_institutions", "PATCH", patch, `?id=eq.${id}`);
       setExecTracked((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
@@ -4313,8 +4323,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   /* ---- Exec Questions for the team, per-presentation. ---- */
   const execQuestionsFor = (pid) => execQuestions.filter((x) => x.presentation_id === pid).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   const addExecQuestion = async (presentationId, content) => {
-    const text = (content || "").trim();
-    if (!text) return null;
+    const raw = (content || "").trim();
+    if (!raw) return null;
+    // Upgrade a literal "@Name" to a chip on creation; plain questions stay
+    // plain text (toDisplayHtml renders either form).
+    const text = hasLiteralMentions(raw, mentionIndex) ? upgradeHtmlMentions(plainTextToHtml(raw)) : raw;
     try {
       const siblings = execQuestions.filter((x) => x.presentation_id === presentationId);
       const sort_order = siblings.length ? Math.max(...siblings.map((x) => x.sort_order ?? 0)) + 1 : 0;
@@ -4325,6 +4338,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Could not add question"); return null; }
   };
   const updateExecQuestion = async (id, patch) => {
+    if ("content" in patch) patch = { ...patch, content: upgradeHtmlMentions(patch.content) };
     try {
       await api("exec_questions", "PATCH", patch, `?id=eq.${id}`);
       setExecQuestions((prev) => prev.map((x) => (x.id === id ? { ...x, ...patch } : x)));
@@ -4509,6 +4523,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       // derived (or not) at display time.
       let fkDeal = dealId, fkEnabler = enablerId, fkOrg = organizationId;
       let fkContact = contactId;
+      // Upgrade any literal "@Name" in the description to a real token so it
+      // renders as a chip and links like a picked mention.
+      if (activity.description) activity = { ...activity, description: upgradeTokenMentions(activity.description) };
       // Mention indexing: an @ mention in the description fills any entity link
       // still unset, so the activity surfaces on whom it names. Explicit links
       // passed in are never overwritten.
@@ -4591,7 +4608,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setSavingActivityId(activity.id);
     try {
       const original = activity.description || "";
-      const description = isFathomActivity(activity) ? `${FATHOM_MARKER} ${patch.description}` : patch.description;
+      const upgraded = upgradeTokenMentions(patch.description || "");
+      const description = isFathomActivity(activity) ? `${FATHOM_MARKER} ${upgraded}` : upgraded;
       const body = { ...patch, description };
       await api("activities", "PATCH", body, `?id=eq.${activity.id}`);
       setActivities((prev) => prev.map((a) => (a.id === activity.id ? { ...a, ...body } : a)));
@@ -4827,9 +4845,28 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Could not create person"); return null; }
   };
 
+  // A flat {name,type,id} list of every person and deduplicated institution,
+  // and a name -> matches index built from it. The index resolves literal
+  // "@Name" text (typed without picking from the dropdown) to the right entity
+  // so it renders as a blue clickable chip everywhere and can be upgraded to a
+  // durable token/chip on save. Rebuilt only when the entities change.
+  const mentionCandidates = useMemo(() => {
+    const people = contacts.filter((c) => c.name && c.id).map((c) => ({ name: c.name, type: "person", id: c.id }));
+    const insts = dedupeInstitutionOptions({ deals, enablers, organizations, prefer: ["deal", "enabler", "organization"] })
+      .map((o) => { const i = o.value.indexOf(":"); return { name: o.label, type: o.value.slice(0, i), id: o.value.slice(i + 1) }; })
+      .filter((o) => o.name && o.id);
+    return [...people, ...insts];
+  }, [contacts, deals, enablers, organizations]);
+  const mentionIndex = useMemo(() => buildMentionIndex(mentionCandidates), [mentionCandidates]);
+  // Upgrade literal "@Name" runs to durable tokens/chips on save (HTML fields
+  // vs plain-text token fields), so an edit persists what render time shows.
+  const upgradeHtmlMentions = (html) => resolveLiteralMentionsHtml(html, mentionIndex);
+  const upgradeTokenMentions = (text) => resolveLiteralMentionsTokens(text, mentionIndex);
+
   // Search source for the @ dropdown: people (by name, role, institution) and
   // deduplicated institutions (by name), each with a small type label.
   const mentionSource = {
+    index: mentionIndex,
     search: (query) => {
       const q = (query || "").trim().toLowerCase();
       const people = contacts.map((c) => {
@@ -4850,6 +4887,45 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       return created?.preferred ? { name: name.trim(), type: created.preferred.type, id: created.preferred.id } : null;
     },
   };
+
+  // One-time re-scan (Fix #5): upgrade literal "@Name" text already stored in
+  // notes, exec tracking commentary, initiatives, questions and prose blocks
+  // into durable chip spans, so existing content (e.g. KFSHRC / KFMC
+  // commentary) becomes clickable without manual re-entry. Render time already
+  // shows these as chips; this makes the upgrade persistent. Runs once per
+  // browser, never in Boss View (read-only), and only PATCHes rows that change.
+  const mentionsUpgradedRef = useRef(false);
+  useEffect(() => {
+    if (loading || bossMode || mentionsUpgradedRef.current || !mentionIndex.size) return;
+    if (localStorage.getItem("mango-mentions-upgraded-v1")) { mentionsUpgradedRef.current = true; return; }
+    mentionsUpgradedRef.current = true;
+    (async () => {
+      const jobs = [
+        { rows: notes, field: "content", table: "notes", set: setNotes },
+        { rows: execTracked, field: "custom_note", table: "exec_tracked_institutions", set: setExecTracked },
+        { rows: execInitiatives, field: "content", table: "exec_initiatives", set: setExecInitiatives },
+        { rows: execQuestions, field: "content", table: "exec_questions", set: setExecQuestions },
+        { rows: execBlocks.filter((b) => b.block_type !== "pipeline"), field: "content", table: "exec_blocks", set: setExecBlocks },
+      ];
+      let upgraded = 0;
+      for (const job of jobs) {
+        for (const row of job.rows) {
+          const val = row[job.field];
+          if (!hasLiteralMentions(val, mentionIndex)) continue;
+          const next = resolveLiteralMentionsHtml(val, mentionIndex);
+          if (next === val) continue;
+          try {
+            await api(job.table, "PATCH", { [job.field]: next }, `?id=eq.${row.id}`);
+            job.set((prev) => prev.map((r) => (r.id === row.id ? { ...r, [job.field]: next } : r)));
+            upgraded += 1;
+          } catch (e) { console.warn("[Mentions] upgrade failed", job.table, row.id, e); }
+        }
+      }
+      localStorage.setItem("mango-mentions-upgraded-v1", "1");
+      if (upgraded) console.info(`[Mentions] upgraded ${upgraded} stored item(s) with literal @names`);
+    })();
+  }, [loading, bossMode, mentionIndex, notes, execTracked, execInitiatives, execQuestions, execBlocks]);
+
   // Tab-level navigation always starts a fresh sheet context.
   const navigateTab = (v) => { setInstitutionSheetKey(null); setPersonSheetId(null); setEventDetailId(null); setView(v); };
   // Boss View's sidebar is now just Week in Review / Pipeline / Ecosystem /

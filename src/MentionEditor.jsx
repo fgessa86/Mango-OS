@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect, useCallback, useContext, createContext, Fragment } from "react";
-import { parseMentionSegments, mentionChipHtml, mentionToken } from "./mentions";
+import { parseMentionSegments, mentionChipHtml, mentionToken, scanLiteralMentions } from "./mentions";
 
 // Provides the @ mention search + create handlers to every editor in the tree,
 // so no surface has to prop-drill them. App supplies the value.
@@ -7,19 +7,31 @@ export const MentionContext = createContext(null);
 
 const escHtml = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+const mentionChip = (seg, key) => (
+  <span key={key} className={`mention mention-${seg.type}`} data-mkind={seg.type} data-mid={seg.id} data-mname={seg.name} role="link" tabIndex={0}>@{seg.name}</span>
+);
+
 // Renders a stored token string as text plus clickable mention chips. The chips
 // carry the same data-* attributes as editor chips, so the app-level delegated
-// click handler navigates them; no per-call wiring needed.
+// click handler navigates them; no per-call wiring needed. Any literal "@Name"
+// text that was never turned into a token (typed without picking from the
+// dropdown) is resolved against the known entities from context and rendered as
+// the same blue clickable chip, so every mention reads consistently.
 export function MentionText({ text }) {
+  const ctx = useContext(MentionContext);
+  const index = ctx?.index;
   const segs = parseMentionSegments(text || "");
-  return (
-    <>
-      {segs.map((seg, i) => (seg.kind === "text"
-        ? <Fragment key={i}>{seg.text}</Fragment>
-        : <span key={i} className={`mention mention-${seg.type}`} data-mkind={seg.type} data-mid={seg.id} data-mname={seg.name} role="link" tabIndex={0}>@{seg.name}</span>
-      ))}
-    </>
-  );
+  const nodes = [];
+  segs.forEach((seg, i) => {
+    if (seg.kind === "mention") { nodes.push(mentionChip(seg, `m${i}`)); return; }
+    // Split each plain-text run further, upgrading literal @names to chips.
+    scanLiteralMentions(seg.text, index).forEach((sub, j) => {
+      if (sub.kind === "mention") nodes.push(mentionChip(sub, `m${i}-${j}`));
+      else if (sub.kind === "unresolved") nodes.push(<span key={`u${i}-${j}`} className="mention-unresolved" title="No matching person or institution">{sub.text}</span>);
+      else nodes.push(<Fragment key={`t${i}-${j}`}>{sub.text}</Fragment>);
+    });
+  });
+  return <>{nodes}</>;
 }
 
 // value (token string) -> contentEditable HTML (text + chip spans).

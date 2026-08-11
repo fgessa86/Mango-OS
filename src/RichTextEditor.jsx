@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback, useContext, useState } from "react";
 import { sanitizeHtml, toDisplayHtml, isContentEmpty } from "./richtext";
 import { useMentionAutocomplete, MentionContext } from "./MentionEditor";
+import { resolveLiteralMentionsHtml } from "./mentions";
 
 const FULL_TOOLBAR = [
   { cmd: "bold", label: "B", title: "Bold (Cmd+B)", style: { fontWeight: 800 } },
@@ -152,8 +153,11 @@ export default function RichTextEditor({ value, onChange, onBlur, placeholder = 
 
 // Read-only render of stored note HTML (Boss View, linked-notes previews).
 // Checkboxes render disabled since there is no edit surface backing them here.
+// Literal "@Name" runs that were never turned into chips are resolved against
+// the entities from context so they read as blue clickable chips too.
 export function RichTextView({ value, className = "" }) {
-  const html = toDisplayHtml(value);
+  const index = useContext(MentionContext)?.index;
+  const html = resolveLiteralMentionsHtml(toDisplayHtml(value), index);
   if (!html) return null;
   return <div className={`rte-body rte-view ${className}`} dangerouslySetInnerHTML={{ __html: html }} />;
 }
@@ -166,7 +170,8 @@ export function RichTextView({ value, className = "" }) {
 // other click, which the field uses to enter edit mode on desktop.
 export function RichTextRead({ value, className = "", onChange, onClick }) {
   const ref = useRef(null);
-  const html = toDisplayHtml(value);
+  const index = useContext(MentionContext)?.index;
+  const html = resolveLiteralMentionsHtml(toDisplayHtml(value), index);
   const handleClick = (e) => {
     const t = e.target;
     if (t.tagName === "INPUT" && t.type === "checkbox") {
