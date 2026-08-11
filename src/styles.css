@@ -527,22 +527,11 @@ button.task-pill { -webkit-appearance: none; appearance: none; }
 .stat-delta-down { color: #C42B30; }
 .stat-delta-flat { color: var(--muted); font-weight: 500; }
 .wir-section { background: var(--surface); border-radius: 16px; padding: 20px; box-shadow: var(--shadow-card); margin: 16px 34px 0 34px; }
-/* The Pipeline section breaks out of the standard 34px gutters (and the
-   section-pad padding) to fill the whole content area, so every stage column is
-   visible side by side; stages still scroll horizontally on overflow. The
-   report sits after the sidebar, so it widens to the viewport minus the
-   sidebar. */
-.wir { --wir-side: 236px; }
-@media (max-width: 900px) { .wir { --wir-side: 76px; } }
-.wir-section-pipeline {
-  width: calc(100vw - var(--wir-side, 236px));
-  max-width: calc(100vw - var(--wir-side, 236px));
-  margin-left: -68px;
-  box-sizing: border-box;
-}
-@media (max-width: 768px) {
-  .wir-section-pipeline { width: auto; max-width: none; margin-left: 16px; margin-right: 16px; }
-}
+/* The Pipeline section stays within the standard section width (never breaks
+   out of the page, so nothing is clipped by the overflow-hidden main column);
+   the inner stage row (.exec-pipeline-stages) scrolls horizontally when the
+   stages are wider than the section. */
+.wir-section-pipeline { max-width: 100%; box-sizing: border-box; }
 .wir-section-title { font-size: 15px; font-weight: 800; color: var(--text); margin-bottom: 12px; }
 .wir-subhead { font-size: 12.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin: 14px 0 8px; }
 .wir-empty { font-size: 13px; color: var(--muted); padding: 4px 0; }
@@ -1816,7 +1805,7 @@ body.exec-presenting-body { overflow: hidden; }
 
 /* Pipeline snapshot block: a clean, executive-readable view of the pipeline
    grouped by tier, in the editor, in Present mode, and in Boss View. */
-.exec-pipeline { margin-top: 4px; display: flex; flex-direction: column; gap: 12px; }
+.exec-pipeline { margin-top: 4px; display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 100%; }
 .exec-pipeline-summary {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px;
   font-size: 12.5px; color: var(--text-2); font-weight: 600;
@@ -1831,12 +1820,15 @@ body.exec-presenting-body { overflow: hidden; }
 .exec-pipeline-refresh:hover:not(:disabled) { border-color: var(--mango); color: var(--accent-strong, #B77400); }
 .exec-pipeline-refresh:disabled { opacity: .6; cursor: default; }
 .exec-pipeline-empty { font-size: 12.5px; color: var(--muted); }
-.exec-pipeline-tier { display: flex; flex-direction: column; gap: 6px; }
+.exec-pipeline-tier { display: flex; flex-direction: column; gap: 6px; min-width: 0; max-width: 100%; }
 .exec-pipeline-tier-head { display: flex; align-items: center; gap: 8px; }
 .exec-pipeline-tier-count { font-size: 11.5px; color: var(--muted); font-weight: 600; }
-/* Within a tier, a wrapping row of pipeline stage columns so it reads as a
-   pipeline rather than a list. Each column scrolls horizontally on overflow. */
-.exec-pipeline-stages { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; }
+/* Within a tier, a row of pipeline stage columns so it reads as a pipeline
+   rather than a list. This row is the horizontal scroll region: when the stages
+   are wider than the container it scrolls, keeping the first column (Prospecting)
+   and every tier label fully visible at the start. min-width:0 lets it shrink
+   below its content so it scrolls rather than pushing the page wider. */
+.exec-pipeline-stages { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; min-width: 0; max-width: 100%; scroll-padding-left: 2px; }
 .exec-pipeline-col { flex: 0 0 200px; min-width: 200px; display: flex; flex-direction: column; gap: 6px; }
 .exec-pipeline-col-head {
   display: flex; align-items: center; justify-content: space-between; gap: 6px;
@@ -1893,37 +1885,12 @@ body.exec-presenting-body { overflow: hidden; }
 .exec-living-tag { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: #10B981; background: #10B98118; border: 1px solid #10B98140; border-radius: 999px; padding: 1px 8px; }
 .exec-living-tag.closed { color: var(--muted); background: var(--card); border-color: var(--border); }
 
-/* Full-width Pipeline breakout: the pipeline section fills the whole content
-   area (editor) and the whole viewport (Present), so every stage column is
-   visible side by side; stages still scroll horizontally if they overflow. The
-   editor content column is flush-left in .main (which sits after the sidebar),
-   so the pipeline widens to the viewport minus the sidebar. */
-.exec-editor { --exec-side: 236px; }
-@media (max-width: 900px) { .exec-editor { --exec-side: 76px; } }
-@media (max-width: 768px) { .exec-editor { --exec-side: 0px; } }
-.exec-block-pipeline {
-  width: calc(100vw - var(--exec-side, 236px));
-  max-width: calc(100vw - var(--exec-side, 236px));
-  align-self: flex-start;
-  box-sizing: border-box;
-  padding-right: 24px;
-}
-@media (max-width: 768px) {
-  .exec-block-pipeline { width: 100%; max-width: 100%; padding-right: 0; }
-}
-/* Present mode is a full-screen overlay (no sidebar), so the pipeline section
-   breaks out to the full viewport width, centered. */
-.exec-present-section-pipeline {
-  position: relative;
-  width: 100vw;
-  left: 50%;
-  margin-left: -50vw;
-  padding-left: 56px; padding-right: 56px;
-  box-sizing: border-box;
-}
-@media (max-width: 768px) {
-  .exec-present-section-pipeline { width: 100%; left: 0; margin-left: 0; padding-left: 0; padding-right: 0; }
-}
+/* The Pipeline section fills its container (never breaks out of the page, so
+   nothing is clipped by the overflow-hidden main column); the inner stage row
+   (.exec-pipeline-stages) is the only thing that scrolls when the stages are
+   wider than the container. */
+.exec-block-pipeline { max-width: 100%; box-sizing: border-box; }
+.exec-present-section-pipeline { max-width: 100%; box-sizing: border-box; }
 
 /* ---- Exec Update curated sections: Initiatives, Tracking, Questions ---- */
 .exec-extra-section { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 16px; }
