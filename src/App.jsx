@@ -4327,11 +4327,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       setExecTracked((prev) => prev.filter((t) => t.id !== id));
     } catch { showToast("Could not remove"); }
   };
-  const reorderExecTracked = async (orderedIds) => {
-    setExecTracked((prev) => prev.map((t) => { const i = orderedIds.indexOf(t.id); return i === -1 ? t : { ...t, sort_order: i }; }));
-    try { await Promise.all(orderedIds.map((id, i) => api("exec_tracked_institutions", "PATCH", { sort_order: i }, `?id=eq.${id}`))); }
-    catch { showToast("Could not save the new order"); }
-  };
+  // No manual reorder for tracked institutions: ExecTracking auto-orders them
+  // by type group then recency (see groupTrackedCards), which is the single
+  // source of ordering.
 
   /* ---- Exec Questions for the team, per-presentation. ---- */
   const execQuestionsFor = (pid) => execQuestions.filter((x) => x.presentation_id === pid).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
@@ -4830,6 +4828,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       typeMeta: inst?.type ? institutionTypeMeta(inst.type, customOptions) : null,
       tier: inst?.deal?.tier && inst.deal.tier !== "Untiered" ? inst.deal.tier : null,
       stage: inst?.stage || null,
+      // Most recent system activity of any kind (activity, note, stage move),
+      // used to auto-sort within a type group. `updates` is already sorted
+      // newest-first, so the head of that array (before the Past/New split) is
+      // the single latest timestamp regardless of the review boundary.
+      latestActivityAt: updates[0]?.date || null,
       newUpdates,
       pastUpdates,
     };
@@ -5677,7 +5680,6 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onUpdateTrackedNext={(id, html) => updateExecTracked(id, { whats_next: html })}
           onMarkTrackedReviewed={markTrackedReviewed}
           onRemoveTracked={removeExecTracked}
-          onReorderTracked={reorderExecTracked}
           execTrackOptions={execTrackOptions}
           questionsFor={execQuestionsFor}
           onAddQuestion={addExecQuestion}
@@ -5728,7 +5730,6 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onUpdateTrackedNext={(id, html) => updateExecTracked(id, { whats_next: html })}
           onMarkTrackedReviewed={markTrackedReviewed}
           onRemoveTracked={removeExecTracked}
-          onReorderTracked={reorderExecTracked}
           execTrackOptions={execTrackOptions}
         />
       )}
@@ -7569,19 +7570,20 @@ function ExecTrackUpdateList({ list, onOpenNote }) {
   );
 }
 
-// One tracked-institution card with the four labeled sections: Past Updates
-// (collapsed), New Update (expanded), Blockers, and What's Next. Past/New split
-// on last_reviewed_at; "Mark as reviewed" rolls New into Past.
-function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onOpenInstitution, onOpenNote, showToast, dropHandlers, gripHandlers }) {
+// One tracked-institution card with the five labeled sections: Past Activity
+// (collapsed), New Activity (expanded), New Updates, Blockers, and What's Next.
+// Past/New split on last_reviewed_at; "Mark as reviewed" rolls New into Past.
+// Cards are auto-ordered (grouped by type, sorted by recency within a group)
+// by the parent, so there is no manual reorder here.
+function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onOpenInstitution, onOpenNote, showToast }) {
   const [pastOpen, setPastOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(true);
   const tierMeta = card.tier ? DEAL_TIERS.find((t) => t.id === card.tier) : null;
   const stageMeta = card.stage ? STAGES.find((s) => s.id === card.stage) : null;
   const showLegacy = !readOnly && isContentEmpty(card.blockers) && isContentEmpty(card.whats_next) && !isContentEmpty(card.custom_note);
   return (
-    <div className="exec-track-card" {...dropHandlers}>
+    <div className="exec-track-card">
       <div className="exec-track-head">
-        {!readOnly && <span className="exec-init-drag" title="Drag to reorder" {...gripHandlers}>⠿</span>}
         <button type="button" className="exec-track-name" onClick={(e) => { if (hasTextSelection()) return; if (card.instKey) onOpenInstitution(card.name); }}>{card.name}</button>
         {card.typeMeta && <span className="badge" style={{ background: card.typeMeta.color + "22", color: card.typeMeta.color, border: `1px solid ${card.typeMeta.color}44` }}>{card.typeMeta.label}</span>}
         {tierMeta && <span className="tier-badge" style={{ background: tierMeta.bg, color: tierMeta.fg }}>{tierMeta.label}</span>}
@@ -7638,32 +7640,62 @@ function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdat
   );
 }
 
-function ExecTracking({ cards = [], readOnly = false, presenting = false, onAdd, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onReorder, trackOptions = [], onOpenInstitution, onOpenNote, showToast }) {
-  const [dragId, setDragId] = useState(null);
+// Fixed priority for grouping tracked institutions by type, keyword-matched
+// against the type label so custom types (e.g. "Government Tech", "Medical
+// Research Center") slot into the intended band without needing an exact id.
+// Anything unmatched falls after these, in a final "Other" band.
+const TRACK_GROUP_KEYWORDS = ["hospital", "payer", "regulator", "government", "research", "association", "vc"];
+const trackGroupPriority = (label) => {
+  const l = (label || "").toLowerCase();
+  const i = TRACK_GROUP_KEYWORDS.findIndex((k) => (k === "vc" ? /\bvc\b|venture/.test(l) : l.includes(k)));
+  return i === -1 ? TRACK_GROUP_KEYWORDS.length : i;
+};
+
+// Groups tracked-institution cards by type (fixed priority order, alphabetical
+// among ties), and within each group sorts by most recent system activity
+// first (institutions with no activity yet sink to the bottom of their group,
+// tied broken by name). This is the single source of ordering: there is no
+// manual drag for tracked institutions, so a newly-added institution and any
+// fresh activity always slot into the right place automatically.
+function groupTrackedCards(cards) {
+  const groups = new Map();
+  cards.forEach((card) => {
+    const label = card.typeMeta?.label || "Other";
+    if (!groups.has(label)) groups.set(label, { label, color: card.typeMeta?.color || null, priority: trackGroupPriority(label), cards: [] });
+    groups.get(label).cards.push(card);
+  });
+  groups.forEach((g) => g.cards.sort((a, b) => {
+    const ad = a.latestActivityAt, bd = b.latestActivityAt;
+    if (ad && bd) return new Date(bd) - new Date(ad);
+    if (ad) return -1;
+    if (bd) return 1;
+    return a.name.localeCompare(b.name);
+  }));
+  return [...groups.values()].sort((a, b) => a.priority - b.priority || a.label.localeCompare(b.label));
+}
+
+function ExecTracking({ cards = [], readOnly = false, presenting = false, onAdd, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, trackOptions = [], onOpenInstitution, onOpenNote, showToast }) {
   const [adding, setAdding] = useState(false);
-  const drop = (beforeId) => {
-    if (!dragId) return;
-    const ids = cards.map((c) => c.id).filter((id) => id !== dragId);
-    const at = beforeId ? ids.indexOf(beforeId) : ids.length;
-    ids.splice(at === -1 ? ids.length : at, 0, dragId);
-    onReorder(ids); setDragId(null);
-  };
   const pick = (value) => { if (!value) { setAdding(false); return; } const i = value.indexOf(":"); const type = value.slice(0, i); const id = value.slice(i + 1); onAdd({ [`${type}_id`]: id }); setAdding(false); };
+  const groups = groupTrackedCards(cards);
   return (
     <div className={`exec-track ${presenting ? "exec-track-present" : ""}`}>
       {!readOnly && (adding
         ? <div className="exec-track-add"><EntityPicker placeholder="Search institutions to track..." options={trackOptions} value="" onChange={pick} /><button type="button" className="link-btn" onClick={() => setAdding(false)}>Cancel</button></div>
         : <button type="button" className="btn-sec exec-track-addbtn" onClick={() => setAdding(true)}>+ Add institution to track</button>)}
       {cards.length === 0 && <div className="exec-track-empty">No institutions tracked yet. Add priority accounts to follow them period over period.</div>}
-      <div className="exec-track-list">
-        {cards.map((card) => (
-          <ExecTrackCard key={card.id} card={card} readOnly={readOnly} presenting={presenting}
-            onUpdateNewUpdates={onUpdateNewUpdates} onUpdateBlockers={onUpdateBlockers} onUpdateNext={onUpdateNext} onMarkReviewed={onMarkReviewed} onRemove={onRemove}
-            onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast}
-            dropHandlers={readOnly ? {} : { onDragOver: (e) => e.preventDefault(), onDrop: (e) => { e.preventDefault(); drop(card.id); } }}
-            gripHandlers={readOnly ? null : { draggable: true, onDragStart: () => setDragId(card.id) }} />
-        ))}
-      </div>
+      {groups.map((g) => (
+        <div key={g.label} className="exec-track-group">
+          <div className="exec-track-group-head" style={g.color ? { color: g.color } : undefined}>{g.label}</div>
+          <div className="exec-track-list">
+            {g.cards.map((card) => (
+              <ExecTrackCard key={card.id} card={card} readOnly={readOnly} presenting={presenting}
+                onUpdateNewUpdates={onUpdateNewUpdates} onUpdateBlockers={onUpdateBlockers} onUpdateNext={onUpdateNext} onMarkReviewed={onMarkReviewed} onRemove={onRemove}
+                onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -7729,7 +7761,7 @@ function ExecUpdateTab({
   onRegenerateSection, regeneratingSection, onOpenEvent, onOpenInstitution,
   onRefreshPipeline, refreshingPipelineId, onCleanupBlockers,
   initiativesFor, onAddInitiative, onUpdateInitiative, onDeleteInitiative, onMoveInitiative, execLinkOptions = [], resolveExecLink,
-  trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, onReorderTracked, execTrackOptions = [],
+  trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, execTrackOptions = [],
   questionsFor, onAddQuestion, onUpdateQuestion, onDeleteQuestion, onReorderQuestions,
   onOpenPerson, onOpenNote,
   onSync, onCloseAndStartNew,
@@ -7925,7 +7957,7 @@ function ExecUpdateTab({
       <div className="exec-extra-section">
         <div className="exec-extra-head">Tracking by Institution</div>
         <ExecTracking cards={trackedCards} readOnly={readOnly}
-          onAdd={onAddTracked} onUpdateNewUpdates={onUpdateTrackedNewUpdates} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked} onReorder={onReorderTracked}
+          onAdd={onAddTracked} onUpdateNewUpdates={onUpdateTrackedNewUpdates} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked}
           trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
       </div>
 
@@ -7957,7 +7989,7 @@ function ExecUpdateTab({
 }
 
 function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, todoContacts = [], bossComments, commentAuthor, onPostComment, onMarkCommentRead, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, institutions = [], onOpenInstitution, onOpenPerson, onOpenNote, onOpenTaskLink, showToast,
-  buildPipelineSnapshot, trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, onReorderTracked, execTrackOptions = [] }) {
+  buildPipelineSnapshot, trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, execTrackOptions = [] }) {
   const readOnly = useReadOnly();
   const [start, setStart] = useState(() => startOfWeek(new Date()));
   const [end, setEnd] = useState(() => addDaysLocal(startOfWeek(new Date()), 6));
@@ -8416,7 +8448,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
       <div className="wir-section">
         <div className="wir-section-title">Tracking by Institution</div>
         <ExecTracking cards={trackedCards} readOnly={readOnly}
-          onAdd={onAddTracked} onUpdateNewUpdates={onUpdateTrackedNewUpdates} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked} onReorder={onReorderTracked}
+          onAdd={onAddTracked} onUpdateNewUpdates={onUpdateTrackedNewUpdates} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked}
           trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
       </div>
 
