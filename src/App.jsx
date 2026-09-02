@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext, Fragment } from "react";
 import { api } from "./supabase";
-import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, generateMeetingSummary, generateConclusions, cleanupBlockers, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
+import { generateSummary, summarizeImage, researchInstitution, researchKeyPeople, researchClinicalTrials, digestVoiceNote, generateMeetingBrief, generateInternalBrief, generateConclusions, cleanupBlockers, fetchNewsStories, fetchNewsStoriesNoSearch, newsStoryHref, getApiCallsToday } from "./anthropic";
 import { STAGES, ACT_TYPES, TAG_OPTIONS, ENABLER_TYPES, PRIORITIES, ORG_TYPES, INSTITUTION_TYPES, CONNECTION_RELATIONSHIPS, DEAL_ENABLER_RELATIONSHIPS, NETWORK_EDGE_RELATIONSHIPS, PERSON_CONNECTION_RELATIONSHIPS, DEAL_TIERS, STRENGTHS, WARMTH_LEVELS, SAUDI_CITIES, REGIONS } from "./constants";
 import { formatDate, formatDateTime, formatFull, formatTime, isSameDay, daysAgo, isToday, isThisWeek, isOverdue, toDateTimeLocal, fromDateTimeLocal, FATHOM_MARKER, isFathomActivity, isFathomText, stripFathomMarker, activityCalendarEventId, cleanActivityText } from "./utils";
 import MapTab from "./MapTab";
@@ -483,25 +483,23 @@ function FormattedActivityBody({ lines }) {
 // Questions) which are not blocks: metrics, pipeline, new_relationships, then
 // Tracking / Initiatives / Questions, then meetings at the very bottom (the
 // editor and Present mode render meetings after the curated sections).
+// Meeting Summaries has been removed entirely (no longer generated, no
+// section, not shown in Present mode): the meeting content it used to
+// synthesize still lives on calendar events, notes, and tracked-institution
+// activity, it is just not its own section here any more.
 const EXEC_SECTIONS = [
   { id: "metrics", label: "Headline Metrics", regenerable: true },
   { id: "pipeline", label: "Pipeline", regenerable: true },
   { id: "new_relationships", label: "New Relationships", regenerable: true },
-  { id: "meetings", label: "Meeting Summaries", regenerable: true },
 ];
 const execSectionLabel = (id) => EXEC_SECTIONS.find((s) => s.id === id)?.label || id || "Other";
 const execSectionOrder = (id) => { const i = EXEC_SECTIONS.findIndex((s) => s.id === id); return i === -1 ? EXEC_SECTIONS.length : i; };
 const EXEC_BLOCK_TYPES = [
   { id: "item", label: "Item" },
-  { id: "meeting", label: "Meeting (with talking points)" },
   { id: "commentary", label: "Commentary" },
   { id: "metric", label: "Metric" },
   { id: "header", label: "Section header" },
 ];
-// The prefilled body of a meeting block that has no note or outcome yet. It is
-// still a real, editable block: Fahed can type the summary straight in, or use
-// "Add outcome" to jump to the meeting, dictate notes, and regenerate.
-const EXEC_MEETING_PLACEHOLDER = "Summary pending. Add outcome notes for this meeting.";
 const execEscapeHtml = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 // True when the user currently has a non-empty text selection. Click-to-navigate
 // handlers consult it so finishing a text selection over a clickable name (or a
@@ -514,11 +512,9 @@ const execBlockersToHtml = ({ outcomes, needs, asks } = {}) => {
   return [sec("Outcomes", outcomes), sec("Needs", needs), sec("Asks", asks)].filter(Boolean).join("");
 };
 
-// A `meeting` block carries two layers in one rich-text `content` field: the
-// leading text is the one-line outcome shown on the slide, and any bullet list
-// is the collapsible talking points. Keeping both in one field means the user
-// edits a meeting in a single editor (and can add or remove bullets naturally)
-// without needing a column the schema does not have.
+// Splits a block's rich-text content into a lead line plus any bullet-list
+// points, so the text/slide exports can render a heading with indented
+// sub-bullets (conclusions, next up, blockers) instead of one flattened run.
 function splitMeetingContent(html) {
   const doc = new DOMParser().parseFromString(`<div>${toDisplayHtml(html) || ""}</div>`, "text/html");
   const root = doc.body.firstChild;
@@ -526,15 +522,6 @@ function splitMeetingContent(html) {
   const points = list ? [...list.querySelectorAll("li")].map((li) => li.innerHTML.trim()).filter(Boolean) : [];
   if (list) list.remove();
   return { lead: root.innerHTML.trim(), points };
-}
-
-// Builds that same combined structure from a headline and a list of points.
-function buildMeetingContent(lead, points) {
-  const body = (lead || "").trim();
-  const items = (points || []).map((p) => String(p).trim()).filter(Boolean);
-  const leadHtml = looksLikeHtml(body) ? body : (body ? `<div>${body.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>` : "");
-  const listHtml = items.length ? `<ul>${items.map((p) => `<li>${p.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</li>`).join("")}</ul>` : "";
-  return `${leadHtml}${listHtml}`;
 }
 
 // Parses the calendar sync's activity descriptions, which look like
@@ -3685,76 +3672,6 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     return { counts, total: Object.values(counts).reduce((s, n) => s + n, 0), summary: parts.join(", ") };
   };
 
-  // Everything known about ONE meeting, concatenated into a blob for the model:
-  // prep and outcome notes, the linked note body, the activities on the event,
-  // and supporting messages with the same person around that date. This is what
-  // lets the AI write a real summary rather than paraphrasing a log line.
-  const execMeetingContext = (m) => {
-    const parts = [];
-    const who = [m.person, m.institution].filter(Boolean).join(", ");
-    parts.push(`Meeting: "${m.title}" on ${formatDate(m.day)}${who ? ` with ${who}` : ""}`);
-    const ev = m.event;
-    // A hand-logged meeting (or a logged outcome) carries its substance in its
-    // own description, not a separate note, so include it. A bare synced
-    // "Upcoming/Completed meeting" line is not content and is skipped.
-    const synced = parseSyncMeeting(m.activity.description);
-    if (!synced || synced.phase === "outcome") {
-      const d = cleanActivityText(m.activity.description || "").trim();
-      if (d) parts.push(`Notes: ${d}`);
-    }
-    if ((ev?.prep_notes || "").trim()) parts.push(`Prep notes: ${ev.prep_notes.trim()}`);
-    if ((ev?.outcome_notes || "").trim()) parts.push(`Outcome notes: ${stripFathomMarker(ev.outcome_notes).trim()}`);
-    // Prefer the note tagged to this event; fall back to an entity-linked note.
-    const evNote = ev ? notes.find((n) => n.calendar_event_id === ev.id) : null;
-    const noteRow = evNote || m.note;
-    if (noteRow && !isContentEmpty(noteRow.content)) parts.push(`Meeting note "${noteRow.title}": ${stripHtmlToText(noteRow.content)}`);
-    if (ev) {
-      activities.filter((a) => activityCalendarEventId(a) === ev.id).forEach((a) => {
-        const d = cleanActivityText(a.description || "").trim();
-        const sn = (a.body_snippet || "").trim();
-        if (d) parts.push(`Logged activity: ${d}`);
-        if (sn) parts.push(`Message excerpt: ${sn}`);
-      });
-    }
-    const cid = m.activity.contact_id;
-    if (cid) {
-      const dayMs = new Date(`${m.day}T00:00:00Z`).getTime();
-      activities
-        .filter((a) => a.contact_id === cid && a.id !== m.activity.id && ["whatsapp", "linkedin", "email", "call"].includes(a.type)
-          && Math.abs(new Date(a.created_at).getTime() - dayMs) <= 3 * 86400000)
-        .slice(0, 6)
-        .forEach((a) => { const d = firstLine(cleanActivityText(a.description || "")).trim(); if (d) parts.push(`Supporting ${a.type}: ${d}`); });
-    }
-    return parts.join("\n");
-  };
-
-  // True when a meeting has real content to summarize (as opposed to only a
-  // bare calendar placeholder). Drives whether a block gets an AI summary or
-  // the editable "summary pending" placeholder.
-  const execMeetingHasContent = (m) => {
-    const ev = m.event;
-    const evNote = ev ? notes.find((n) => n.calendar_event_id === ev.id) : null;
-    if ((ev?.outcome_notes || "").trim() || (ev?.prep_notes || "").trim()) return true;
-    if (evNote && !isContentEmpty(evNote.content)) return true;
-    if (m.note && !isContentEmpty(m.note.content)) return true;
-    if (ev && activities.some((a) => activityCalendarEventId(a) === ev.id && (a.body_snippet || "").trim())) return true;
-    // A hand-logged meeting or a logged outcome carries its substance in its
-    // own description; a bare synced upcoming/completed line does not.
-    const synced = parseSyncMeeting(m.activity.description);
-    if ((!synced || synced.phase === "outcome") && cleanActivityText(m.activity.description || "").trim()) return true;
-    return false;
-  };
-
-  // A readable one-line label for a meeting block. A hand-logged meeting's
-  // "title" is its whole first line, which can be a paragraph, so drop it in
-  // favor of who and date once it is clearly a description rather than a name.
-  const execMeetingTitleLine = (m) => {
-    const who = [m.person, m.institution].filter(Boolean).join(", ");
-    let name = (m.title || "").trim();
-    if (name.length > 60) name = who ? "" : `${name.slice(0, 57).trim()}...`;
-    return [name, who, formatDate(m.day)].filter(Boolean).join(", ");
-  };
-
   /* ---- Per-section block builders. Each returns an array of block payloads
      (no presentation_id/sort_order/id), header first. Both create (all
      sections) and Regenerate (one section) use these, so the two paths can
@@ -3819,36 +3736,6 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     { block_type: "header", section: "pipeline", title: "Pipeline", content: null },
     { block_type: "pipeline", section: "pipeline", title: null, content: JSON.stringify(buildPipelineSnapshot(startISO, endISO)) },
   ];
-
-  // One block per real meeting. A meeting with content gets an AI summary plus
-  // talking points; a meeting with none gets an editable placeholder and its
-  // calendar-event source, so "Add outcome" can jump there. Nothing is ever
-  // skipped and nothing is fabricated.
-  // One meeting block payload from a gathered meeting: an AI summary plus
-  // talking points when it has content, else an editable placeholder carrying
-  // its calendar-event source. Shared by create and the continuous sync.
-  const buildMeetingBlockForMeeting = async (m) => {
-    const src = { source_type: m.event ? "calendar_event" : "activity", source_id: m.event ? m.event.id : m.activity.id };
-    if (!execMeetingHasContent(m)) {
-      return { block_type: "meeting", section: "meetings", title: execMeetingTitleLine(m), content: buildMeetingContent(EXEC_MEETING_PLACEHOLDER, []), ...src };
-    }
-    let summary = null;
-    try { summary = await generateMeetingSummary(execMeetingContext(m)); }
-    catch (e) { console.error("[Exec] meeting summary failed", e); }
-    const lead = (summary?.summary || "").trim() || EXEC_MEETING_PLACEHOLDER;
-    const points = Array.isArray(summary?.talking_points) ? summary.talking_points : [];
-    return { block_type: "meeting", section: "meetings", title: execMeetingTitleLine(m), content: buildMeetingContent(lead, points), ...src };
-  };
-
-  const buildMeetingBlocks = async (startISO, endISO) => {
-    const meetings = gatherExecMeetings(startISO, endISO);
-    const header = { block_type: "header", section: "meetings", title: "Meeting Summaries", content: null };
-    if (!meetings.length) {
-      return [header, { block_type: "item", section: "meetings", title: null, content: "<div>No meetings logged in this period. Add one below, or log meetings on the calendar.</div>" }];
-    }
-    const rows = await Promise.all(meetings.map(buildMeetingBlockForMeeting));
-    return [header, ...rows];
-  };
 
   // Reads across the whole window. Falls back to editable scaffolding bullets
   // (never nothing) when the AI is unavailable or the data is thin.
@@ -3940,17 +3827,13 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
   // Runs the block-section builders in canonical order and returns a flat
   // payload list. The three curated sections (Tracking, Initiatives, Questions)
-  // are not blocks; the editor and Present mode slot them in between
-  // new_relationships and meetings, which is why meetings is generated last.
-  const buildAllExecSections = async (startISO, endISO) => {
-    const meetingB = await buildMeetingBlocks(startISO, endISO);
-    return [
-      ...buildMetricsBlocks(startISO, endISO),
-      ...buildPipelineBlocks(startISO, endISO),
-      ...buildNewRelationshipsBlocks(startISO, endISO),
-      ...meetingB,
-    ];
-  };
+  // are not blocks; the editor and Present mode slot them in after
+  // new_relationships. There is no Meeting Summaries section any more.
+  const buildAllExecSections = async (startISO, endISO) => [
+    ...buildMetricsBlocks(startISO, endISO),
+    ...buildPipelineBlocks(startISO, endISO),
+    ...buildNewRelationshipsBlocks(startISO, endISO),
+  ];
 
   // ISO window from a presentation's stored period dates (for Regenerate).
   const execPeriodISO = (pres) => ({
@@ -4015,7 +3898,6 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       metrics: async () => buildMetricsBlocks(startISO, endISO),
       pipeline: async () => buildPipelineBlocks(startISO, endISO),
       new_relationships: async () => buildNewRelationshipsBlocks(startISO, endISO),
-      meetings: () => buildMeetingBlocks(startISO, endISO),
       // Legacy sections kept so their Regenerate still works on older decks.
       conclusions: () => buildConclusionsBlocks(startISO, endISO),
       next_up: async () => buildNextUpBlocks(),
@@ -4194,27 +4076,6 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
       for (const p of patches) { await api("exec_blocks", "PATCH", p.patch, `?id=eq.${p.id}`); touched++; }
       if (patches.length) setExecBlocks((prev) => prev.map((b) => { const hit = patches.find((x) => x.id === b.id); return hit ? { ...b, ...hit.patch } : b; }));
-
-      // 3. Append a block for any new external meeting not already represented.
-      const meetings = gatherExecMeetings(startISO, endISO);
-      const presentKeys = new Set(existing.filter((b) => b.block_type === "meeting").map((b) => `${b.source_type}:${b.source_id}`));
-      const newMeetings = meetings.filter((m) => !presentKeys.has(`${m.event ? "calendar_event" : "activity"}:${m.event ? m.event.id : m.activity.id}`));
-      if (newMeetings.length) {
-        const built = await Promise.all(newMeetings.map(buildMeetingBlockForMeeting));
-        // Apply the metric/pipeline content patches to the working copy, so the
-        // append's setExecBlocks (which replaces this presentation's blocks)
-        // carries the refreshed content rather than reverting it.
-        const cur = execBlocksFor(pres.id).map((b) => { const hit = patches.find((x) => x.id === b.id); return hit ? { ...b, ...hit.patch } : b; });
-        const meetingIdxs = cur.map((b, i) => (b.section === "meetings" ? i : -1)).filter((i) => i !== -1);
-        const insertPos = meetingIdxs.length ? meetingIdxs[meetingIdxs.length - 1] + 1 : cur.length;
-        const toCreate = built.map((p) => ({ presentation_id: pres.id, is_hidden: false, source_type: null, source_id: null, ...p }));
-        const created = (await api("exec_blocks", "POST", toCreate)) || [];
-        const finalOrder = [...cur.slice(0, insertPos), ...created, ...cur.slice(insertPos)];
-        await Promise.all(finalOrder.map((b, i) => (b.sort_order === i ? null : api("exec_blocks", "PATCH", { sort_order: i }, `?id=eq.${b.id}`))).filter(Boolean));
-        const renumbered = finalOrder.map((b, i) => ({ ...b, sort_order: i }));
-        setExecBlocks((prev) => [...prev.filter((b) => b.presentation_id !== pres.id), ...renumbered]);
-        touched += created.length;
-      }
 
       if (touched) { await touchPresentation(pres.id); if (!silent) showToast(`Pulled in ${touched} update${touched === 1 ? "" : "s"} from the period`); }
       else if (!silent) showToast("Already up to date");
@@ -5735,7 +5596,6 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onReorder={reorderExecBlocks}
           onRegenerateSection={regenerateExecSection}
           regeneratingSection={execRegenSection}
-          onOpenEvent={openCalendarEventDetail}
           onOpenInstitution={(name) => openInstitution(name)}
           onRefreshPipeline={refreshExecPipeline}
           refreshingPipelineId={refreshingPipelineId}
@@ -7185,14 +7045,17 @@ function execPlainText(pres, blocks) {
   const summary = execSummaryLines(pres, "- ");
   if (summary.length) lines.push("", ...summary);
   let section = null;
-  blocks.filter((b) => !b.is_hidden).forEach((b) => {
+  // Section "meetings" (Meeting Summaries) is no longer generated and is
+  // excluded here too, in case a much older presentation still carries blocks
+  // under it.
+  blocks.filter((b) => !b.is_hidden && b.section !== "meetings").forEach((b) => {
     if (b.block_type === "header") { lines.push("", (b.title || execSectionLabel(b.section)).toUpperCase()); section = b.section; return; }
     if (b.section !== section && b.block_type !== "header") { /* keep flowing under the last header */ }
     if (b.block_type === "metric") { lines.push(`${b.title}: ${b.content || ""}`.trim()); return; }
     if (b.block_type === "pipeline") { execPipelineToLines(b.content, "- ", "    ").forEach((l) => lines.push(l)); return; }
     const title = (b.title || "").trim();
-    // Meetings and any block whose content is a bullet list (conclusions, next
-    // up, blockers) export as a lead line plus indented sub-bullets, so the
+    // Any block whose content is a bullet list (conclusions, next up,
+    // blockers) exports as a lead line plus indented sub-bullets, so the
     // detail travels into an email rather than being flattened into one run.
     const { lead, points } = splitMeetingContent(b.content);
     const outcome = stripHtmlToText(lead).trim();
@@ -7212,7 +7075,7 @@ function execPlainText(pres, blocks) {
 // Slide-ready export: one block per section with bullets, so each section can
 // be pasted straight onto its own slide.
 function execSlideText(pres, blocks) {
-  const visible = blocks.filter((b) => !b.is_hidden);
+  const visible = blocks.filter((b) => !b.is_hidden && b.section !== "meetings");
   const out = [`${pres.title || "Executive Update"}\n${formatDate(pres.period_start)} to ${formatDate(pres.period_end)}`];
   const summary = execSummaryLines(pres, "• ");
   if (summary.length) out.push(`\n--- SLIDE: Executive Summary ---\n${summary.slice(1).join("\n")}`);
@@ -7240,42 +7103,10 @@ function execSlideText(pres, blocks) {
   return out.join("\n");
 }
 
-// A meeting's two layers: the headline outcome always visible, the talking
-// points behind a chevron and collapsed by default. Used in BOTH edit and
-// present mode, so what Fahed rehearses is exactly what the executives see.
-// The slide stays clean; he expands only if someone asks for detail.
-function ExecMeetingBody({ content, presenting = false }) {
-  const [open, setOpen] = useState(false);
-  const { lead, points } = splitMeetingContent(content);
-  return (
-    <>
-      {lead && <RichTextView value={lead} className={presenting ? "exec-present-item-body" : "exec-block-content"} />}
-      {points.length > 0 && (
-        <div className="exec-points">
-          <button
-            type="button"
-            className="exec-points-toggle"
-            onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
-            aria-expanded={open}
-          >
-            <span className={`exec-chevron ${open ? "open" : ""}`}>›</span>
-            {open ? "Hide talking points" : `Talking points (${points.length})`}
-          </button>
-          {open && (
-            <ul className="exec-points-list">
-              {points.map((p, i) => <li key={i} dangerouslySetInnerHTML={{ __html: p }} />)}
-            </ul>
-          )}
-        </div>
-      )}
-    </>
-  );
-}
-
 // One editable block in EDIT MODE. Read state shows the rendered block with its
 // controls; editing swaps it for the inline form, matching the click-to-edit
 // pattern the rest of the app uses rather than opening a modal.
-function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDrop, isDragging, onMove, canMoveUp, canMoveDown, onRegenerate, regenerating, onOpenEvent, onOpenInstitution, onRefreshPipeline, refreshingPipeline, onCleanupBlockers, showToast }) {
+function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDrop, isDragging, onMove, canMoveUp, canMoveDown, onRegenerate, regenerating, onOpenInstitution, onRefreshPipeline, refreshingPipeline, onCleanupBlockers, showToast }) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(block.title || "");
   const [content, setContent] = useState(block.content || "");
@@ -7294,7 +7125,6 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
 
   const isHeader = block.block_type === "header";
   const isMetric = block.block_type === "metric";
-  const isMeeting = block.block_type === "meeting";
   const isPipeline = block.block_type === "pipeline";
   const isBlockers = block.section === "blockers" && !isHeader;
 
@@ -7309,11 +7139,6 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
   const sectionMeta = EXEC_SECTIONS.find((s) => s.id === block.section);
   const canRegen = isHeader && sectionMeta?.regenerable && onRegenerate;
   const regenBusy = regenerating === block.section;
-  // A meeting with a calendar-event source can jump to that event; the label
-  // is "Add outcome" while it still holds the placeholder, "Open meeting" once
-  // it has a real summary.
-  const meetingEventId = isMeeting && block.source_type === "calendar_event" ? block.source_id : null;
-  const isPlaceholderMeeting = isMeeting && stripHtmlToText(splitMeetingContent(block.content).lead).trim() === EXEC_MEETING_PLACEHOLDER;
 
   const appendDictation = (t) => {
     const clean = (t || "").trim();
@@ -7335,8 +7160,7 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
           <input className="input exec-edit-metric" value={content} onChange={(e) => setContent(e.target.value)} placeholder="Value" />
         ) : (
           <>
-            <RichTextEditor value={content} onChange={setContent} mini placeholder={isMeeting ? "Summary, then a bullet list for talking points..." : "What the executives should hear..."} />
-            {isMeeting && <div className="exec-add-hint">The bullet list is the collapsible talking points.</div>}
+            <RichTextEditor value={content} onChange={setContent} mini placeholder="What the executives should hear..." />
             {isBlockers && onCleanupBlockers && (
               <div className="exec-blockers-tools">
                 <VoiceRecorder mode="plain" compact showToast={showToast} onPlainText={appendDictation} title="Dictate blockers and asks" />
@@ -7375,15 +7199,8 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
             {block.title && <div className="exec-block-title">{block.title}</div>}
             {isPipeline
               ? <CollapsiblePipeline storageKey="mango-exec-pipeline-collapsed"><ExecPipelineBody content={block.content} editable onOpenInstitution={onOpenInstitution} onToggleHidden={toggleDealHidden} onRefresh={() => onRefreshPipeline && onRefreshPipeline(block)} refreshing={refreshingPipeline} /></CollapsiblePipeline>
-              : isMeeting
-                ? <ExecMeetingBody content={block.content} />
-                : block.content && <RichTextView value={block.content} className="exec-block-content" />}
+              : block.content && <RichTextView value={block.content} className="exec-block-content" />}
             {block.block_type === "commentary" && !isBlockers && <span className="exec-commentary-tag">Commentary</span>}
-            {meetingEventId && onOpenEvent && (
-              <button type="button" className={`link-btn exec-meeting-openbtn ${isPlaceholderMeeting ? "exec-meeting-addbtn" : ""}`} onClick={() => onOpenEvent(meetingEventId)}>
-                {isPlaceholderMeeting ? "Add outcome" : "↗ Open meeting"}
-              </button>
-            )}
           </>
         )}
       </div>
@@ -7411,7 +7228,7 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
 // added, since a header is just a block whose type is header.
 function ExecAddBlock({ onAdd }) {
   const [open, setOpen] = useState(false);
-  const [section, setSection] = useState("meetings");
+  const [section, setSection] = useState("new_relationships");
   const [blockType, setBlockType] = useState("item");
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
@@ -7446,9 +7263,8 @@ function ExecAddBlock({ onAdd }) {
       <input className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder={blockType === "header" ? "Section header text" : "Title"} autoFocus />
       {blockType !== "header" && (blockType === "metric"
         ? <input className="input" value={content} onChange={(e) => setContent(e.target.value)} placeholder="Value" />
-        : <RichTextEditor value={content} onChange={setContent} mini placeholder={blockType === "meeting" ? "One-line outcome, then a bullet list for talking points..." : "Detail..."} />
+        : <RichTextEditor value={content} onChange={setContent} mini placeholder="Detail..." />
       )}
-      {blockType === "meeting" && <div className="exec-add-hint">Any bullet list you add becomes the collapsible talking points.</div>}
       <div className="exec-edit-actions">
         <button type="button" className="btn-primary" disabled={saving || (!title.trim() && !content.trim())} onClick={submit}>{saving ? "Adding..." : "Add block"}</button>
         <button type="button" className="btn-ghost" onClick={() => setOpen(false)}>Cancel</button>
@@ -7468,7 +7284,10 @@ function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson
     return () => { window.removeEventListener("keydown", onKey); document.body.classList.remove("exec-presenting-body"); };
   }, [onExit]);
 
-  const visible = blocks.filter((b) => !b.is_hidden);
+  // The Meeting Summaries section has been removed entirely: never generated
+  // any more, and any block a much older presentation still carries under
+  // section "meetings" is excluded from Present mode rather than shown.
+  const visible = blocks.filter((b) => !b.is_hidden && b.section !== "meetings");
   // Group into runs so each header owns the blocks that follow it, and a run of
   // metrics can render as a row of big numbers.
   const groups = [];
@@ -7501,9 +7320,7 @@ function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson
             {b.title && <div className="exec-present-item-title">{b.title}</div>}
             {b.block_type === "pipeline"
               ? <CollapsiblePipeline storageKey="mango-exec-pipeline-collapsed"><ExecPipelineBody content={b.content} presenting onOpenInstitution={onOpenInstitution} /></CollapsiblePipeline>
-              : b.block_type === "meeting"
-                ? <ExecMeetingBody content={b.content} presenting />
-                : b.content && <RichTextView value={b.content} className="exec-present-item-body" />}
+              : b.content && <RichTextView value={b.content} className="exec-present-item-body" />}
           </div>
         ))}
       </section>
@@ -7520,9 +7337,9 @@ function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson
         </header>
         {/* Executive Summary framing at the top. */}
         <ExecSummaryPanel pres={pres} readOnly placement="top" />
-        {/* Non-meeting block groups first (metrics, pipeline, new relationships),
-            then the curated sections, then meetings at the bottom. */}
-        {groups.filter((g) => (g.header?.section || g.items[0]?.section) !== "meetings").map(renderGroup)}
+        {/* Block groups (metrics, pipeline, new relationships), then the
+            curated sections, then the closing Executive Summary. */}
+        {groups.map(renderGroup)}
         {(trackedCards.length > 0 || trackedPeopleCards.length > 0) && (
           <section className="exec-present-section">
             <h2>Tracking</h2>
@@ -7541,7 +7358,6 @@ function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson
             <ExecQuestions items={questions} readOnly presenting />
           </section>
         )}
-        {groups.filter((g) => (g.header?.section || g.items[0]?.section) === "meetings").map(renderGroup)}
         {/* Executive Summary reinforcement to close on. */}
         <ExecSummaryPanel pres={pres} readOnly placement="bottom" />
         {visible.length === 0 && initiatives.length === 0 && trackedCards.length === 0 && questions.length === 0 && <div className="exec-present-empty">Nothing to present yet. Add or unhide some blocks.</div>}
@@ -7963,7 +7779,7 @@ function ExecUpdateTab({
   presentations, blocksFor, openId, onOpen, onCreate, generating,
   onUpdatePresentation, onDeletePresentation,
   onAddBlock, onUpdateBlock, onDeleteBlock, onReorder,
-  onRegenerateSection, regeneratingSection, onOpenEvent, onOpenInstitution,
+  onRegenerateSection, regeneratingSection, onOpenInstitution,
   onRefreshPipeline, refreshingPipelineId, onCleanupBlockers,
   initiativesFor, onAddInitiative, onUpdateInitiative, onDeleteInitiative, onMoveInitiative, execLinkOptions = [], resolveExecLink,
   trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, execTrackOptions = [],
@@ -8076,14 +7892,13 @@ function ExecUpdateTab({
   };
 
   // One block, either the read-only static render (Boss View) or the editable
-  // ExecBlockRow. Used to render the non-meeting and meeting groups separately,
-  // with the three curated sections slotted between them.
+  // ExecBlockRow.
   const renderBlock = (b) => readOnly ? (
     <div key={b.id} className={`exec-block exec-block-${b.block_type} ${b.is_hidden ? "exec-block-hidden" : ""}`}>
       <div className="exec-block-body">
         {b.block_type === "header" ? <div className="exec-block-header-text">{b.title || execSectionLabel(b.section)}</div>
           : b.block_type === "metric" ? <div className="exec-metric-inline"><span className="exec-metric-value">{b.content}</span><span className="exec-metric-label">{b.title}</span></div>
-          : <>{b.title && <div className="exec-block-title">{b.title}</div>}{b.block_type === "pipeline" ? <CollapsiblePipeline storageKey="mango-exec-pipeline-collapsed"><ExecPipelineBody content={b.content} onOpenInstitution={onOpenInstitution} /></CollapsiblePipeline> : b.block_type === "meeting" ? <ExecMeetingBody content={b.content} /> : b.content && <RichTextView value={b.content} className="exec-block-content" />}</>}
+          : <>{b.title && <div className="exec-block-title">{b.title}</div>}{b.block_type === "pipeline" ? <CollapsiblePipeline storageKey="mango-exec-pipeline-collapsed"><ExecPipelineBody content={b.content} onOpenInstitution={onOpenInstitution} /></CollapsiblePipeline> : b.content && <RichTextView value={b.content} className="exec-block-content" />}</>}
       </div>
     </div>
   ) : (
@@ -8092,14 +7907,15 @@ function ExecUpdateTab({
       isDragging={dragId === b.id} onDragStart={() => setDragId(b.id)} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); onDrop(b.id); }}
       onMove={move} canMoveUp={blocks.indexOf(b) > 0} canMoveDown={blocks.indexOf(b) < blocks.length - 1}
       onRegenerate={(section) => onRegenerateSection(pres, section)} regenerating={regeneratingSection}
-      onOpenEvent={onOpenEvent} onOpenInstitution={onOpenInstitution}
+      onOpenInstitution={onOpenInstitution}
       onRefreshPipeline={onRefreshPipeline} refreshingPipeline={refreshingPipelineId === b.id}
       onCleanupBlockers={onCleanupBlockers} showToast={showToast}
     />
   );
-  // Meetings sit at the very bottom, after the curated sections.
+  // The Meeting Summaries section has been removed entirely: no longer
+  // generated, and any block a much older presentation still carries under
+  // section "meetings" is filtered out of the layout rather than rendered.
   const nonMeetingBlocks = blocks.filter((b) => b.section !== "meetings");
-  const meetingBlocks = blocks.filter((b) => b.section === "meetings");
 
   return (
     <div className="exec-tab exec-editor">
@@ -8130,7 +7946,7 @@ function ExecUpdateTab({
           </div>
         </div>
         <div className="exec-editor-actions">
-          {!readOnly && onSync && <button className="btn-ghost" disabled={syncing} onClick={runSync} title="Pull in new meetings and refresh the metrics and pipeline for this period">{syncing ? "Refreshing..." : "↻ Refresh from period"}</button>}
+          {!readOnly && onSync && <button className="btn-ghost" disabled={syncing} onClick={runSync} title="Refresh the metrics, pipeline, and new relationships for this period">{syncing ? "Refreshing..." : "↻ Refresh from period"}</button>}
           <button className="btn-primary" onClick={onPresent}>Present</button>
           <button className="btn-ghost" onClick={() => copy(execPlainText(pres, blocks), "Update")}>Copy as text</button>
           <button className="btn-ghost" onClick={() => copy(execSlideText(pres, blocks), "Slides")}>Copy for slides</button>
@@ -8157,7 +7973,8 @@ function ExecUpdateTab({
         onSave={(key, html) => onUpdatePresentation(pres.id, { [key]: html })} />
 
       {/* Top-to-bottom order: metrics, pipeline, new relationships (blocks),
-          then Tracking / Initiatives / Questions (curated), then meetings. */}
+          then Tracking / Initiatives / Questions (curated), then the closing
+          Executive Summary. There is no Meeting Summaries section any more. */}
       <div className="exec-blocks">
         {blocks.length === 0 && <div className="empty-small">No blocks yet. Add one below.</div>}
         {nonMeetingBlocks.map(renderBlock)}
@@ -8187,8 +8004,6 @@ function ExecUpdateTab({
           onAdd={(text) => onAddQuestion(pres.id, text)} onUpdate={onUpdateQuestion} onDelete={onDeleteQuestion} onReorder={onReorderQuestions}
           showToast={showToast} />
       </div>
-
-      {meetingBlocks.length > 0 && <div className="exec-blocks exec-blocks-meetings">{meetingBlocks.map(renderBlock)}</div>}
 
       {!readOnly && <ExecAddBlock onAdd={(fields) => onAddBlock(pres.id, fields)} />}
 
