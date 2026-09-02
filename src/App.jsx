@@ -7394,7 +7394,7 @@ function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson
           <div key={b.id} className={`exec-present-item ${b.block_type === "commentary" ? "exec-present-commentary" : ""}`}>
             {b.title && <div className="exec-present-item-title">{b.title}</div>}
             {b.block_type === "pipeline"
-              ? <ExecPipelineBody content={b.content} presenting onOpenInstitution={onOpenInstitution} />
+              ? <CollapsiblePipeline storageKey="mango-exec-pipeline-collapsed"><ExecPipelineBody content={b.content} presenting onOpenInstitution={onOpenInstitution} /></CollapsiblePipeline>
               : b.block_type === "meeting"
                 ? <ExecMeetingBody content={b.content} presenting />
                 : b.content && <RichTextView value={b.content} className="exec-present-item-body" />}
