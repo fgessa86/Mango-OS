@@ -1911,7 +1911,13 @@ body.exec-presenting-body { overflow: hidden; }
 .exec-init-empty { font-size: 12px; color: var(--muted); padding: 6px 2px; }
 .exec-init-card { display: flex; align-items: flex-start; gap: 6px; background: var(--card); border: 1px solid var(--border); border-radius: 9px; padding: 8px; }
 .exec-init-card.dragging { opacity: .5; }
-.exec-init-drag { cursor: grab; color: var(--muted-2); font-size: 13px; line-height: 1.4; flex-shrink: 0; }
+.exec-init-drag { cursor: grab; color: var(--muted-2); font-size: 13px; line-height: 1.4; flex-shrink: 0; user-select: none; }
+.exec-init-drag:active { cursor: grabbing; }
+/* The card text stays selectable (drag now lives on the grip icon only). */
+.exec-track-card, .exec-block, .exec-init-card, .exec-q-row, .exec-summary-panel, .exec-present-item, .exec-present-section { user-select: text; }
+/* Clickable name labels are buttons; make their text selectable too (the click
+   handlers ignore a click that finishes a text selection). */
+.exec-track-name, .exec-pipeline-company, .wir-row-name, .exec-link-chip, .exec-track-update-text { user-select: text; }
 .exec-init-card-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .exec-init-link { display: flex; align-items: center; gap: 4px; }
 .exec-init-linkbtn { font-size: 11.5px; }

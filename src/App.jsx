@@ -503,6 +503,10 @@ const EXEC_BLOCK_TYPES = [
 // "Add outcome" to jump to the meeting, dictate notes, and regenerate.
 const EXEC_MEETING_PLACEHOLDER = "Summary pending. Add outcome notes for this meeting.";
 const execEscapeHtml = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// True when the user currently has a non-empty text selection. Click-to-navigate
+// handlers consult it so finishing a text selection over a clickable name (or a
+// mention chip) copies rather than navigating away.
+const hasTextSelection = () => { try { const s = window.getSelection && window.getSelection(); return !!(s && !s.isCollapsed && String(s).trim().length > 0); } catch { return false; } };
 const execBulletsToHtml = (arr) => (arr && arr.length) ? `<ul>${arr.map((b) => `<li>${execEscapeHtml(b)}</li>`).join("")}</ul>` : "";
 // Blockers cleanup renders as three labeled lists.
 const execBlockersToHtml = ({ outcomes, needs, asks } = {}) => {
@@ -4305,7 +4309,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   };
   const updateExecTracked = async (id, patch) => {
     // Upgrade literal @names in any commentary field the patch carries.
-    ["custom_note", "blockers", "whats_next"].forEach((f) => { if (f in patch) patch = { ...patch, [f]: upgradeHtmlMentions(patch[f]) }; });
+    ["custom_note", "new_updates", "blockers", "whats_next"].forEach((f) => { if (f in patch) patch = { ...patch, [f]: upgradeHtmlMentions(patch[f]) }; });
     try {
       await api("exec_tracked_institutions", "PATCH", patch, `?id=eq.${id}`);
       setExecTracked((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
@@ -4816,6 +4820,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     return {
       id: t.id,
       custom_note: t.custom_note || "",
+      new_updates: t.new_updates || "",
       blockers: t.blockers || "",
       whats_next: t.whats_next || "",
       last_reviewed_at: t.last_reviewed_at || null,
@@ -4844,6 +4849,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       const chip = e.target.closest?.(".mention[data-mkind]");
       if (!chip) return;
       if (chip.closest('[contenteditable="true"]')) return;
+      // Finishing a text selection over a chip should copy, not navigate.
+      if (hasTextSelection()) return;
       e.preventDefault();
       openMention(chip.getAttribute("data-mkind"), chip.getAttribute("data-mid"), chip.getAttribute("data-mname"));
     };
@@ -5665,6 +5672,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           trackedRows={execTracked}
           resolveTrackedCard={resolveTrackedCard}
           onAddTracked={addExecTracked}
+          onUpdateTrackedNewUpdates={(id, html) => updateExecTracked(id, { new_updates: html })}
           onUpdateTrackedBlockers={(id, html) => updateExecTracked(id, { blockers: html })}
           onUpdateTrackedNext={(id, html) => updateExecTracked(id, { whats_next: html })}
           onMarkTrackedReviewed={markTrackedReviewed}
@@ -5715,6 +5723,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           trackedRows={execTracked}
           resolveTrackedCard={resolveTrackedCard}
           onAddTracked={addExecTracked}
+          onUpdateTrackedNewUpdates={(id, html) => updateExecTracked(id, { new_updates: html })}
           onUpdateTrackedBlockers={(id, html) => updateExecTracked(id, { blockers: html })}
           onUpdateTrackedNext={(id, html) => updateExecTracked(id, { whats_next: html })}
           onMarkTrackedReviewed={markTrackedReviewed}
@@ -7035,7 +7044,7 @@ function ExecPipelineBody({ content, presenting = false, editable = false, onOpe
                         return (
                           <div key={d.id} className={`exec-pipeline-card ${moved ? "exec-pipeline-card-moved" : ""} ${isHidden ? "exec-pipeline-deal-hidden" : ""}`}>
                             <div className="exec-pipeline-card-top">
-                              <button type="button" className="exec-pipeline-company" onClick={() => open(d.company)} title={`Open ${d.company}`}>{d.company}</button>
+                              <button type="button" className="exec-pipeline-company" onClick={() => { if (!hasTextSelection()) open(d.company); }} title={`Open ${d.company}`}>{d.company}</button>
                               {editable && onToggleHidden && (
                                 <button type="button" className="exec-pipeline-hide" onClick={() => onToggleHidden(d.id)} title={isHidden ? "Show in presentation" : "Hide from presentation"}>{isHidden ? "🚫" : "👁"}</button>
                               )}
@@ -7250,12 +7259,10 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
   return (
     <div
       className={`exec-block exec-block-${block.block_type} exec-block-sec-${block.section} ${block.is_hidden ? "exec-block-hidden" : ""} ${isDragging ? "exec-block-dragging" : ""}`}
-      draggable
-      onDragStart={onDragStart}
       onDragOver={onDragOver}
       onDrop={onDrop}
     >
-      <span className="exec-drag-handle" title="Drag to reorder">⠿</span>
+      <span className="exec-drag-handle" title="Drag to reorder" draggable onDragStart={onDragStart}>⠿</span>
       <div className="exec-block-body">
         {isHeader ? (
           <div className="exec-block-header-text">{block.title || execSectionLabel(block.section)}</div>
@@ -7492,10 +7499,9 @@ function ExecInitiativeCard({ item, readOnly, onUpdate, onDelete, linkOptions, r
   };
   return (
     <div className={`exec-init-card ${isDragging ? "dragging" : ""}`}
-      draggable={!readOnly} onDragStart={readOnly ? undefined : onDragStart}
       onDragOver={readOnly ? undefined : (e) => e.preventDefault()}
       onDrop={readOnly ? undefined : (e) => { e.preventDefault(); e.stopPropagation(); onDropBefore(); }}>
-      {!readOnly && <span className="exec-init-drag" title="Drag to move or reorder">⠿</span>}
+      {!readOnly && <span className="exec-init-drag" title="Drag to move or reorder" draggable onDragStart={onDragStart}>⠿</span>}
       <div className="exec-init-card-body">
         <ExecRichField value={item.content} onSave={(html) => onUpdate(item.id, { content: html })} readOnly={readOnly} placeholder="Describe this initiative..." showToast={showToast} />
         {link ? (
@@ -7566,17 +7572,17 @@ function ExecTrackUpdateList({ list, onOpenNote }) {
 // One tracked-institution card with the four labeled sections: Past Updates
 // (collapsed), New Update (expanded), Blockers, and What's Next. Past/New split
 // on last_reviewed_at; "Mark as reviewed" rolls New into Past.
-function ExecTrackCard({ card, readOnly, presenting, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onOpenInstitution, onOpenNote, showToast, dragHandlers }) {
+function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onOpenInstitution, onOpenNote, showToast, dropHandlers, gripHandlers }) {
   const [pastOpen, setPastOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(true);
   const tierMeta = card.tier ? DEAL_TIERS.find((t) => t.id === card.tier) : null;
   const stageMeta = card.stage ? STAGES.find((s) => s.id === card.stage) : null;
   const showLegacy = !readOnly && isContentEmpty(card.blockers) && isContentEmpty(card.whats_next) && !isContentEmpty(card.custom_note);
   return (
-    <div className="exec-track-card" {...dragHandlers}>
+    <div className="exec-track-card" {...dropHandlers}>
       <div className="exec-track-head">
-        {!readOnly && <span className="exec-init-drag" title="Drag to reorder">⠿</span>}
-        <button type="button" className="exec-track-name" onClick={() => card.instKey && onOpenInstitution(card.name)}>{card.name}</button>
+        {!readOnly && <span className="exec-init-drag" title="Drag to reorder" {...gripHandlers}>⠿</span>}
+        <button type="button" className="exec-track-name" onClick={(e) => { if (hasTextSelection()) return; if (card.instKey) onOpenInstitution(card.name); }}>{card.name}</button>
         {card.typeMeta && <span className="badge" style={{ background: card.typeMeta.color + "22", color: card.typeMeta.color, border: `1px solid ${card.typeMeta.color}44` }}>{card.typeMeta.label}</span>}
         {tierMeta && <span className="tier-badge" style={{ background: tierMeta.bg, color: tierMeta.fg }}>{tierMeta.label}</span>}
         {stageMeta && <span className="badge" style={{ background: stageMeta.color + "22", color: stageMeta.color, border: `1px solid ${stageMeta.color}44` }}>{stageMeta.label}</span>}
@@ -7592,7 +7598,7 @@ function ExecTrackCard({ card, readOnly, presenting, onUpdateBlockers, onUpdateN
       {card.pastUpdates.length > 0 && (
         <div className="exec-track-sec">
           <button type="button" className="exec-track-sec-toggle" onClick={() => setPastOpen((v) => !v)} aria-expanded={pastOpen}>
-            <span className={`exec-chevron ${pastOpen ? "open" : ""}`}>›</span> Past Updates <span className="exec-track-sec-count">{card.pastUpdates.length}</span>
+            <span className={`exec-chevron ${pastOpen ? "open" : ""}`}>›</span> Past Activity <span className="exec-track-sec-count">{card.pastUpdates.length}</span>
           </button>
           {pastOpen && <ExecTrackUpdateList list={card.pastUpdates} onOpenNote={onOpenNote} />}
         </div>
@@ -7600,11 +7606,16 @@ function ExecTrackCard({ card, readOnly, presenting, onUpdateBlockers, onUpdateN
 
       <div className="exec-track-sec">
         <button type="button" className="exec-track-sec-toggle" onClick={() => setNewOpen((v) => !v)} aria-expanded={newOpen}>
-          <span className={`exec-chevron ${newOpen ? "open" : ""}`}>›</span> New Update <span className="exec-track-sec-count">{card.newUpdates.length}</span>
+          <span className={`exec-chevron ${newOpen ? "open" : ""}`}>›</span> New Activity <span className="exec-track-sec-count">{card.newUpdates.length}</span>
         </button>
         {newOpen && (card.newUpdates.length > 0
           ? <ExecTrackUpdateList list={card.newUpdates} onOpenNote={onOpenNote} />
           : <div className="exec-track-sec-empty">No new activity since the last review.</div>)}
+      </div>
+
+      <div className="exec-track-sec exec-track-sec-commentary">
+        <div className="exec-track-sec-label">New Updates</div>
+        <ExecRichField value={card.new_updates} onSave={(html) => onUpdateNewUpdates(card.id, html)} readOnly={readOnly} placeholder="Your written update this period." showToast={showToast} />
       </div>
 
       <div className="exec-track-sec exec-track-sec-commentary">
@@ -7627,7 +7638,7 @@ function ExecTrackCard({ card, readOnly, presenting, onUpdateBlockers, onUpdateN
   );
 }
 
-function ExecTracking({ cards = [], readOnly = false, presenting = false, onAdd, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onReorder, trackOptions = [], onOpenInstitution, onOpenNote, showToast }) {
+function ExecTracking({ cards = [], readOnly = false, presenting = false, onAdd, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onReorder, trackOptions = [], onOpenInstitution, onOpenNote, showToast }) {
   const [dragId, setDragId] = useState(null);
   const [adding, setAdding] = useState(false);
   const drop = (beforeId) => {
@@ -7647,9 +7658,10 @@ function ExecTracking({ cards = [], readOnly = false, presenting = false, onAdd,
       <div className="exec-track-list">
         {cards.map((card) => (
           <ExecTrackCard key={card.id} card={card} readOnly={readOnly} presenting={presenting}
-            onUpdateBlockers={onUpdateBlockers} onUpdateNext={onUpdateNext} onMarkReviewed={onMarkReviewed} onRemove={onRemove}
+            onUpdateNewUpdates={onUpdateNewUpdates} onUpdateBlockers={onUpdateBlockers} onUpdateNext={onUpdateNext} onMarkReviewed={onMarkReviewed} onRemove={onRemove}
             onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast}
-            dragHandlers={readOnly ? {} : { draggable: true, onDragStart: () => setDragId(card.id), onDragOver: (e) => e.preventDefault(), onDrop: (e) => { e.preventDefault(); drop(card.id); } }} />
+            dropHandlers={readOnly ? {} : { onDragOver: (e) => e.preventDefault(), onDrop: (e) => { e.preventDefault(); drop(card.id); } }}
+            gripHandlers={readOnly ? null : { draggable: true, onDragStart: () => setDragId(card.id) }} />
         ))}
       </div>
     </div>
@@ -7684,9 +7696,8 @@ function ExecQuestions({ items = [], readOnly = false, presenting = false, onAdd
       <div className="exec-q-list">
         {open.map((q) => (
           <div key={q.id} className="exec-q-row"
-            draggable={!readOnly} onDragStart={readOnly ? undefined : () => setDragId(q.id)}
             onDragOver={readOnly ? undefined : (e) => e.preventDefault()} onDrop={readOnly ? undefined : (e) => { e.preventDefault(); drop(q.id); }}>
-            {!readOnly && <span className="exec-init-drag" title="Drag to reorder">⠿</span>}
+            {!readOnly && <span className="exec-init-drag" title="Drag to reorder" draggable onDragStart={() => setDragId(q.id)}>⠿</span>}
             <input type="checkbox" className="exec-q-check" checked={false} disabled={readOnly} onChange={() => onUpdate(q.id, { is_resolved: true })} title="Mark resolved" />
             <div className="exec-q-text"><ExecRichField value={q.content} onSave={(html) => onUpdate(q.id, { content: html })} readOnly={readOnly} placeholder="Question..." showToast={showToast} /></div>
             {!readOnly && <button type="button" className="exec-init-del" onClick={() => onDelete(q.id)} title="Delete">✕</button>}
@@ -7718,7 +7729,7 @@ function ExecUpdateTab({
   onRegenerateSection, regeneratingSection, onOpenEvent, onOpenInstitution,
   onRefreshPipeline, refreshingPipelineId, onCleanupBlockers,
   initiativesFor, onAddInitiative, onUpdateInitiative, onDeleteInitiative, onMoveInitiative, execLinkOptions = [], resolveExecLink,
-  trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, onReorderTracked, execTrackOptions = [],
+  trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, onReorderTracked, execTrackOptions = [],
   questionsFor, onAddQuestion, onUpdateQuestion, onDeleteQuestion, onReorderQuestions,
   onOpenPerson, onOpenNote,
   onSync, onCloseAndStartNew,
@@ -7914,7 +7925,7 @@ function ExecUpdateTab({
       <div className="exec-extra-section">
         <div className="exec-extra-head">Tracking by Institution</div>
         <ExecTracking cards={trackedCards} readOnly={readOnly}
-          onAdd={onAddTracked} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked} onReorder={onReorderTracked}
+          onAdd={onAddTracked} onUpdateNewUpdates={onUpdateTrackedNewUpdates} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked} onReorder={onReorderTracked}
           trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
       </div>
 
@@ -7946,7 +7957,7 @@ function ExecUpdateTab({
 }
 
 function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, todoContacts = [], bossComments, commentAuthor, onPostComment, onMarkCommentRead, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, institutions = [], onOpenInstitution, onOpenPerson, onOpenNote, onOpenTaskLink, showToast,
-  buildPipelineSnapshot, trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, onReorderTracked, execTrackOptions = [] }) {
+  buildPipelineSnapshot, trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, onReorderTracked, execTrackOptions = [] }) {
   const readOnly = useReadOnly();
   const [start, setStart] = useState(() => startOfWeek(new Date()));
   const [end, setEnd] = useState(() => addDaysLocal(startOfWeek(new Date()), 6));
@@ -8353,7 +8364,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
             {newPeople.length > 0 && (
               <div className="wir-list">
                 {newPeople.map((p) => (
-                  <div key={p.id} className="wir-row wir-row-click" onClick={() => onOpenPerson(p.id)}>
+                  <div key={p.id} className="wir-row wir-row-click" onClick={() => { if (!hasTextSelection()) onOpenPerson(p.id); }}>
                     <span className="wir-row-name">{p.name}</span>
                     <span className="wir-row-detail">{p.role}{p.institutionName ? ` at ${p.institutionName}` : ""}</span>
                   </div>
@@ -8365,7 +8376,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
                 {newInstitutions.map((i) => {
                   const meta = institutionTypeMeta(i.type);
                   return (
-                    <div key={i.id} className="wir-row wir-row-click" onClick={() => onOpenInstitution(i.name)}>
+                    <div key={i.id} className="wir-row wir-row-click" onClick={() => { if (!hasTextSelection()) onOpenInstitution(i.name); }}>
                       <span className="wir-row-name">{i.name}</span>
                       <span className="badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{meta.label}</span>
                       {i.tier && <span className="badge">{i.tier}</span>}
@@ -8405,7 +8416,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
       <div className="wir-section">
         <div className="wir-section-title">Tracking by Institution</div>
         <ExecTracking cards={trackedCards} readOnly={readOnly}
-          onAdd={onAddTracked} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked} onReorder={onReorderTracked}
+          onAdd={onAddTracked} onUpdateNewUpdates={onUpdateTrackedNewUpdates} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked} onReorder={onReorderTracked}
           trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
       </div>
 
