@@ -4065,6 +4065,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
   const updateExecPresentation = async (id, patch) => {
     try {
+      // Upgrade literal @names in any Executive Summary field the patch carries.
+      ["summary_headline", "summary_destination", "summary_next"].forEach((f) => { if (f in patch) patch = { ...patch, [f]: upgradeHtmlMentions(patch[f]) }; });
       const now = new Date().toISOString();
       const body = { ...patch, updated_at: now };
       await api("exec_presentations", "PATCH", body, `?id=eq.${id}`);
@@ -4302,11 +4304,18 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Could not track institution"); return null; }
   };
   const updateExecTracked = async (id, patch) => {
-    if ("custom_note" in patch) patch = { ...patch, custom_note: upgradeHtmlMentions(patch.custom_note) };
+    // Upgrade literal @names in any commentary field the patch carries.
+    ["custom_note", "blockers", "whats_next"].forEach((f) => { if (f in patch) patch = { ...patch, [f]: upgradeHtmlMentions(patch[f]) }; });
     try {
       await api("exec_tracked_institutions", "PATCH", patch, `?id=eq.${id}`);
       setExecTracked((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
     } catch { showToast("Could not save"); }
+  };
+  // "Mark as reviewed": stamps last_reviewed_at now, so the current New Update
+  // rolls into Past Updates and fresh activity accumulates as the new New.
+  const markTrackedReviewed = async (id) => {
+    await updateExecTracked(id, { last_reviewed_at: new Date().toISOString() });
+    showToast("Marked as reviewed. New updates now accumulate from here.");
   };
   const removeExecTracked = async (id) => {
     try {
@@ -4776,39 +4785,48 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       : institutions.find((i) => i.orgId === linkId);
     return inst ? { label: inst.name, onOpen: () => openInstitution(inst.name) } : null;
   };
-  // Resolve a tracked row to a card: institution meta plus recent system
-  // updates (activities, notes, stage moves) since `sinceISO`.
+  // Resolve a tracked row to a four-section card: institution meta, plus the
+  // auto-recorded system updates (activities, notes, stage moves) split into
+  // NEW (since last_reviewed_at, or the period start when never reviewed) and
+  // PAST (everything older), plus Fahed's Blockers and What's Next commentary.
+  // The boundary is last_reviewed_at so "Mark as reviewed" rolls the current
+  // New into Past and starts a fresh New from now.
   const resolveTrackedCard = (t, sinceISO) => {
     const inst = t.deal_id ? institutions.find((i) => i.dealId === t.deal_id)
       : t.enabler_id ? institutions.find((i) => i.enablerId === t.enabler_id)
       : institutions.find((i) => i.orgId === t.organization_id);
-    const since = sinceISO || new Date(Date.now() - 14 * 86400000).toISOString();
+    const boundary = t.last_reviewed_at || sinceISO || new Date(Date.now() - 14 * 86400000).toISOString();
     const updates = [];
     if (inst) {
       activities
-        .filter((a) => a.created_at >= since && ((inst.dealId && a.deal_id === inst.dealId) || (inst.enablerId && a.enabler_id === inst.enablerId) || (inst.orgId && a.organization_id === inst.orgId)) && !(a.type === "note" && /^Moved to /.test(a.description || "")))
-        .slice(0, 8)
+        .filter((a) => ((inst.dealId && a.deal_id === inst.dealId) || (inst.enablerId && a.enabler_id === inst.enablerId) || (inst.orgId && a.organization_id === inst.orgId)) && !(a.type === "note" && /^Moved to /.test(a.description || "")))
         .forEach((a) => updates.push({ kind: "activity", type: a.type, text: firstLine(cleanActivityText(a.description || "")), date: a.created_at }));
       if (inst.dealId) {
         buildStageTransitions(activities, deals)
-          .filter((tr) => tr.dealId === inst.dealId && tr.date >= since)
+          .filter((tr) => tr.dealId === inst.dealId)
           .forEach((tr) => updates.push({ kind: "stage", text: `Moved ${stageLabel(tr.fromStage)} to ${stageLabel(tr.toStage)}`, date: tr.date }));
       }
       notes
-        .filter((n) => (n.updated_at || n.created_at) >= since && ((inst.dealId && n.deal_id === inst.dealId) || (inst.enablerId && n.enabler_id === inst.enablerId) || (inst.orgId && n.organization_id === inst.orgId)))
+        .filter((n) => ((inst.dealId && n.deal_id === inst.dealId) || (inst.enablerId && n.enabler_id === inst.enablerId) || (inst.orgId && n.organization_id === inst.orgId)))
         .forEach((n) => updates.push({ kind: "note", text: n.title || "Untitled note", date: n.updated_at || n.created_at, noteId: n.id }));
     }
     updates.sort((a, b) => new Date(b.date) - new Date(a.date));
+    const newUpdates = updates.filter((u) => u.date && u.date >= boundary).slice(0, 12);
+    const pastUpdates = updates.filter((u) => !u.date || u.date < boundary).slice(0, 15);
     return {
       id: t.id,
       custom_note: t.custom_note || "",
+      blockers: t.blockers || "",
+      whats_next: t.whats_next || "",
+      last_reviewed_at: t.last_reviewed_at || null,
       inst,
       name: inst?.name || "(institution not found)",
       instKey: inst?.key || null,
       typeMeta: inst?.type ? institutionTypeMeta(inst.type, customOptions) : null,
       tier: inst?.deal?.tier && inst.deal.tier !== "Untiered" ? inst.deal.tier : null,
       stage: inst?.stage || null,
-      updates: updates.slice(0, 10),
+      newUpdates,
+      pastUpdates,
     };
   };
 
@@ -5647,7 +5665,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           trackedRows={execTracked}
           resolveTrackedCard={resolveTrackedCard}
           onAddTracked={addExecTracked}
-          onUpdateTrackedNote={(id, note) => updateExecTracked(id, { custom_note: note })}
+          onUpdateTrackedBlockers={(id, html) => updateExecTracked(id, { blockers: html })}
+          onUpdateTrackedNext={(id, html) => updateExecTracked(id, { whats_next: html })}
+          onMarkTrackedReviewed={markTrackedReviewed}
           onRemoveTracked={removeExecTracked}
           onReorderTracked={reorderExecTracked}
           execTrackOptions={execTrackOptions}
@@ -5695,7 +5715,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           trackedRows={execTracked}
           resolveTrackedCard={resolveTrackedCard}
           onAddTracked={addExecTracked}
-          onUpdateTrackedNote={(id, note) => updateExecTracked(id, { custom_note: note })}
+          onUpdateTrackedBlockers={(id, html) => updateExecTracked(id, { blockers: html })}
+          onUpdateTrackedNext={(id, html) => updateExecTracked(id, { whats_next: html })}
+          onMarkTrackedReviewed={markTrackedReviewed}
           onRemoveTracked={removeExecTracked}
           onReorderTracked={reorderExecTracked}
           execTrackOptions={execTrackOptions}
@@ -6908,6 +6930,61 @@ function execPipelineToLines(content, bullet = "- ", sub = "    . ") {
   return lines;
 }
 
+// Wraps the pipeline so it can be collapsed to save vertical space. Collapsed,
+// it does not vanish: a faded top slice of the pipeline stays visible (clipped
+// with a gradient) so the reader can tell what it is and click to expand. The
+// collapsed/expanded state is remembered per storageKey. Used in both the exec
+// update and the week in review; Present mode always shows it expanded.
+function CollapsiblePipeline({ storageKey, children, defaultCollapsed = false }) {
+  const [collapsed, setCollapsed] = useState(() => {
+    try { const v = localStorage.getItem(storageKey); return v == null ? defaultCollapsed : v === "1"; } catch { return defaultCollapsed; }
+  });
+  const toggle = () => setCollapsed((c) => { const n = !c; try { localStorage.setItem(storageKey, n ? "1" : "0"); } catch { /* ignore */ } return n; });
+  return (
+    <div className={`pipeline-collapsible ${collapsed ? "collapsed" : ""}`}>
+      <button type="button" className="pipeline-collapse-toggle" onClick={toggle} aria-expanded={!collapsed}>
+        <span className={`exec-chevron ${collapsed ? "" : "open"}`}>›</span> {collapsed ? "Show pipeline" : "Hide pipeline"}
+      </button>
+      <div className="pipeline-collapsible-body">
+        {children}
+        {collapsed && <button type="button" className="pipeline-fade" onClick={toggle} title="Expand pipeline" aria-label="Expand pipeline" />}
+      </div>
+    </div>
+  );
+}
+
+// The Executive Summary: the spine of the update. Three rich-text parts
+// (Headline, Where we are going, What's next) stored on the presentation and
+// shown TWICE, framing at the top and reinforcing at the bottom (both edit the
+// same fields). Rendered as a highlighted panel. Read-only in Boss/Present.
+function ExecSummaryPanel({ pres, onSave, readOnly = false, placement = "top", showToast }) {
+  const parts = [
+    { key: "summary_headline", label: "Headline", placeholder: "The single most important thing this period." },
+    { key: "summary_destination", label: "Where we are going", placeholder: "The destination for the priority items." },
+    { key: "summary_next", label: "What's next", placeholder: "The concrete next moves." },
+  ];
+  const anyContent = parts.some((p) => !isContentEmpty(pres[p.key]));
+  if (readOnly && !anyContent) return null;
+  return (
+    <div className={`exec-summary-panel exec-summary-${placement}`}>
+      <div className="exec-summary-head">
+        <span className="exec-summary-eyebrow">Executive Summary</span>
+        <span className="exec-summary-sub">{placement === "top" ? "The frame for this update" : "The takeaway"}</span>
+      </div>
+      <div className="exec-summary-parts">
+        {parts.map((p) => (
+          <div key={p.key} className="exec-summary-part">
+            <div className="exec-summary-part-label">{p.label}</div>
+            {readOnly
+              ? (isContentEmpty(pres[p.key]) ? null : <RichTextView value={pres[p.key]} className="exec-summary-part-body" />)
+              : <ExecRichField value={pres[p.key] || ""} onSave={(html) => onSave(p.key, html)} readOnly={readOnly} placeholder={p.placeholder} showToast={showToast} />}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // The visual pipeline snapshot, shown in the editor (editable = per-deal hide
 // toggles plus Refresh), in Present mode (large, hidden deals dropped), and in
 // Boss View (read-only, still clickable). Company names open the institution
@@ -6984,9 +7061,21 @@ function ExecPipelineBody({ content, presenting = false, editable = false, onOpe
 }
 
 // Plain-text export, for pasting into an email or a doc.
+// The Executive Summary as text lines, for both exports. Empty when nothing set.
+function execSummaryLines(pres, bullet = "") {
+  const parts = [["Headline", pres.summary_headline], ["Where we are going", pres.summary_destination], ["What's next", pres.summary_next]];
+  const present = parts.filter(([, v]) => v && stripHtmlToText(v).trim());
+  if (!present.length) return [];
+  const lines = ["EXECUTIVE SUMMARY"];
+  present.forEach(([label, v]) => lines.push(`${bullet}${label}: ${stripHtmlToText(v).trim()}`));
+  return lines;
+}
+
 function execPlainText(pres, blocks) {
   const lines = [pres.title || "Executive Update"];
   lines.push(`${formatDate(pres.period_start)} to ${formatDate(pres.period_end)}`);
+  const summary = execSummaryLines(pres, "- ");
+  if (summary.length) lines.push("", ...summary);
   let section = null;
   blocks.filter((b) => !b.is_hidden).forEach((b) => {
     if (b.block_type === "header") { lines.push("", (b.title || execSectionLabel(b.section)).toUpperCase()); section = b.section; return; }
@@ -7008,6 +7097,7 @@ function execPlainText(pres, blocks) {
     if (title && outcome) lines.push(`- ${title}: ${outcome}`);
     else if (title || outcome) lines.push(`- ${title || outcome}`);
   });
+  if (summary.length) lines.push("", ...summary);
   return lines.join("\n");
 }
 
@@ -7016,6 +7106,8 @@ function execPlainText(pres, blocks) {
 function execSlideText(pres, blocks) {
   const visible = blocks.filter((b) => !b.is_hidden);
   const out = [`${pres.title || "Executive Update"}\n${formatDate(pres.period_start)} to ${formatDate(pres.period_end)}`];
+  const summary = execSummaryLines(pres, "• ");
+  if (summary.length) out.push(`\n--- SLIDE: Executive Summary ---\n${summary.slice(1).join("\n")}`);
   let current = null, buf = [];
   const flush = () => { if (current) out.push(`\n--- SLIDE: ${current} ---\n${buf.join("\n")}`); buf = []; };
   visible.forEach((b) => {
@@ -7036,6 +7128,7 @@ function execSlideText(pres, blocks) {
     if (outcome) buf.push(`   ${outcome}`);
   });
   flush();
+  if (summary.length) out.push(`\n--- SLIDE: Executive Summary (Close) ---\n${summary.slice(1).join("\n")}`);
   return out.join("\n");
 }
 
@@ -7175,7 +7268,7 @@ function ExecBlockRow({ block, onUpdate, onDelete, onDragStart, onDragOver, onDr
           <>
             {block.title && <div className="exec-block-title">{block.title}</div>}
             {isPipeline
-              ? <ExecPipelineBody content={block.content} editable onOpenInstitution={onOpenInstitution} onToggleHidden={toggleDealHidden} onRefresh={() => onRefreshPipeline && onRefreshPipeline(block)} refreshing={refreshingPipeline} />
+              ? <CollapsiblePipeline storageKey="mango-exec-pipeline-collapsed"><ExecPipelineBody content={block.content} editable onOpenInstitution={onOpenInstitution} onToggleHidden={toggleDealHidden} onRefresh={() => onRefreshPipeline && onRefreshPipeline(block)} refreshing={refreshingPipeline} /></CollapsiblePipeline>
               : isMeeting
                 ? <ExecMeetingBody content={block.content} />
                 : block.content && <RichTextView value={block.content} className="exec-block-content" />}
@@ -7319,6 +7412,8 @@ function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson
           <h1>{pres.title || "Executive Update"}</h1>
           <div className="exec-present-period">{formatDate(pres.period_start)} to {formatDate(pres.period_end)}</div>
         </header>
+        {/* Executive Summary framing at the top. */}
+        <ExecSummaryPanel pres={pres} readOnly placement="top" />
         {/* Non-meeting block groups first (metrics, pipeline, new relationships),
             then the curated sections, then meetings at the bottom. */}
         {groups.filter((g) => (g.header?.section || g.items[0]?.section) !== "meetings").map(renderGroup)}
@@ -7341,6 +7436,8 @@ function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson
           </section>
         )}
         {groups.filter((g) => (g.header?.section || g.items[0]?.section) === "meetings").map(renderGroup)}
+        {/* Executive Summary reinforcement to close on. */}
+        <ExecSummaryPanel pres={pres} readOnly placement="bottom" />
         {visible.length === 0 && initiatives.length === 0 && trackedCards.length === 0 && questions.length === 0 && <div className="exec-present-empty">Nothing to present yet. Add or unhide some blocks.</div>}
       </div>
     </div>
@@ -7450,7 +7547,87 @@ function ExecInitiatives({ items = [], readOnly = false, presenting = false, onA
   );
 }
 
-function ExecTracking({ cards = [], readOnly = false, presenting = false, onAdd, onUpdateNote, onRemove, onReorder, trackOptions = [], onOpenInstitution, onOpenNote, showToast }) {
+// A run of auto-recorded system updates (activities, stage moves, notes).
+function ExecTrackUpdateList({ list, onOpenNote }) {
+  return (
+    <div className="exec-track-updates-body">
+      {list.map((u, i) => (
+        <div key={i} className="exec-track-update">
+          <span className="exec-track-update-date">{formatDate(u.date)}</span>
+          {u.kind === "note"
+            ? <button type="button" className="exec-link-chip" onClick={() => onOpenNote && onOpenNote(u.noteId)}>Note: {u.text}</button>
+            : <span className="exec-track-update-text">{u.kind === "stage" ? "↑ " : ""}<MentionText text={u.text} /></span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// One tracked-institution card with the four labeled sections: Past Updates
+// (collapsed), New Update (expanded), Blockers, and What's Next. Past/New split
+// on last_reviewed_at; "Mark as reviewed" rolls New into Past.
+function ExecTrackCard({ card, readOnly, presenting, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onOpenInstitution, onOpenNote, showToast, dragHandlers }) {
+  const [pastOpen, setPastOpen] = useState(false);
+  const [newOpen, setNewOpen] = useState(true);
+  const tierMeta = card.tier ? DEAL_TIERS.find((t) => t.id === card.tier) : null;
+  const stageMeta = card.stage ? STAGES.find((s) => s.id === card.stage) : null;
+  const showLegacy = !readOnly && isContentEmpty(card.blockers) && isContentEmpty(card.whats_next) && !isContentEmpty(card.custom_note);
+  return (
+    <div className="exec-track-card" {...dragHandlers}>
+      <div className="exec-track-head">
+        {!readOnly && <span className="exec-init-drag" title="Drag to reorder">⠿</span>}
+        <button type="button" className="exec-track-name" onClick={() => card.instKey && onOpenInstitution(card.name)}>{card.name}</button>
+        {card.typeMeta && <span className="badge" style={{ background: card.typeMeta.color + "22", color: card.typeMeta.color, border: `1px solid ${card.typeMeta.color}44` }}>{card.typeMeta.label}</span>}
+        {tierMeta && <span className="tier-badge" style={{ background: tierMeta.bg, color: tierMeta.fg }}>{tierMeta.label}</span>}
+        {stageMeta && <span className="badge" style={{ background: stageMeta.color + "22", color: stageMeta.color, border: `1px solid ${stageMeta.color}44` }}>{stageMeta.label}</span>}
+        {!readOnly && (
+          <span className="exec-track-head-right">
+            {card.last_reviewed_at && <span className="exec-track-reviewed">Reviewed {formatDate(card.last_reviewed_at)}</span>}
+            <button type="button" className="link-btn exec-track-reviewbtn" onClick={() => onMarkReviewed(card.id)} title="Roll the current New Update into Past and start fresh">Mark as reviewed</button>
+            <button type="button" className="exec-track-remove" onClick={() => onRemove(card.id)} title="Stop tracking">✕</button>
+          </span>
+        )}
+      </div>
+
+      {card.pastUpdates.length > 0 && (
+        <div className="exec-track-sec">
+          <button type="button" className="exec-track-sec-toggle" onClick={() => setPastOpen((v) => !v)} aria-expanded={pastOpen}>
+            <span className={`exec-chevron ${pastOpen ? "open" : ""}`}>›</span> Past Updates <span className="exec-track-sec-count">{card.pastUpdates.length}</span>
+          </button>
+          {pastOpen && <ExecTrackUpdateList list={card.pastUpdates} onOpenNote={onOpenNote} />}
+        </div>
+      )}
+
+      <div className="exec-track-sec">
+        <button type="button" className="exec-track-sec-toggle" onClick={() => setNewOpen((v) => !v)} aria-expanded={newOpen}>
+          <span className={`exec-chevron ${newOpen ? "open" : ""}`}>›</span> New Update <span className="exec-track-sec-count">{card.newUpdates.length}</span>
+        </button>
+        {newOpen && (card.newUpdates.length > 0
+          ? <ExecTrackUpdateList list={card.newUpdates} onOpenNote={onOpenNote} />
+          : <div className="exec-track-sec-empty">No new activity since the last review.</div>)}
+      </div>
+
+      <div className="exec-track-sec exec-track-sec-commentary">
+        <div className="exec-track-sec-label">Blockers</div>
+        <ExecRichField value={card.blockers} onSave={(html) => onUpdateBlockers(card.id, html)} readOnly={readOnly} placeholder="What is stuck?" showToast={showToast} />
+      </div>
+
+      <div className="exec-track-sec exec-track-sec-commentary">
+        <div className="exec-track-sec-label">What's Next</div>
+        <ExecRichField value={card.whats_next} onSave={(html) => onUpdateNext(card.id, html)} readOnly={readOnly} placeholder="The next move." showToast={showToast} />
+      </div>
+
+      {showLegacy && (
+        <div className="exec-track-sec exec-track-legacy">
+          <div className="exec-track-sec-label">Prior commentary</div>
+          <RichTextView value={card.custom_note} className="exec-track-legacy-body" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExecTracking({ cards = [], readOnly = false, presenting = false, onAdd, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onReorder, trackOptions = [], onOpenInstitution, onOpenNote, showToast }) {
   const [dragId, setDragId] = useState(null);
   const [adding, setAdding] = useState(false);
   const drop = (beforeId) => {
@@ -7468,41 +7645,12 @@ function ExecTracking({ cards = [], readOnly = false, presenting = false, onAdd,
         : <button type="button" className="btn-sec exec-track-addbtn" onClick={() => setAdding(true)}>+ Add institution to track</button>)}
       {cards.length === 0 && <div className="exec-track-empty">No institutions tracked yet. Add priority accounts to follow them period over period.</div>}
       <div className="exec-track-list">
-        {cards.map((card) => {
-          const tierMeta = card.tier ? DEAL_TIERS.find((t) => t.id === card.tier) : null;
-          const stageMeta = card.stage ? STAGES.find((s) => s.id === card.stage) : null;
-          return (
-            <div key={card.id} className="exec-track-card"
-              draggable={!readOnly} onDragStart={readOnly ? undefined : () => setDragId(card.id)}
-              onDragOver={readOnly ? undefined : (e) => e.preventDefault()} onDrop={readOnly ? undefined : (e) => { e.preventDefault(); drop(card.id); }}>
-              <div className="exec-track-head">
-                {!readOnly && <span className="exec-init-drag" title="Drag to reorder">⠿</span>}
-                <button type="button" className="exec-track-name" onClick={() => card.instKey && onOpenInstitution(card.name)}>{card.name}</button>
-                {card.typeMeta && <span className="badge" style={{ background: card.typeMeta.color + "22", color: card.typeMeta.color, border: `1px solid ${card.typeMeta.color}44` }}>{card.typeMeta.label}</span>}
-                {tierMeta && <span className="tier-badge" style={{ background: tierMeta.bg, color: tierMeta.fg }}>{tierMeta.label}</span>}
-                {stageMeta && <span className="badge" style={{ background: stageMeta.color + "22", color: stageMeta.color, border: `1px solid ${stageMeta.color}44` }}>{stageMeta.label}</span>}
-                {!readOnly && <button type="button" className="exec-track-remove" onClick={() => onRemove(card.id)} title="Stop tracking">✕</button>}
-              </div>
-              {card.updates.length > 0 && (
-                <div className="exec-track-updates">
-                  <div className="exec-track-updates-label">Recent updates</div>
-                  {card.updates.map((u, i) => (
-                    <div key={i} className="exec-track-update">
-                      <span className="exec-track-update-date">{formatDate(u.date)}</span>
-                      {u.kind === "note"
-                        ? <button type="button" className="exec-link-chip" onClick={() => onOpenNote(u.noteId)}>Note: {u.text}</button>
-                        : <span className="exec-track-update-text">{u.kind === "stage" ? "↑ " : ""}<MentionText text={u.text} /></span>}
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="exec-track-commentary">
-                <div className="exec-track-updates-label">Your commentary</div>
-                <ExecRichField value={card.custom_note} onSave={(html) => onUpdateNote(card.id, html)} readOnly={readOnly} placeholder="Your framing for the executives..." showToast={showToast} />
-              </div>
-            </div>
-          );
-        })}
+        {cards.map((card) => (
+          <ExecTrackCard key={card.id} card={card} readOnly={readOnly} presenting={presenting}
+            onUpdateBlockers={onUpdateBlockers} onUpdateNext={onUpdateNext} onMarkReviewed={onMarkReviewed} onRemove={onRemove}
+            onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast}
+            dragHandlers={readOnly ? {} : { draggable: true, onDragStart: () => setDragId(card.id), onDragOver: (e) => e.preventDefault(), onDrop: (e) => { e.preventDefault(); drop(card.id); } }} />
+        ))}
       </div>
     </div>
   );
@@ -7570,7 +7718,7 @@ function ExecUpdateTab({
   onRegenerateSection, regeneratingSection, onOpenEvent, onOpenInstitution,
   onRefreshPipeline, refreshingPipelineId, onCleanupBlockers,
   initiativesFor, onAddInitiative, onUpdateInitiative, onDeleteInitiative, onMoveInitiative, execLinkOptions = [], resolveExecLink,
-  trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNote, onRemoveTracked, onReorderTracked, execTrackOptions = [],
+  trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, onReorderTracked, execTrackOptions = [],
   questionsFor, onAddQuestion, onUpdateQuestion, onDeleteQuestion, onReorderQuestions,
   onOpenPerson, onOpenNote,
   onSync, onCloseAndStartNew,
@@ -7683,7 +7831,7 @@ function ExecUpdateTab({
       <div className="exec-block-body">
         {b.block_type === "header" ? <div className="exec-block-header-text">{b.title || execSectionLabel(b.section)}</div>
           : b.block_type === "metric" ? <div className="exec-metric-inline"><span className="exec-metric-value">{b.content}</span><span className="exec-metric-label">{b.title}</span></div>
-          : <>{b.title && <div className="exec-block-title">{b.title}</div>}{b.block_type === "pipeline" ? <ExecPipelineBody content={b.content} onOpenInstitution={onOpenInstitution} /> : b.block_type === "meeting" ? <ExecMeetingBody content={b.content} /> : b.content && <RichTextView value={b.content} className="exec-block-content" />}</>}
+          : <>{b.title && <div className="exec-block-title">{b.title}</div>}{b.block_type === "pipeline" ? <CollapsiblePipeline storageKey="mango-exec-pipeline-collapsed"><ExecPipelineBody content={b.content} onOpenInstitution={onOpenInstitution} /></CollapsiblePipeline> : b.block_type === "meeting" ? <ExecMeetingBody content={b.content} /> : b.content && <RichTextView value={b.content} className="exec-block-content" />}</>}
       </div>
     </div>
   ) : (
@@ -7752,6 +7900,10 @@ function ExecUpdateTab({
         </div>
       </div>
 
+      {/* Executive Summary (framing) at the very top: the spine of the update. */}
+      <ExecSummaryPanel pres={pres} readOnly={readOnly} placement="top" showToast={showToast}
+        onSave={(key, html) => onUpdatePresentation(pres.id, { [key]: html })} />
+
       {/* Top-to-bottom order: metrics, pipeline, new relationships (blocks),
           then Tracking / Initiatives / Questions (curated), then meetings. */}
       <div className="exec-blocks">
@@ -7762,7 +7914,7 @@ function ExecUpdateTab({
       <div className="exec-extra-section">
         <div className="exec-extra-head">Tracking by Institution</div>
         <ExecTracking cards={trackedCards} readOnly={readOnly}
-          onAdd={onAddTracked} onUpdateNote={onUpdateTrackedNote} onRemove={onRemoveTracked} onReorder={onReorderTracked}
+          onAdd={onAddTracked} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked} onReorder={onReorderTracked}
           trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
       </div>
 
@@ -7784,12 +7936,17 @@ function ExecUpdateTab({
       {meetingBlocks.length > 0 && <div className="exec-blocks exec-blocks-meetings">{meetingBlocks.map(renderBlock)}</div>}
 
       {!readOnly && <ExecAddBlock onAdd={(fields) => onAddBlock(pres.id, fields)} />}
+
+      {/* Executive Summary (closing reinforcement) at the very bottom: same
+          content as the top, so Fahed can open on the frame and close on it. */}
+      <ExecSummaryPanel pres={pres} readOnly={readOnly} placement="bottom" showToast={showToast}
+        onSave={(key, html) => onUpdatePresentation(pres.id, { [key]: html })} />
     </div>
   );
 }
 
 function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, todoContacts = [], bossComments, commentAuthor, onPostComment, onMarkCommentRead, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, institutions = [], onOpenInstitution, onOpenPerson, onOpenNote, onOpenTaskLink, showToast,
-  buildPipelineSnapshot, trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNote, onRemoveTracked, onReorderTracked, execTrackOptions = [] }) {
+  buildPipelineSnapshot, trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, onReorderTracked, execTrackOptions = [] }) {
   const readOnly = useReadOnly();
   const [start, setStart] = useState(() => startOfWeek(new Date()));
   const [end, setEnd] = useState(() => addDaysLocal(startOfWeek(new Date()), 6));
@@ -8184,7 +8341,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
           width, with movement borders and clickable deals; read-only here. */}
       <div className="wir-section wir-section-pipeline">
         <div className="wir-section-title">Pipeline</div>
-        {pipelineContent ? <ExecPipelineBody content={pipelineContent} onOpenInstitution={onOpenInstitution} /> : <div className="wir-empty">Pipeline unavailable.</div>}
+        {pipelineContent ? <CollapsiblePipeline storageKey="mango-wir-pipeline-collapsed"><ExecPipelineBody content={pipelineContent} onOpenInstitution={onOpenInstitution} /></CollapsiblePipeline> : <div className="wir-empty">Pipeline unavailable.</div>}
       </div>
 
       <div className="wir-section">
@@ -8248,7 +8405,7 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
       <div className="wir-section">
         <div className="wir-section-title">Tracking by Institution</div>
         <ExecTracking cards={trackedCards} readOnly={readOnly}
-          onAdd={onAddTracked} onUpdateNote={onUpdateTrackedNote} onRemove={onRemoveTracked} onReorder={onReorderTracked}
+          onAdd={onAddTracked} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked} onReorder={onReorderTracked}
           trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
       </div>
 
