@@ -1429,6 +1429,7 @@ export default function App() {
   const [execBlocks, setExecBlocks] = useState([]);
   const [execInitiatives, setExecInitiatives] = useState([]);
   const [execTracked, setExecTracked] = useState([]);
+  const [execTrackedPeople, setExecTrackedPeople] = useState([]);
   const [execQuestions, setExecQuestions] = useState([]);
   const [execOpenId, setExecOpenId] = useState(null);
   const [execPresenting, setExecPresenting] = useState(false);
@@ -1498,7 +1499,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1531,6 +1532,7 @@ export default function App() {
         api("exec_initiatives", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("exec_tracked_institutions", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("exec_questions", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("exec_tracked_people", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []); setTodoContacts(tdc || []);
@@ -1540,7 +1542,7 @@ export default function App() {
       setEventInstitutions(evinst || []); setEventContacts(evcon || []);
       setExecPresentations(xp || []); setExecBlocks(xb || []);
       setDiscussionPoints(dp || []); setTopOfMind(tom || []);
-      setExecInitiatives(xi || []); setExecTracked(xti || []); setExecQuestions(xq || []);
+      setExecInitiatives(xi || []); setExecTracked(xti || []); setExecQuestions(xq || []); setExecTrackedPeople(xtp || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -4331,6 +4333,38 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // by type group then recency (see groupTrackedCards), which is the single
   // source of ordering.
 
+  /* ---- Exec Tracked people: a PERSISTENT watchlist of key individuals,
+     alongside tracked institutions. Same lifecycle and shape. ---- */
+  const addExecTrackedPerson = async (contactId) => {
+    const dup = execTrackedPeople.find((t) => t.is_active !== false && t.contact_id === contactId);
+    if (dup) { showToast("Already tracked"); return dup; }
+    try {
+      const sort_order = execTrackedPeople.length ? Math.max(...execTrackedPeople.map((t) => t.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("exec_tracked_people", "POST", { contact_id: contactId, sort_order, is_active: true });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setExecTrackedPeople((prev) => [...prev, row]);
+      showToast("Added to tracking");
+      return row;
+    } catch { showToast("Could not track person"); return null; }
+  };
+  const updateExecTrackedPerson = async (id, patch) => {
+    ["new_updates", "discussion", "direction", "blockers", "whats_next"].forEach((f) => { if (f in patch) patch = { ...patch, [f]: upgradeHtmlMentions(patch[f]) }; });
+    try {
+      await api("exec_tracked_people", "PATCH", patch, `?id=eq.${id}`);
+      setExecTrackedPeople((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+    } catch { showToast("Could not save"); }
+  };
+  const markTrackedPersonReviewed = async (id) => {
+    await updateExecTrackedPerson(id, { last_reviewed_at: new Date().toISOString() });
+    showToast("Marked as reviewed. New updates now accumulate from here.");
+  };
+  const removeExecTrackedPerson = async (id) => {
+    try {
+      await api("exec_tracked_people", "DELETE", null, `?id=eq.${id}`);
+      setExecTrackedPeople((prev) => prev.filter((t) => t.id !== id));
+    } catch { showToast("Could not remove"); }
+  };
+
   /* ---- Exec Questions for the team, per-presentation. ---- */
   const execQuestionsFor = (pid) => execQuestions.filter((x) => x.presentation_id === pid).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   const addExecQuestion = async (presentationId, content) => {
@@ -4832,6 +4866,47 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       // used to auto-sort within a type group. `updates` is already sorted
       // newest-first, so the head of that array (before the Past/New split) is
       // the single latest timestamp regardless of the review boundary.
+      latestActivityAt: updates[0]?.date || null,
+      newUpdates,
+      pastUpdates,
+    };
+  };
+
+  // Resolve a tracked PERSON row the same way: auto-recorded activity/notes
+  // involving them, split Past/New on last_reviewed_at, plus their role,
+  // warmth, and institution (which they need not have, unlike a tracked
+  // institution). Sibling of resolveTrackedCard above, one level simpler since
+  // there is no stage-transition history for a person.
+  const resolveTrackedPersonCard = (t, sinceISO) => {
+    const contact = contacts.find((c) => c.id === t.contact_id);
+    const boundary = t.last_reviewed_at || sinceISO || new Date(Date.now() - 14 * 86400000).toISOString();
+    const updates = [];
+    if (contact) {
+      activities
+        .filter((a) => a.contact_id === contact.id && !(a.type === "note" && /^Moved to /.test(a.description || "")))
+        .forEach((a) => updates.push({ kind: "activity", type: a.type, text: firstLine(cleanActivityText(a.description || "")), date: a.created_at }));
+      notes
+        .filter((n) => n.contact_id === contact.id)
+        .forEach((n) => updates.push({ kind: "note", text: n.title || "Untitled note", date: n.updated_at || n.created_at, noteId: n.id }));
+    }
+    updates.sort((a, b) => new Date(b.date) - new Date(a.date));
+    const newUpdates = updates.filter((u) => u.date && u.date >= boundary).slice(0, 12);
+    const pastUpdates = updates.filter((u) => !u.date || u.date < boundary).slice(0, 15);
+    const roles = contact ? resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles }) : [];
+    const primary = roles.find((r) => r.is_primary) || roles[0];
+    return {
+      id: t.id,
+      new_updates: t.new_updates || "",
+      discussion: t.discussion || "",
+      direction: t.direction || "",
+      blockers: t.blockers || "",
+      whats_next: t.whats_next || "",
+      last_reviewed_at: t.last_reviewed_at || null,
+      contact,
+      name: contact?.name || "(person not found)",
+      role: contact?.role || null,
+      warmthMeta: contact ? WARMTH_LEVELS.find((w) => w.id === (contact.warmth || "unknown")) : null,
+      institutionName: primary?.institutionName || contact?.company || null,
       latestActivityAt: updates[0]?.date || null,
       newUpdates,
       pastUpdates,
@@ -5645,6 +5720,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       {/* EXECUTIVE UPDATE */}
       {view === "exec" && (
         <ExecUpdateTab
+          contacts={contacts}
           presentations={execPresentations}
           blocksFor={execBlocksFor}
           openId={execOpenId}
@@ -5681,6 +5757,17 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onMarkTrackedReviewed={markTrackedReviewed}
           onRemoveTracked={removeExecTracked}
           execTrackOptions={execTrackOptions}
+          trackedPeopleRows={execTrackedPeople}
+          resolveTrackedPersonCard={resolveTrackedPersonCard}
+          onAddTrackedPerson={addExecTrackedPerson}
+          onCreateTrackedContact={createContactForMention}
+          onUpdateTrackedPersonNewUpdates={(id, html) => updateExecTrackedPerson(id, { new_updates: html })}
+          onUpdateTrackedPersonDiscussion={(id, html) => updateExecTrackedPerson(id, { discussion: html })}
+          onUpdateTrackedPersonDirection={(id, html) => updateExecTrackedPerson(id, { direction: html })}
+          onUpdateTrackedPersonBlockers={(id, html) => updateExecTrackedPerson(id, { blockers: html })}
+          onUpdateTrackedPersonNext={(id, html) => updateExecTrackedPerson(id, { whats_next: html })}
+          onMarkTrackedPersonReviewed={markTrackedPersonReviewed}
+          onRemoveTrackedPerson={removeExecTrackedPerson}
           questionsFor={execQuestionsFor}
           onAddQuestion={addExecQuestion}
           onUpdateQuestion={updateExecQuestion}
@@ -5731,6 +5818,17 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onMarkTrackedReviewed={markTrackedReviewed}
           onRemoveTracked={removeExecTracked}
           execTrackOptions={execTrackOptions}
+          trackedPeopleRows={execTrackedPeople}
+          resolveTrackedPersonCard={resolveTrackedPersonCard}
+          onAddTrackedPerson={addExecTrackedPerson}
+          onCreateTrackedContact={createContactForMention}
+          onUpdateTrackedPersonNewUpdates={(id, html) => updateExecTrackedPerson(id, { new_updates: html })}
+          onUpdateTrackedPersonDiscussion={(id, html) => updateExecTrackedPerson(id, { discussion: html })}
+          onUpdateTrackedPersonDirection={(id, html) => updateExecTrackedPerson(id, { direction: html })}
+          onUpdateTrackedPersonBlockers={(id, html) => updateExecTrackedPerson(id, { blockers: html })}
+          onUpdateTrackedPersonNext={(id, html) => updateExecTrackedPerson(id, { whats_next: html })}
+          onMarkTrackedPersonReviewed={markTrackedPersonReviewed}
+          onRemoveTrackedPerson={removeExecTrackedPerson}
         />
       )}
 
@@ -7362,7 +7460,7 @@ function ExecAddBlock({ onAdd }) {
 // PRESENT MODE: a clean full-screen render of the visible blocks only, sized
 // for screen-share. Escape exits. Deliberately shows no controls at all, so
 // nothing editable is on screen while executives are watching.
-function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson, onOpenNote, initiatives = [], trackedCards = [], questions = [], resolveExecLink }) {
+function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson, onOpenNote, initiatives = [], trackedCards = [], trackedPeopleCards = [], questions = [], resolveExecLink }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onExit(); };
     window.addEventListener("keydown", onKey);
@@ -7425,10 +7523,10 @@ function ExecPresentView({ pres, blocks, onExit, onOpenInstitution, onOpenPerson
         {/* Non-meeting block groups first (metrics, pipeline, new relationships),
             then the curated sections, then meetings at the bottom. */}
         {groups.filter((g) => (g.header?.section || g.items[0]?.section) !== "meetings").map(renderGroup)}
-        {trackedCards.length > 0 && (
+        {(trackedCards.length > 0 || trackedPeopleCards.length > 0) && (
           <section className="exec-present-section">
-            <h2>Tracking by Institution</h2>
-            <ExecTracking cards={trackedCards} readOnly presenting onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} />
+            <h2>Tracking</h2>
+            <ExecTracking cards={trackedCards} peopleCards={trackedPeopleCards} readOnly presenting onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} onOpenNote={onOpenNote} />
           </section>
         )}
         {initiatives.length > 0 && (
@@ -7640,6 +7738,78 @@ function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdat
   );
 }
 
+// One tracked-PERSON card: name, role/warmth, and their institution if they
+// have one (not required, unlike tracked institutions). Same Past/New Activity
+// split as institutions, plus five commentary sections: New Updates, What We
+// Discussed, Direction, Blockers, What's Next. No legacy custom_note here,
+// this table is new.
+function ExecTrackPersonCard({ card, readOnly, onUpdateNewUpdates, onUpdateDiscussion, onUpdateDirection, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onOpenPerson, onOpenInstitution, onOpenNote, showToast }) {
+  const [pastOpen, setPastOpen] = useState(false);
+  const [newOpen, setNewOpen] = useState(true);
+  return (
+    <div className="exec-track-card">
+      <div className="exec-track-head">
+        <button type="button" className="exec-track-name" onClick={() => { if (!hasTextSelection() && card.contact) onOpenPerson(card.contact.id); }}>{card.name}</button>
+        {card.warmthMeta && <span className="badge" style={{ background: card.warmthMeta.color + "22", color: card.warmthMeta.color, border: `1px solid ${card.warmthMeta.color}44` }}>{card.warmthMeta.label}</span>}
+        {card.role && <span className="exec-track-person-role">{card.role}</span>}
+        {card.institutionName && (
+          <button type="button" className="link-btn exec-track-person-inst" onClick={() => { if (!hasTextSelection()) onOpenInstitution(card.institutionName); }}>{card.institutionName}</button>
+        )}
+        {!readOnly && (
+          <span className="exec-track-head-right">
+            {card.last_reviewed_at && <span className="exec-track-reviewed">Reviewed {formatDate(card.last_reviewed_at)}</span>}
+            <button type="button" className="link-btn exec-track-reviewbtn" onClick={() => onMarkReviewed(card.id)} title="Roll the current New Activity into Past and start fresh">Mark as reviewed</button>
+            <button type="button" className="exec-track-remove" onClick={() => onRemove(card.id)} title="Stop tracking">✕</button>
+          </span>
+        )}
+      </div>
+
+      {card.pastUpdates.length > 0 && (
+        <div className="exec-track-sec">
+          <button type="button" className="exec-track-sec-toggle" onClick={() => setPastOpen((v) => !v)} aria-expanded={pastOpen}>
+            <span className={`exec-chevron ${pastOpen ? "open" : ""}`}>›</span> Past Activity <span className="exec-track-sec-count">{card.pastUpdates.length}</span>
+          </button>
+          {pastOpen && <ExecTrackUpdateList list={card.pastUpdates} onOpenNote={onOpenNote} />}
+        </div>
+      )}
+
+      <div className="exec-track-sec">
+        <button type="button" className="exec-track-sec-toggle" onClick={() => setNewOpen((v) => !v)} aria-expanded={newOpen}>
+          <span className={`exec-chevron ${newOpen ? "open" : ""}`}>›</span> New Activity <span className="exec-track-sec-count">{card.newUpdates.length}</span>
+        </button>
+        {newOpen && (card.newUpdates.length > 0
+          ? <ExecTrackUpdateList list={card.newUpdates} onOpenNote={onOpenNote} />
+          : <div className="exec-track-sec-empty">No new activity since the last review.</div>)}
+      </div>
+
+      <div className="exec-track-sec exec-track-sec-commentary">
+        <div className="exec-track-sec-label">New Updates</div>
+        <ExecRichField value={card.new_updates} onSave={(html) => onUpdateNewUpdates(card.id, html)} readOnly={readOnly} placeholder="Your written update this period." showToast={showToast} />
+      </div>
+
+      <div className="exec-track-sec exec-track-sec-commentary">
+        <div className="exec-track-sec-label">What We Discussed</div>
+        <ExecRichField value={card.discussion} onSave={(html) => onUpdateDiscussion(card.id, html)} readOnly={readOnly} placeholder="What was talked about with them." showToast={showToast} />
+      </div>
+
+      <div className="exec-track-sec exec-track-sec-commentary">
+        <div className="exec-track-sec-label">Direction</div>
+        <ExecRichField value={card.direction} onSave={(html) => onUpdateDirection(card.id, html)} readOnly={readOnly} placeholder="Where things are heading with them." showToast={showToast} />
+      </div>
+
+      <div className="exec-track-sec exec-track-sec-commentary">
+        <div className="exec-track-sec-label">Blockers</div>
+        <ExecRichField value={card.blockers} onSave={(html) => onUpdateBlockers(card.id, html)} readOnly={readOnly} placeholder="What is stuck?" showToast={showToast} />
+      </div>
+
+      <div className="exec-track-sec exec-track-sec-commentary">
+        <div className="exec-track-sec-label">What's Next</div>
+        <ExecRichField value={card.whats_next} onSave={(html) => onUpdateNext(card.id, html)} readOnly={readOnly} placeholder="The next move." showToast={showToast} />
+      </div>
+    </div>
+  );
+}
+
 // Fixed priority for grouping tracked institutions by type, keyword-matched
 // against the type label so custom types (e.g. "Government Tech", "Medical
 // Research Center") slot into the intended band without needing an exact id.
@@ -7650,6 +7820,16 @@ const trackGroupPriority = (label) => {
   const i = TRACK_GROUP_KEYWORDS.findIndex((k) => (k === "vc" ? /\bvc\b|venture/.test(l) : l.includes(k)));
   return i === -1 ? TRACK_GROUP_KEYWORDS.length : i;
 };
+
+// Most-recent-first, nulls last, ties broken by name. Shared by the People
+// group and every institution type group below.
+const sortByRecency = (cards) => [...cards].sort((a, b) => {
+  const ad = a.latestActivityAt, bd = b.latestActivityAt;
+  if (ad && bd) return new Date(bd) - new Date(ad);
+  if (ad) return -1;
+  if (bd) return 1;
+  return a.name.localeCompare(b.name);
+});
 
 // Groups tracked-institution cards by type (fixed priority order, alphabetical
 // among ties), and within each group sorts by most recent system activity
@@ -7664,26 +7844,50 @@ function groupTrackedCards(cards) {
     if (!groups.has(label)) groups.set(label, { label, color: card.typeMeta?.color || null, priority: trackGroupPriority(label), cards: [] });
     groups.get(label).cards.push(card);
   });
-  groups.forEach((g) => g.cards.sort((a, b) => {
-    const ad = a.latestActivityAt, bd = b.latestActivityAt;
-    if (ad && bd) return new Date(bd) - new Date(ad);
-    if (ad) return -1;
-    if (bd) return 1;
-    return a.name.localeCompare(b.name);
-  }));
+  groups.forEach((g) => { g.cards = sortByRecency(g.cards); });
   return [...groups.values()].sort((a, b) => a.priority - b.priority || a.label.localeCompare(b.label));
 }
 
-function ExecTracking({ cards = [], readOnly = false, presenting = false, onAdd, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, trackOptions = [], onOpenInstitution, onOpenNote, showToast }) {
-  const [adding, setAdding] = useState(false);
-  const pick = (value) => { if (!value) { setAdding(false); return; } const i = value.indexOf(":"); const type = value.slice(0, i); const id = value.slice(i + 1); onAdd({ [`${type}_id`]: id }); setAdding(false); };
+function ExecTracking({
+  cards = [], peopleCards = [], readOnly = false, presenting = false,
+  onAdd, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, trackOptions = [],
+  onAddPerson, onCreateContact, contactOptions = [],
+  onUpdatePersonNewUpdates, onUpdatePersonDiscussion, onUpdatePersonDirection, onUpdatePersonBlockers, onUpdatePersonNext, onMarkPersonReviewed, onRemovePerson,
+  onOpenInstitution, onOpenPerson, onOpenNote, showToast,
+}) {
+  const [addingKind, setAddingKind] = useState(null); // null | "institution" | "person"
+  const pickInstitution = (value) => { if (!value) { setAddingKind(null); return; } const i = value.indexOf(":"); const type = value.slice(0, i); const id = value.slice(i + 1); onAdd({ [`${type}_id`]: id }); setAddingKind(null); };
+  const pickPerson = (id) => { if (!id) return; onAddPerson(id); setAddingKind(null); };
   const groups = groupTrackedCards(cards);
+  const people = sortByRecency(peopleCards);
   return (
     <div className={`exec-track ${presenting ? "exec-track-present" : ""}`}>
-      {!readOnly && (adding
-        ? <div className="exec-track-add"><EntityPicker placeholder="Search institutions to track..." options={trackOptions} value="" onChange={pick} /><button type="button" className="link-btn" onClick={() => setAdding(false)}>Cancel</button></div>
-        : <button type="button" className="btn-sec exec-track-addbtn" onClick={() => setAdding(true)}>+ Add institution to track</button>)}
-      {cards.length === 0 && <div className="exec-track-empty">No institutions tracked yet. Add priority accounts to follow them period over period.</div>}
+      {!readOnly && (
+        addingKind === "institution" ? (
+          <div className="exec-track-add"><EntityPicker placeholder="Search institutions to track..." options={trackOptions} value="" onChange={pickInstitution} /><button type="button" className="link-btn" onClick={() => setAddingKind(null)}>Cancel</button></div>
+        ) : addingKind === "person" ? (
+          <div className="exec-track-add"><ContactConnectPicker contacts={contactOptions} value="" onChange={pickPerson} onCreateContact={onCreateContact} placeholder="Search people to track..." /><button type="button" className="link-btn" onClick={() => setAddingKind(null)}>Cancel</button></div>
+        ) : (
+          <div className="exec-track-addrow">
+            <button type="button" className="btn-sec exec-track-addbtn" onClick={() => setAddingKind("institution")}>+ Add institution to track</button>
+            <button type="button" className="btn-sec exec-track-addbtn" onClick={() => setAddingKind("person")}>+ Add person to track</button>
+          </div>
+        )
+      )}
+      {cards.length === 0 && people.length === 0 && <div className="exec-track-empty">Nothing tracked yet. Add priority accounts or key people to follow them period over period.</div>}
+      {people.length > 0 && (
+        <div className="exec-track-group">
+          <div className="exec-track-group-head">People</div>
+          <div className="exec-track-list">
+            {people.map((card) => (
+              <ExecTrackPersonCard key={card.id} card={card} readOnly={readOnly}
+                onUpdateNewUpdates={onUpdatePersonNewUpdates} onUpdateDiscussion={onUpdatePersonDiscussion} onUpdateDirection={onUpdatePersonDirection}
+                onUpdateBlockers={onUpdatePersonBlockers} onUpdateNext={onUpdatePersonNext} onMarkReviewed={onMarkPersonReviewed} onRemove={onRemovePerson}
+                onOpenPerson={onOpenPerson} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
+            ))}
+          </div>
+        </div>
+      )}
       {groups.map((g) => (
         <div key={g.label} className="exec-track-group">
           <div className="exec-track-group-head" style={g.color ? { color: g.color } : undefined}>{g.label}</div>
@@ -7755,6 +7959,7 @@ function ExecQuestions({ items = [], readOnly = false, presenting = false, onAdd
 }
 
 function ExecUpdateTab({
+  contacts = [],
   presentations, blocksFor, openId, onOpen, onCreate, generating,
   onUpdatePresentation, onDeletePresentation,
   onAddBlock, onUpdateBlock, onDeleteBlock, onReorder,
@@ -7762,6 +7967,8 @@ function ExecUpdateTab({
   onRefreshPipeline, refreshingPipelineId, onCleanupBlockers,
   initiativesFor, onAddInitiative, onUpdateInitiative, onDeleteInitiative, onMoveInitiative, execLinkOptions = [], resolveExecLink,
   trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, execTrackOptions = [],
+  trackedPeopleRows = [], resolveTrackedPersonCard, onAddTrackedPerson, onCreateTrackedContact,
+  onUpdateTrackedPersonNewUpdates, onUpdateTrackedPersonDiscussion, onUpdateTrackedPersonDirection, onUpdateTrackedPersonBlockers, onUpdateTrackedPersonNext, onMarkTrackedPersonReviewed, onRemoveTrackedPerson,
   questionsFor, onAddQuestion, onUpdateQuestion, onDeleteQuestion, onReorderQuestions,
   onOpenPerson, onOpenNote,
   onSync, onCloseAndStartNew,
@@ -7781,6 +7988,8 @@ function ExecUpdateTab({
   const trackedCards = (trackedRows || []).filter((t) => t.is_active !== false)
     .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
     .map((t) => resolveTrackedCard(t, sinceISO));
+  const trackedPeopleCards = (trackedPeopleRows || []).filter((t) => t.is_active !== false)
+    .map((t) => resolveTrackedPersonCard(t, sinceISO));
 
   // A living document: on open, quietly pull in what changed during the period
   // (new external meetings, refreshed metrics and pipeline), once per open.
@@ -7801,7 +8010,7 @@ function ExecUpdateTab({
   if (presenting && pres) return (
     <ExecPresentView pres={pres} blocks={blocks} onExit={onExitPresent}
       onOpenInstitution={onOpenInstitution} onOpenPerson={onOpenPerson} onOpenNote={onOpenNote}
-      initiatives={initiatives} trackedCards={trackedCards} questions={questions} resolveExecLink={resolveExecLink} />
+      initiatives={initiatives} trackedCards={trackedCards} trackedPeopleCards={trackedPeopleCards} questions={questions} resolveExecLink={resolveExecLink} />
   );
 
   // LIST VIEW
@@ -7955,10 +8164,13 @@ function ExecUpdateTab({
       </div>
 
       <div className="exec-extra-section">
-        <div className="exec-extra-head">Tracking by Institution</div>
-        <ExecTracking cards={trackedCards} readOnly={readOnly}
+        <div className="exec-extra-head">Tracking</div>
+        <ExecTracking cards={trackedCards} peopleCards={trackedPeopleCards} readOnly={readOnly}
           onAdd={onAddTracked} onUpdateNewUpdates={onUpdateTrackedNewUpdates} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked}
-          trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
+          trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast}
+          onAddPerson={onAddTrackedPerson} onCreateContact={onCreateTrackedContact} contactOptions={contacts} onOpenPerson={onOpenPerson}
+          onUpdatePersonNewUpdates={onUpdateTrackedPersonNewUpdates} onUpdatePersonDiscussion={onUpdateTrackedPersonDiscussion} onUpdatePersonDirection={onUpdateTrackedPersonDirection}
+          onUpdatePersonBlockers={onUpdateTrackedPersonBlockers} onUpdatePersonNext={onUpdateTrackedPersonNext} onMarkPersonReviewed={onMarkTrackedPersonReviewed} onRemovePerson={onRemoveTrackedPerson} />
       </div>
 
       <div className="exec-extra-section">
@@ -7989,7 +8201,9 @@ function ExecUpdateTab({
 }
 
 function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, todoContacts = [], bossComments, commentAuthor, onPostComment, onMarkCommentRead, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, institutions = [], onOpenInstitution, onOpenPerson, onOpenNote, onOpenTaskLink, showToast,
-  buildPipelineSnapshot, trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, execTrackOptions = [] }) {
+  buildPipelineSnapshot, trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, execTrackOptions = [],
+  trackedPeopleRows = [], resolveTrackedPersonCard, onAddTrackedPerson, onCreateTrackedContact,
+  onUpdateTrackedPersonNewUpdates, onUpdateTrackedPersonDiscussion, onUpdateTrackedPersonDirection, onUpdateTrackedPersonBlockers, onUpdateTrackedPersonNext, onMarkTrackedPersonReviewed, onRemoveTrackedPerson }) {
   const readOnly = useReadOnly();
   const [start, setStart] = useState(() => startOfWeek(new Date()));
   const [end, setEnd] = useState(() => addDaysLocal(startOfWeek(new Date()), 6));
@@ -8201,6 +8415,9 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
   const trackedCards = (trackedRows || []).filter((t) => t.is_active !== false)
     .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
     .map((t) => (resolveTrackedCard ? resolveTrackedCard(t, rangeStartISO) : null))
+    .filter(Boolean);
+  const trackedPeopleCards = (trackedPeopleRows || []).filter((t) => t.is_active !== false)
+    .map((t) => (resolveTrackedPersonCard ? resolveTrackedPersonCard(t, rangeStartISO) : null))
     .filter(Boolean);
 
   const rangeLabel = `${formatDate(start)} to ${formatDate(end)}, ${end.getFullYear()}`;
@@ -8442,14 +8659,17 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
         )}
       </div>
 
-      {/* Tracking by Institution: the shared persistent watchlist (same
-          component and data as the Executive Update). Fahed adds/edits; Andy
-          sees it read-only. */}
+      {/* Tracking: the shared persistent watchlist of institutions and people
+          (same component and data as the Executive Update). Fahed adds/edits;
+          Andy sees it read-only. */}
       <div className="wir-section">
-        <div className="wir-section-title">Tracking by Institution</div>
-        <ExecTracking cards={trackedCards} readOnly={readOnly}
+        <div className="wir-section-title">Tracking</div>
+        <ExecTracking cards={trackedCards} peopleCards={trackedPeopleCards} readOnly={readOnly}
           onAdd={onAddTracked} onUpdateNewUpdates={onUpdateTrackedNewUpdates} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked}
-          trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
+          trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast}
+          onAddPerson={onAddTrackedPerson} onCreateContact={onCreateTrackedContact} contactOptions={contacts} onOpenPerson={onOpenPerson}
+          onUpdatePersonNewUpdates={onUpdateTrackedPersonNewUpdates} onUpdatePersonDiscussion={onUpdateTrackedPersonDiscussion} onUpdatePersonDirection={onUpdateTrackedPersonDirection}
+          onUpdatePersonBlockers={onUpdateTrackedPersonBlockers} onUpdatePersonNext={onUpdateTrackedPersonNext} onMarkPersonReviewed={onMarkTrackedPersonReviewed} onRemovePerson={onRemoveTrackedPerson} />
       </div>
 
       <div className="wir-section">
