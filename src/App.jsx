@@ -1418,6 +1418,10 @@ export default function App() {
   const [execTracked, setExecTracked] = useState([]);
   const [execTrackedPeople, setExecTrackedPeople] = useState([]);
   const [execQuestions, setExecQuestions] = useState([]);
+  // Progress track: automatic pipeline stage-change history (deals) plus
+  // manual key moments Fahed adds, for tracked institution/person cards.
+  const [stageHistory, setStageHistory] = useState([]);
+  const [progressMilestones, setProgressMilestones] = useState([]);
   const [execOpenId, setExecOpenId] = useState(null);
   const [execPresenting, setExecPresenting] = useState(false);
   const [execGenerating, setExecGenerating] = useState(false);
@@ -1486,7 +1490,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp, sh, pm] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1520,6 +1524,8 @@ export default function App() {
         api("exec_tracked_institutions", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("exec_questions", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("exec_tracked_people", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("stage_history", "GET", null, "?select=*&order=changed_at.asc").catch(() => []),
+        api("progress_milestones", "GET", null, "?select=*&order=milestone_date.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []); setTodoContacts(tdc || []);
@@ -1530,6 +1536,7 @@ export default function App() {
       setExecPresentations(xp || []); setExecBlocks(xb || []);
       setDiscussionPoints(dp || []); setTopOfMind(tom || []);
       setExecInitiatives(xi || []); setExecTracked(xti || []); setExecQuestions(xq || []); setExecTrackedPeople(xtp || []);
+      setStageHistory(sh || []); setProgressMilestones(pm || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -1574,6 +1581,45 @@ export default function App() {
   // tabs, sidebar, and data as Fahed; every edit affordance is hidden or disabled.
   const [bossMode] = useState(() => new URLSearchParams(window.location.search).get("view") === "boss");
   const commentAuthor = bossMode ? "Andy Liu" : "Fahed Al Essa";
+
+  // One-time backfill (Progress Track): every deal needs at least a starting
+  // point in stage_history so its tracked-institution card has something to
+  // draw. Seed it from the deal's existing "Moved to X" activities when
+  // present (the same reconstruction buildStageTransitions already does),
+  // prefixed with an explicit "Prospecting" origin at created_at; otherwise
+  // seed a single entry at the deal's current stage using created_at. Guarded
+  // like the mentions upgrade so it only ever runs once per browser, and only
+  // inserts for deals that still have no history row.
+  const stageBackfillRef = useRef(false);
+  useEffect(() => {
+    if (loading || bossMode || stageBackfillRef.current || !deals.length) return;
+    if (localStorage.getItem("mango-stage-history-backfilled-v1")) { stageBackfillRef.current = true; return; }
+    stageBackfillRef.current = true;
+    (async () => {
+      try {
+        const covered = new Set(stageHistory.map((h) => h.deal_id));
+        const missing = deals.filter((d) => !covered.has(d.id));
+        if (missing.length) {
+          const transitions = buildStageTransitions(activities, deals);
+          const rows = [];
+          missing.forEach((d) => {
+            const dealTransitions = transitions.filter((t) => t.dealId === d.id).sort((a, b) => new Date(a.date) - new Date(b.date));
+            if (dealTransitions.length) {
+              rows.push({ deal_id: d.id, from_stage: null, to_stage: "prospecting", changed_at: d.created_at || dealTransitions[0].date });
+              dealTransitions.forEach((t) => rows.push({ deal_id: d.id, from_stage: t.fromStage, to_stage: t.toStage, changed_at: t.date }));
+            } else {
+              rows.push({ deal_id: d.id, from_stage: null, to_stage: d.stage || "prospecting", changed_at: d.created_at || new Date().toISOString() });
+            }
+          });
+          if (rows.length) {
+            const inserted = await api("stage_history", "POST", rows);
+            setStageHistory((prev) => [...prev, ...(Array.isArray(inserted) ? inserted : [])]);
+          }
+        }
+        localStorage.setItem("mango-stage-history-backfilled-v1", "1");
+      } catch (e) { console.warn("[Progress Track] stage history backfill failed", e); }
+    })();
+  }, [loading, bossMode, deals, activities, stageHistory]);
 
   // Keep the sidebar API-call counter in sync. bumpApiCalls dispatches this event;
   // also refresh on focus so a day rollover shows the reset count.
@@ -1667,9 +1713,12 @@ export default function App() {
       const value = Number(form.value);
       if (form.value !== "" && form.value != null && !Number.isNaN(value) && value > 0) clean.value = value;
       if (form.id) {
+        const prevStage = deals.find((d) => d.id === form.id)?.stage || "prospecting";
         await api("deals", "PATCH", clean, `?id=eq.${form.id}`);
+        if (clean.stage !== prevStage) recordStageChange(form.id, prevStage, clean.stage, clean.last_activity_at);
       } else {
-        await api("deals", "POST", clean);
+        const created = (await api("deals", "POST", clean) || [])[0];
+        if (created) recordStageChange(created.id, null, clean.stage, clean.last_activity_at);
       }
       // Keep the unified architecture: every deal has a full institution behind
       // it. Ensure an organizations row exists for this name (a Target is just an
@@ -1689,14 +1738,27 @@ export default function App() {
   };
 
 
+  // Progress track backbone: one row per pipeline stage change, written
+  // wherever a deal's stage changes (drag, inline edit, the deal form), so the
+  // tracked-institution progress track has an automatic record to draw from.
+  const recordStageChange = async (dealId, fromStage, toStage, changedAt) => {
+    try {
+      const rows = await api("stage_history", "POST", { deal_id: dealId, from_stage: fromStage || null, to_stage: toStage, changed_at: changedAt || new Date().toISOString() });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setStageHistory((prev) => [...prev, row]);
+    } catch { /* the progress track just misses this point; not worth blocking the move over */ }
+  };
+
   const moveDeal = async (dealId, newStage) => {
     const now = new Date().toISOString();
+    const prevStage = deals.find((d) => d.id === dealId)?.stage || "prospecting";
     try {
       await api("deals", "PATCH", { stage: newStage, last_activity_at: now }, `?id=eq.${dealId}`);
       const rows = await api("activities", "POST", { deal_id: dealId, type: "note", description: `Moved to ${STAGES.find((s) => s.id === newStage)?.label}` });
       setDeals((prev) => prev.map((d) => (d.id === dealId ? { ...d, stage: newStage, last_activity_at: now } : d)));
       const act = Array.isArray(rows) ? rows[0] : rows;
       if (act) setActivities((prev) => [act, ...prev]);
+      if (newStage !== prevStage) recordStageChange(dealId, prevStage, newStage, now);
     } catch { showToast("Error moving deal"); }
   };
 
@@ -2183,7 +2245,9 @@ export default function App() {
     const clean = { company: name, stage: "prospecting", last_activity_at: new Date().toISOString() };
     if ((city || "").trim()) clean.city = city;
     if ((region || "").trim()) clean.region = region;
-    return (await api("deals", "POST", clean) || [])[0];
+    const deal = (await api("deals", "POST", clean) || [])[0];
+    if (deal) recordStageChange(deal.id, null, clean.stage, clean.last_activity_at);
+    return deal;
   };
 
   const createEnablerForInstitution = async ({ name, city, region }) => {
@@ -4226,6 +4290,31 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Could not remove"); }
   };
 
+  /* ---- Progress Track: manual key moments (progress_milestones), the other
+     half of the track alongside the automatic stage_history backbone. fks is
+     one of {deal_id}/{enabler_id}/{organization_id} for an institution moment
+     or {contact_id} for a person moment. ---- */
+  const addProgressMilestone = async (fks, { title, detail, milestone_date, is_setback }) => {
+    const t = (title || "").trim();
+    if (!t) { showToast("Title is required"); return null; }
+    try {
+      const clean = { ...fks, title: t, milestone_date: milestone_date || new Date().toISOString().slice(0, 10), is_setback: !!is_setback };
+      const d = (detail || "").trim();
+      if (d) clean.detail = upgradeTokenMentions(d);
+      const rows = await api("progress_milestones", "POST", clean);
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setProgressMilestones((prev) => [...prev, row]);
+      showToast("Moment added");
+      return row;
+    } catch { showToast("Could not add moment"); return null; }
+  };
+  const removeProgressMilestone = async (id) => {
+    try {
+      await api("progress_milestones", "DELETE", null, `?id=eq.${id}`);
+      setProgressMilestones((prev) => prev.filter((m) => m.id !== id));
+    } catch { showToast("Could not remove moment"); }
+  };
+
   /* ---- Exec Questions for the team, per-presentation. ---- */
   const execQuestionsFor = (pid) => execQuestions.filter((x) => x.presentation_id === pid).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   const addExecQuestion = async (presentationId, content) => {
@@ -4682,34 +4771,34 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       : institutions.find((i) => i.orgId === linkId);
     return inst ? { label: inst.name, onOpen: () => openInstitution(inst.name) } : null;
   };
-  // Resolve a tracked row to a four-section card: institution meta, plus the
-  // auto-recorded system updates (activities, notes, stage moves) split into
-  // NEW (since last_reviewed_at, or the period start when never reviewed) and
-  // PAST (everything older), plus Fahed's Blockers and What's Next commentary.
-  // The boundary is last_reviewed_at so "Mark as reviewed" rolls the current
-  // New into Past and starts a fresh New from now.
-  const resolveTrackedCard = (t, sinceISO) => {
+  // Resolve a tracked row to a card: institution meta, the PROGRESS TRACK
+  // (stage_history nodes plus progress_milestones nodes, oldest to newest),
+  // and Fahed's New Updates / Blockers / What's Next commentary. The track,
+  // not a bullet-point activity feed, is the headline: `latestActivityAt` is
+  // the track's own last node, so portfolio ordering and the "last movement"
+  // stall indicator both read directly off it.
+  const resolveTrackedCard = (t) => {
     const inst = t.deal_id ? institutions.find((i) => i.dealId === t.deal_id)
       : t.enabler_id ? institutions.find((i) => i.enablerId === t.enabler_id)
       : institutions.find((i) => i.orgId === t.organization_id);
-    const boundary = t.last_reviewed_at || sinceISO || new Date(Date.now() - 14 * 86400000).toISOString();
-    const updates = [];
+    const fks = { deal_id: t.deal_id || null, enabler_id: t.enabler_id || null, organization_id: t.organization_id || null };
+    const trackNodes = [];
     if (inst) {
-      activities
-        .filter((a) => ((inst.dealId && a.deal_id === inst.dealId) || (inst.enablerId && a.enabler_id === inst.enablerId) || (inst.orgId && a.organization_id === inst.orgId)) && !(a.type === "note" && /^Moved to /.test(a.description || "")))
-        .forEach((a) => updates.push({ kind: "activity", type: a.type, text: firstLine(cleanActivityText(a.description || "")), date: a.created_at }));
       if (inst.dealId) {
-        buildStageTransitions(activities, deals)
-          .filter((tr) => tr.dealId === inst.dealId)
-          .forEach((tr) => updates.push({ kind: "stage", text: `Moved ${stageLabel(tr.fromStage)} to ${stageLabel(tr.toStage)}`, date: tr.date }));
+        stageHistory.filter((h) => h.deal_id === inst.dealId).forEach((h) => {
+          trackNodes.push({
+            id: `stage-${h.id}`, kind: "stage",
+            label: stageLabel(h.to_stage), fromLabel: h.from_stage ? stageLabel(h.from_stage) : null,
+            date: h.changed_at, color: STAGES.find((s) => s.id === h.to_stage)?.color || null,
+          });
+        });
       }
-      notes
-        .filter((n) => ((inst.dealId && n.deal_id === inst.dealId) || (inst.enablerId && n.enabler_id === inst.enablerId) || (inst.orgId && n.organization_id === inst.orgId)))
-        .forEach((n) => updates.push({ kind: "note", text: n.title || "Untitled note", date: n.updated_at || n.created_at, noteId: n.id }));
+      progressMilestones
+        .filter((m) => (inst.dealId && m.deal_id === inst.dealId) || (inst.enablerId && m.enabler_id === inst.enablerId) || (inst.orgId && m.organization_id === inst.orgId))
+        .forEach((m) => trackNodes.push({ id: `moment-${m.id}`, momentId: m.id, kind: "milestone", label: m.title, detail: m.detail || "", date: m.milestone_date, is_setback: !!m.is_setback }));
     }
-    updates.sort((a, b) => new Date(b.date) - new Date(a.date));
-    const newUpdates = updates.filter((u) => u.date && u.date >= boundary).slice(0, 12);
-    const pastUpdates = updates.filter((u) => !u.date || u.date < boundary).slice(0, 15);
+    trackNodes.sort((a, b) => new Date(a.date) - new Date(b.date));
+    const lastMovementAt = trackNodes.length ? trackNodes[trackNodes.length - 1].date : null;
     return {
       id: t.id,
       custom_note: t.custom_note || "",
@@ -4717,42 +4806,34 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       blockers: t.blockers || "",
       whats_next: t.whats_next || "",
       last_reviewed_at: t.last_reviewed_at || null,
-      inst,
+      inst, fks,
       name: inst?.name || "(institution not found)",
       instKey: inst?.key || null,
       typeMeta: inst?.type ? institutionTypeMeta(inst.type, customOptions) : null,
       tier: inst?.deal?.tier && inst.deal.tier !== "Untiered" ? inst.deal.tier : null,
       stage: inst?.stage || null,
-      // Most recent system activity of any kind (activity, note, stage move),
-      // used to auto-sort within a type group. `updates` is already sorted
-      // newest-first, so the head of that array (before the Past/New split) is
-      // the single latest timestamp regardless of the review boundary.
-      latestActivityAt: updates[0]?.date || null,
-      newUpdates,
-      pastUpdates,
+      trackNodes,
+      lastMovementAt,
+      daysSinceMovement: lastMovementAt ? daysAgo(lastMovementAt) : null,
+      // Drives auto-sort within a type group: the track's own most recent node.
+      latestActivityAt: lastMovementAt,
     };
   };
 
-  // Resolve a tracked PERSON row the same way: auto-recorded activity/notes
-  // involving them, split Past/New on last_reviewed_at, plus their role,
-  // warmth, and institution (which they need not have, unlike a tracked
-  // institution). Sibling of resolveTrackedCard above, one level simpler since
-  // there is no stage-transition history for a person.
-  const resolveTrackedPersonCard = (t, sinceISO) => {
+  // Resolve a tracked PERSON row the same way: their own progress track (key
+  // moments only, no pipeline stages, since a person has no deal stage), plus
+  // role, warmth, and institution (which they need not have, unlike a tracked
+  // institution). Sibling of resolveTrackedCard above.
+  const resolveTrackedPersonCard = (t) => {
     const contact = contacts.find((c) => c.id === t.contact_id);
-    const boundary = t.last_reviewed_at || sinceISO || new Date(Date.now() - 14 * 86400000).toISOString();
-    const updates = [];
+    const trackNodes = [];
     if (contact) {
-      activities
-        .filter((a) => a.contact_id === contact.id && !(a.type === "note" && /^Moved to /.test(a.description || "")))
-        .forEach((a) => updates.push({ kind: "activity", type: a.type, text: firstLine(cleanActivityText(a.description || "")), date: a.created_at }));
-      notes
-        .filter((n) => n.contact_id === contact.id)
-        .forEach((n) => updates.push({ kind: "note", text: n.title || "Untitled note", date: n.updated_at || n.created_at, noteId: n.id }));
+      progressMilestones
+        .filter((m) => m.contact_id === contact.id)
+        .forEach((m) => trackNodes.push({ id: `moment-${m.id}`, momentId: m.id, kind: "milestone", label: m.title, detail: m.detail || "", date: m.milestone_date, is_setback: !!m.is_setback }));
     }
-    updates.sort((a, b) => new Date(b.date) - new Date(a.date));
-    const newUpdates = updates.filter((u) => u.date && u.date >= boundary).slice(0, 12);
-    const pastUpdates = updates.filter((u) => !u.date || u.date < boundary).slice(0, 15);
+    trackNodes.sort((a, b) => new Date(a.date) - new Date(b.date));
+    const lastMovementAt = trackNodes.length ? trackNodes[trackNodes.length - 1].date : null;
     const roles = contact ? resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles }) : [];
     const primary = roles.find((r) => r.is_primary) || roles[0];
     return {
@@ -4763,14 +4844,15 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       blockers: t.blockers || "",
       whats_next: t.whats_next || "",
       last_reviewed_at: t.last_reviewed_at || null,
-      contact,
+      contact, fks: { contact_id: t.contact_id },
       name: contact?.name || "(person not found)",
       role: contact?.role || null,
       warmthMeta: contact ? WARMTH_LEVELS.find((w) => w.id === (contact.warmth || "unknown")) : null,
       institutionName: primary?.institutionName || contact?.company || null,
-      latestActivityAt: updates[0]?.date || null,
-      newUpdates,
-      pastUpdates,
+      trackNodes,
+      lastMovementAt,
+      daysSinceMovement: lastMovementAt ? daysAgo(lastMovementAt) : null,
+      latestActivityAt: lastMovementAt,
     };
   };
 
@@ -5628,6 +5710,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onUpdateTrackedPersonNext={(id, html) => updateExecTrackedPerson(id, { whats_next: html })}
           onMarkTrackedPersonReviewed={markTrackedPersonReviewed}
           onRemoveTrackedPerson={removeExecTrackedPerson}
+          onAddMilestone={addProgressMilestone}
+          onRemoveMilestone={removeProgressMilestone}
           questionsFor={execQuestionsFor}
           onAddQuestion={addExecQuestion}
           onUpdateQuestion={updateExecQuestion}
@@ -5689,6 +5773,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onUpdateTrackedPersonNext={(id, html) => updateExecTrackedPerson(id, { whats_next: html })}
           onMarkTrackedPersonReviewed={markTrackedPersonReviewed}
           onRemoveTrackedPerson={removeExecTrackedPerson}
+          onAddMilestone={addProgressMilestone}
+          onRemoveMilestone={removeProgressMilestone}
         />
       )}
 
@@ -7469,29 +7555,148 @@ function ExecInitiatives({ items = [], readOnly = false, presenting = false, onA
 }
 
 // A run of auto-recorded system updates (activities, stage moves, notes).
-function ExecTrackUpdateList({ list, onOpenNote }) {
+// The horizontal PROGRESS TRACK: nodes left to right, oldest to newest,
+// combining automatic stage-change nodes (filled, colored by stage) with
+// manual milestone nodes (outlined; setbacks in a warning color). The gap
+// between two nodes is labeled in days, and a long gap (3+ weeks) is called
+// out in amber so a stall reads at a glance. Clicking a node selects it,
+// which the detail list below highlights.
+function ProgressTrack({ nodes = [], selectedId, onSelect }) {
+  if (!nodes.length) return <div className="ptrack-empty">No progress recorded yet. Add a key moment to start the track.</div>;
   return (
-    <div className="exec-track-updates-body">
-      {list.map((u, i) => (
-        <div key={i} className="exec-track-update">
-          <span className="exec-track-update-date">{formatDate(u.date)}</span>
-          {u.kind === "note"
-            ? <button type="button" className="exec-link-chip" onClick={() => onOpenNote && onOpenNote(u.noteId)}>Note: {u.text}</button>
-            : <span className="exec-track-update-text">{u.kind === "stage" ? "↑ " : ""}<MentionText text={u.text} /></span>}
+    <div className="ptrack-wrap">
+      <div className="ptrack">
+        {nodes.map((n, i) => {
+          const prev = nodes[i - 1];
+          const gapDays = prev ? Math.max(0, Math.round((new Date(n.date) - new Date(prev.date)) / 86400000)) : null;
+          const long = gapDays != null && gapDays >= 21;
+          const connectorWidth = gapDays == null ? 0 : Math.max(30, Math.min(140, gapDays * 3 + 22));
+          return (
+            <div className="ptrack-item" key={n.id}>
+              {i > 0 && (
+                <div className={`ptrack-connector ${long ? "ptrack-connector-long" : ""}`} style={{ width: connectorWidth }}>
+                  <span className="ptrack-connector-line" />
+                  {gapDays > 0 && <span className="ptrack-connector-label">{gapDays}d</span>}
+                </div>
+              )}
+              <button
+                type="button"
+                className={`ptrack-node ptrack-node-${n.kind} ${n.is_setback ? "ptrack-node-setback" : ""} ${selectedId === n.id ? "ptrack-node-active" : ""}`}
+                style={n.color ? { "--node-color": n.color } : undefined}
+                onClick={() => onSelect(n.id === selectedId ? null : n.id)}
+                title={n.kind === "stage" ? `Moved to ${n.label}` : n.label}
+              >
+                <span className="ptrack-dot" />
+                <span className="ptrack-node-text">
+                  <span className="ptrack-node-label">{n.is_setback && "⚠ "}{n.label}</span>
+                  <span className="ptrack-node-date">{formatDate(n.date)}</span>
+                </span>
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Chronological (newest first) list of the same nodes, each with its detail,
+// beneath the track: "list the milestones/stages chronologically with their
+// notes." Selecting a node on the track highlights its row here.
+function ProgressTrackDetailList({ nodes = [], selectedId, onSelectNode, onDeleteMilestone, readOnly }) {
+  if (!nodes.length) return null;
+  const sorted = [...nodes].sort((a, b) => new Date(b.date) - new Date(a.date));
+  return (
+    <div className="ptrack-detail-list">
+      {sorted.map((n) => (
+        <div
+          key={n.id}
+          className={`ptrack-detail-row ptrack-detail-${n.kind} ${n.is_setback ? "ptrack-detail-setback" : ""} ${selectedId === n.id ? "ptrack-detail-active" : ""}`}
+          onClick={() => onSelectNode(n.id === selectedId ? null : n.id)}
+        >
+          <span className="ptrack-detail-date">{formatDate(n.date)}</span>
+          <span className="ptrack-detail-dot" style={n.color ? { "--node-color": n.color } : undefined} />
+          <div className="ptrack-detail-body">
+            <div className="ptrack-detail-title">
+              {n.kind === "stage" ? `Moved to ${n.label}` : n.label}
+              {n.is_setback && <span className="ptrack-detail-setback-tag">Setback</span>}
+            </div>
+            {n.detail && <div className="ptrack-detail-text"><MentionText text={n.detail} /></div>}
+          </div>
+          {!readOnly && n.kind === "milestone" && (
+            <button type="button" className="ptrack-detail-del" onClick={(e) => { e.stopPropagation(); onDeleteMilestone(n.momentId); }} title="Delete moment">✕</button>
+          )}
         </div>
       ))}
     </div>
   );
 }
 
-// One tracked-institution card with the five labeled sections: Past Activity
-// (collapsed), New Activity (expanded), New Updates, Blockers, and What's Next.
-// Past/New split on last_reviewed_at; "Mark as reviewed" rolls New into Past.
-// Cards are auto-ordered (grouped by type, sorted by recency within a group)
-// by the parent, so there is no manual reorder here.
-function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onOpenInstitution, onOpenNote, showToast }) {
-  const [pastOpen, setPastOpen] = useState(false);
-  const [newOpen, setNewOpen] = useState(true);
+// Small inline "+ Add moment" form: title, optional @-mention-aware detail
+// (with voice capture), a date defaulting to today, and an "is setback" toggle.
+function AddMomentForm({ onSave, onCancel, showToast }) {
+  const [title, setTitle] = useState("");
+  const [detail, setDetail] = useState("");
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [isSetback, setIsSetback] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const submit = async () => {
+    const t = title.trim();
+    if (!t || saving) return;
+    setSaving(true);
+    try {
+      await onSave({ title: t, detail: detail.trim(), milestone_date: date, is_setback: isSetback });
+      onCancel();
+    } finally { setSaving(false); }
+  };
+  return (
+    <div className="ptrack-add" onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); onCancel(); } }}>
+      <input className="input ptrack-add-title" placeholder="What happened? e.g. Deck sent, Champion identified..." value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
+      <div className="ptrack-add-row">
+        <MentionEditor value={detail} onChange={setDetail} placeholder="Optional detail. Use @ to mention a person or institution." className="ptrack-add-detail" />
+        <VoiceRecorder mode="plain" compact showToast={showToast} title="Dictate a detail" onPlainText={(t) => setDetail((d) => (d ? `${d} ${t}` : t))} />
+      </div>
+      <div className="ptrack-add-row">
+        <input type="date" className="input ptrack-add-date" value={date} onChange={(e) => setDate(e.target.value)} />
+        <label className="checkbox-label ptrack-add-setback"><input type="checkbox" checked={isSetback} onChange={(e) => setIsSetback(e.target.checked)} /> This is a setback</label>
+      </div>
+      <div className="ptrack-add-actions">
+        <button type="button" className="btn-primary" disabled={saving || !title.trim()} onClick={submit}>{saving ? "Saving..." : "Add moment"}</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+        <span className="act-edit-hint">Esc to cancel</span>
+      </div>
+    </div>
+  );
+}
+
+// The Progress Track section shared by institution and person cards: the
+// track itself, "+ Add moment", and the chronological detail list. Kept as
+// one component so both card types stay visually identical (portfolio
+// comparability is the point: every tracked account/person reads the same way).
+function ProgressTrackSection({ nodes, fks, readOnly, onAddMilestone, onRemoveMilestone, showToast }) {
+  const [adding, setAdding] = useState(false);
+  const [selectedId, setSelectedId] = useState(null);
+  return (
+    <div className="exec-track-sec ptrack-sec">
+      <div className="ptrack-sec-head">
+        <div className="exec-track-sec-label">Progress</div>
+        {!readOnly && !adding && <button type="button" className="link-btn" onClick={() => setAdding(true)}>+ Add moment</button>}
+      </div>
+      <ProgressTrack nodes={nodes} selectedId={selectedId} onSelect={setSelectedId} />
+      {adding && (
+        <AddMomentForm showToast={showToast} onCancel={() => setAdding(false)} onSave={(payload) => onAddMilestone(fks, payload)} />
+      )}
+      <ProgressTrackDetailList nodes={nodes} selectedId={selectedId} onSelectNode={setSelectedId} onDeleteMilestone={onRemoveMilestone} readOnly={readOnly} />
+    </div>
+  );
+}
+
+// One tracked-institution card. The PROGRESS TRACK is the headline (auto
+// stage moves plus Fahed's manual key moments), with New Updates, Blockers,
+// and What's Next kept below for current framing. Cards are auto-ordered
+// (grouped by type, sorted by recency of the track's own last node) by the
+// parent, so there is no manual reorder here.
+function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onAddMilestone, onRemoveMilestone, onOpenInstitution, showToast }) {
   const tierMeta = card.tier ? DEAL_TIERS.find((t) => t.id === card.tier) : null;
   const stageMeta = card.stage ? STAGES.find((s) => s.id === card.stage) : null;
   const showLegacy = !readOnly && isContentEmpty(card.blockers) && isContentEmpty(card.whats_next) && !isContentEmpty(card.custom_note);
@@ -7502,32 +7707,19 @@ function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdat
         {card.typeMeta && <span className="badge" style={{ background: card.typeMeta.color + "22", color: card.typeMeta.color, border: `1px solid ${card.typeMeta.color}44` }}>{card.typeMeta.label}</span>}
         {tierMeta && <span className="tier-badge" style={{ background: tierMeta.bg, color: tierMeta.fg }}>{tierMeta.label}</span>}
         {stageMeta && <span className="badge" style={{ background: stageMeta.color + "22", color: stageMeta.color, border: `1px solid ${stageMeta.color}44` }}>{stageMeta.label}</span>}
+        {card.daysSinceMovement != null && (
+          <span className={`ptrack-stall-badge ${card.daysSinceMovement >= 21 ? "ptrack-stall-warn" : ""}`}>Last movement {card.daysSinceMovement === 0 ? "today" : `${card.daysSinceMovement}d ago`}</span>
+        )}
         {!readOnly && (
           <span className="exec-track-head-right">
             {card.last_reviewed_at && <span className="exec-track-reviewed">Reviewed {formatDate(card.last_reviewed_at)}</span>}
-            <button type="button" className="link-btn exec-track-reviewbtn" onClick={() => onMarkReviewed(card.id)} title="Roll the current New Update into Past and start fresh">Mark as reviewed</button>
+            <button type="button" className="link-btn exec-track-reviewbtn" onClick={() => onMarkReviewed(card.id)} title="Stamp this account as reviewed">Mark as reviewed</button>
             <button type="button" className="exec-track-remove" onClick={() => onRemove(card.id)} title="Stop tracking">✕</button>
           </span>
         )}
       </div>
 
-      {card.pastUpdates.length > 0 && (
-        <div className="exec-track-sec">
-          <button type="button" className="exec-track-sec-toggle" onClick={() => setPastOpen((v) => !v)} aria-expanded={pastOpen}>
-            <span className={`exec-chevron ${pastOpen ? "open" : ""}`}>›</span> Past Activity <span className="exec-track-sec-count">{card.pastUpdates.length}</span>
-          </button>
-          {pastOpen && <ExecTrackUpdateList list={card.pastUpdates} onOpenNote={onOpenNote} />}
-        </div>
-      )}
-
-      <div className="exec-track-sec">
-        <button type="button" className="exec-track-sec-toggle" onClick={() => setNewOpen((v) => !v)} aria-expanded={newOpen}>
-          <span className={`exec-chevron ${newOpen ? "open" : ""}`}>›</span> New Activity <span className="exec-track-sec-count">{card.newUpdates.length}</span>
-        </button>
-        {newOpen && (card.newUpdates.length > 0
-          ? <ExecTrackUpdateList list={card.newUpdates} onOpenNote={onOpenNote} />
-          : <div className="exec-track-sec-empty">No new activity since the last review.</div>)}
-      </div>
+      <ProgressTrackSection nodes={card.trackNodes} fks={card.fks} readOnly={readOnly} onAddMilestone={onAddMilestone} onRemoveMilestone={onRemoveMilestone} showToast={showToast} />
 
       <div className="exec-track-sec exec-track-sec-commentary">
         <div className="exec-track-sec-label">New Updates</div>
@@ -7555,13 +7747,11 @@ function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdat
 }
 
 // One tracked-PERSON card: name, role/warmth, and their institution if they
-// have one (not required, unlike tracked institutions). Same Past/New Activity
-// split as institutions, plus five commentary sections: New Updates, What We
-// Discussed, Direction, Blockers, What's Next. No legacy custom_note here,
-// this table is new.
-function ExecTrackPersonCard({ card, readOnly, onUpdateNewUpdates, onUpdateDiscussion, onUpdateDirection, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onOpenPerson, onOpenInstitution, onOpenNote, showToast }) {
-  const [pastOpen, setPastOpen] = useState(false);
-  const [newOpen, setNewOpen] = useState(true);
+// have one (not required, unlike tracked institutions). Same progress-track
+// headline as institutions (key moments only, no pipeline stages), plus five
+// commentary sections: New Updates, What We Discussed, Direction, Blockers,
+// What's Next.
+function ExecTrackPersonCard({ card, readOnly, onUpdateNewUpdates, onUpdateDiscussion, onUpdateDirection, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onAddMilestone, onRemoveMilestone, onOpenPerson, onOpenInstitution, showToast }) {
   return (
     <div className="exec-track-card">
       <div className="exec-track-head">
@@ -7571,32 +7761,19 @@ function ExecTrackPersonCard({ card, readOnly, onUpdateNewUpdates, onUpdateDiscu
         {card.institutionName && (
           <button type="button" className="link-btn exec-track-person-inst" onClick={() => { if (!hasTextSelection()) onOpenInstitution(card.institutionName); }}>{card.institutionName}</button>
         )}
+        {card.daysSinceMovement != null && (
+          <span className={`ptrack-stall-badge ${card.daysSinceMovement >= 21 ? "ptrack-stall-warn" : ""}`}>Last movement {card.daysSinceMovement === 0 ? "today" : `${card.daysSinceMovement}d ago`}</span>
+        )}
         {!readOnly && (
           <span className="exec-track-head-right">
             {card.last_reviewed_at && <span className="exec-track-reviewed">Reviewed {formatDate(card.last_reviewed_at)}</span>}
-            <button type="button" className="link-btn exec-track-reviewbtn" onClick={() => onMarkReviewed(card.id)} title="Roll the current New Activity into Past and start fresh">Mark as reviewed</button>
+            <button type="button" className="link-btn exec-track-reviewbtn" onClick={() => onMarkReviewed(card.id)} title="Stamp this person as reviewed">Mark as reviewed</button>
             <button type="button" className="exec-track-remove" onClick={() => onRemove(card.id)} title="Stop tracking">✕</button>
           </span>
         )}
       </div>
 
-      {card.pastUpdates.length > 0 && (
-        <div className="exec-track-sec">
-          <button type="button" className="exec-track-sec-toggle" onClick={() => setPastOpen((v) => !v)} aria-expanded={pastOpen}>
-            <span className={`exec-chevron ${pastOpen ? "open" : ""}`}>›</span> Past Activity <span className="exec-track-sec-count">{card.pastUpdates.length}</span>
-          </button>
-          {pastOpen && <ExecTrackUpdateList list={card.pastUpdates} onOpenNote={onOpenNote} />}
-        </div>
-      )}
-
-      <div className="exec-track-sec">
-        <button type="button" className="exec-track-sec-toggle" onClick={() => setNewOpen((v) => !v)} aria-expanded={newOpen}>
-          <span className={`exec-chevron ${newOpen ? "open" : ""}`}>›</span> New Activity <span className="exec-track-sec-count">{card.newUpdates.length}</span>
-        </button>
-        {newOpen && (card.newUpdates.length > 0
-          ? <ExecTrackUpdateList list={card.newUpdates} onOpenNote={onOpenNote} />
-          : <div className="exec-track-sec-empty">No new activity since the last review.</div>)}
-      </div>
+      <ProgressTrackSection nodes={card.trackNodes} fks={card.fks} readOnly={readOnly} onAddMilestone={onAddMilestone} onRemoveMilestone={onRemoveMilestone} showToast={showToast} />
 
       <div className="exec-track-sec exec-track-sec-commentary">
         <div className="exec-track-sec-label">New Updates</div>
@@ -7669,7 +7846,8 @@ function ExecTracking({
   onAdd, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, trackOptions = [],
   onAddPerson, onCreateContact, contactOptions = [],
   onUpdatePersonNewUpdates, onUpdatePersonDiscussion, onUpdatePersonDirection, onUpdatePersonBlockers, onUpdatePersonNext, onMarkPersonReviewed, onRemovePerson,
-  onOpenInstitution, onOpenPerson, onOpenNote, showToast,
+  onAddMilestone, onRemoveMilestone,
+  onOpenInstitution, onOpenPerson, showToast,
 }) {
   const [addingKind, setAddingKind] = useState(null); // null | "institution" | "person"
   const pickInstitution = (value) => { if (!value) { setAddingKind(null); return; } const i = value.indexOf(":"); const type = value.slice(0, i); const id = value.slice(i + 1); onAdd({ [`${type}_id`]: id }); setAddingKind(null); };
@@ -7690,6 +7868,13 @@ function ExecTracking({
           </div>
         )
       )}
+      {(cards.length > 0 || people.length > 0) && (
+        <div className="ptrack-legend">
+          <span className="ptrack-legend-item"><span className="ptrack-legend-dot ptrack-legend-dot-stage" /> Stage change</span>
+          <span className="ptrack-legend-item"><span className="ptrack-legend-dot ptrack-legend-dot-milestone" /> Key moment</span>
+          <span className="ptrack-legend-item"><span className="ptrack-legend-dot ptrack-legend-dot-setback" /> Setback</span>
+        </div>
+      )}
       {cards.length === 0 && people.length === 0 && <div className="exec-track-empty">Nothing tracked yet. Add priority accounts or key people to follow them period over period.</div>}
       {people.length > 0 && (
         <div className="exec-track-group">
@@ -7699,7 +7884,8 @@ function ExecTracking({
               <ExecTrackPersonCard key={card.id} card={card} readOnly={readOnly}
                 onUpdateNewUpdates={onUpdatePersonNewUpdates} onUpdateDiscussion={onUpdatePersonDiscussion} onUpdateDirection={onUpdatePersonDirection}
                 onUpdateBlockers={onUpdatePersonBlockers} onUpdateNext={onUpdatePersonNext} onMarkReviewed={onMarkPersonReviewed} onRemove={onRemovePerson}
-                onOpenPerson={onOpenPerson} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
+                onAddMilestone={onAddMilestone} onRemoveMilestone={onRemoveMilestone}
+                onOpenPerson={onOpenPerson} onOpenInstitution={onOpenInstitution} showToast={showToast} />
             ))}
           </div>
         </div>
@@ -7711,7 +7897,8 @@ function ExecTracking({
             {g.cards.map((card) => (
               <ExecTrackCard key={card.id} card={card} readOnly={readOnly} presenting={presenting}
                 onUpdateNewUpdates={onUpdateNewUpdates} onUpdateBlockers={onUpdateBlockers} onUpdateNext={onUpdateNext} onMarkReviewed={onMarkReviewed} onRemove={onRemove}
-                onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
+                onAddMilestone={onAddMilestone} onRemoveMilestone={onRemoveMilestone}
+                onOpenInstitution={onOpenInstitution} showToast={showToast} />
             ))}
           </div>
         </div>
@@ -7785,6 +7972,7 @@ function ExecUpdateTab({
   trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, execTrackOptions = [],
   trackedPeopleRows = [], resolveTrackedPersonCard, onAddTrackedPerson, onCreateTrackedContact,
   onUpdateTrackedPersonNewUpdates, onUpdateTrackedPersonDiscussion, onUpdateTrackedPersonDirection, onUpdateTrackedPersonBlockers, onUpdateTrackedPersonNext, onMarkTrackedPersonReviewed, onRemoveTrackedPerson,
+  onAddMilestone, onRemoveMilestone,
   questionsFor, onAddQuestion, onUpdateQuestion, onDeleteQuestion, onReorderQuestions,
   onOpenPerson, onOpenNote,
   onSync, onCloseAndStartNew,
@@ -7984,10 +8172,11 @@ function ExecUpdateTab({
         <div className="exec-extra-head">Tracking</div>
         <ExecTracking cards={trackedCards} peopleCards={trackedPeopleCards} readOnly={readOnly}
           onAdd={onAddTracked} onUpdateNewUpdates={onUpdateTrackedNewUpdates} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked}
-          trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast}
+          trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} showToast={showToast}
           onAddPerson={onAddTrackedPerson} onCreateContact={onCreateTrackedContact} contactOptions={contacts} onOpenPerson={onOpenPerson}
           onUpdatePersonNewUpdates={onUpdateTrackedPersonNewUpdates} onUpdatePersonDiscussion={onUpdateTrackedPersonDiscussion} onUpdatePersonDirection={onUpdateTrackedPersonDirection}
-          onUpdatePersonBlockers={onUpdateTrackedPersonBlockers} onUpdatePersonNext={onUpdateTrackedPersonNext} onMarkPersonReviewed={onMarkTrackedPersonReviewed} onRemovePerson={onRemoveTrackedPerson} />
+          onUpdatePersonBlockers={onUpdateTrackedPersonBlockers} onUpdatePersonNext={onUpdateTrackedPersonNext} onMarkPersonReviewed={onMarkTrackedPersonReviewed} onRemovePerson={onRemoveTrackedPerson}
+          onAddMilestone={onAddMilestone} onRemoveMilestone={onRemoveMilestone} />
       </div>
 
       <div className="exec-extra-section">
@@ -8018,7 +8207,8 @@ function ExecUpdateTab({
 function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, todoContacts = [], bossComments, commentAuthor, onPostComment, onMarkCommentRead, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, institutions = [], onOpenInstitution, onOpenPerson, onOpenNote, onOpenTaskLink, showToast,
   buildPipelineSnapshot, trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, execTrackOptions = [],
   trackedPeopleRows = [], resolveTrackedPersonCard, onAddTrackedPerson, onCreateTrackedContact,
-  onUpdateTrackedPersonNewUpdates, onUpdateTrackedPersonDiscussion, onUpdateTrackedPersonDirection, onUpdateTrackedPersonBlockers, onUpdateTrackedPersonNext, onMarkTrackedPersonReviewed, onRemoveTrackedPerson }) {
+  onUpdateTrackedPersonNewUpdates, onUpdateTrackedPersonDiscussion, onUpdateTrackedPersonDirection, onUpdateTrackedPersonBlockers, onUpdateTrackedPersonNext, onMarkTrackedPersonReviewed, onRemoveTrackedPerson,
+  onAddMilestone, onRemoveMilestone }) {
   const readOnly = useReadOnly();
   const [start, setStart] = useState(() => startOfWeek(new Date()));
   const [end, setEnd] = useState(() => addDaysLocal(startOfWeek(new Date()), 6));
@@ -8481,10 +8671,11 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
         <div className="wir-section-title">Tracking</div>
         <ExecTracking cards={trackedCards} peopleCards={trackedPeopleCards} readOnly={readOnly}
           onAdd={onAddTracked} onUpdateNewUpdates={onUpdateTrackedNewUpdates} onUpdateBlockers={onUpdateTrackedBlockers} onUpdateNext={onUpdateTrackedNext} onMarkReviewed={onMarkTrackedReviewed} onRemove={onRemoveTracked}
-          trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast}
+          trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} showToast={showToast}
           onAddPerson={onAddTrackedPerson} onCreateContact={onCreateTrackedContact} contactOptions={contacts} onOpenPerson={onOpenPerson}
           onUpdatePersonNewUpdates={onUpdateTrackedPersonNewUpdates} onUpdatePersonDiscussion={onUpdateTrackedPersonDiscussion} onUpdatePersonDirection={onUpdateTrackedPersonDirection}
-          onUpdatePersonBlockers={onUpdateTrackedPersonBlockers} onUpdatePersonNext={onUpdateTrackedPersonNext} onMarkPersonReviewed={onMarkTrackedPersonReviewed} onRemovePerson={onRemoveTrackedPerson} />
+          onUpdatePersonBlockers={onUpdateTrackedPersonBlockers} onUpdatePersonNext={onUpdateTrackedPersonNext} onMarkPersonReviewed={onMarkTrackedPersonReviewed} onRemovePerson={onRemoveTrackedPerson}
+          onAddMilestone={onAddMilestone} onRemoveMilestone={onRemoveMilestone} />
       </div>
 
       <div className="wir-section">
