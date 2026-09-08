@@ -1945,6 +1945,61 @@ body.exec-presenting-body { overflow: hidden; }
 .exec-chevron { display: inline-block; transition: transform .15s ease; color: var(--muted); }
 .exec-chevron.open { transform: rotate(90deg); }
 
+/* ---- Progress Track: the headline of a tracked institution/person card.
+   A horizontal timeline (stage_history + progress_milestones nodes, oldest
+   to newest) with a chronological detail list beneath it. ---- */
+.ptrack-sec { margin-top: 8px; }
+.ptrack-sec-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
+.ptrack-stall-badge { font-size: 10.5px; font-weight: 700; color: var(--muted); background: var(--card); border-radius: 8px; padding: 2px 8px; white-space: nowrap; }
+.ptrack-stall-warn { color: #B5791A; background: #FBEFD8; }
+.ptrack-empty { font-size: 12px; color: var(--muted); padding: 8px 0; }
+.ptrack-wrap { overflow-x: auto; margin: 2px 0 4px; }
+.ptrack { display: flex; align-items: center; padding: 12px 2px 6px; min-width: max-content; }
+.ptrack-item { display: flex; align-items: center; flex-shrink: 0; }
+.ptrack-connector { display: flex; align-items: center; justify-content: center; position: relative; height: 30px; flex-shrink: 0; }
+.ptrack-connector-line { display: block; width: 100%; height: 2px; background: var(--border); }
+.ptrack-connector-label { position: absolute; top: 2px; font-size: 9.5px; color: var(--muted); white-space: nowrap; }
+.ptrack-connector-long .ptrack-connector-line { background: #E5C078; height: 3px; }
+.ptrack-connector-long .ptrack-connector-label { color: #B5791A; font-weight: 700; }
+.ptrack-node { display: flex; flex-direction: column; align-items: center; gap: 5px; border: none; background: none; cursor: pointer; font-family: inherit; padding: 0 4px; flex-shrink: 0; }
+.ptrack-dot { width: 13px; height: 13px; border-radius: 50%; background: var(--node-color, #6B7280); border: 2px solid var(--node-color, #6B7280); box-shadow: 0 0 0 3px var(--surface); }
+.ptrack-node-milestone .ptrack-dot { background: var(--surface); border-color: var(--accent); }
+.ptrack-node-setback .ptrack-dot { background: #E5484D22; border-color: #E5484D; }
+.ptrack-node-text { display: flex; flex-direction: column; align-items: center; }
+.ptrack-node-label { font-size: 11px; font-weight: 700; color: var(--text-2); white-space: nowrap; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.ptrack-node-milestone .ptrack-node-label { font-weight: 600; color: var(--muted-2); }
+.ptrack-node-setback .ptrack-node-label { color: #C0392B; }
+.ptrack-node-date { font-size: 9.5px; color: var(--muted); }
+.ptrack-node-active .ptrack-node-label { color: #2A6FDB; text-decoration: underline; }
+.ptrack-detail-list { display: flex; flex-direction: column; margin-top: 6px; border-top: 1px solid var(--border); }
+.ptrack-detail-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 2px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.ptrack-detail-row:hover { background: var(--card); }
+.ptrack-detail-active { background: var(--nav-active); }
+.ptrack-detail-date { font-size: 10.5px; color: var(--muted); flex-shrink: 0; min-width: 44px; padding-top: 2px; }
+.ptrack-detail-dot { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: var(--node-color, #6B7280); flex-shrink: 0; }
+.ptrack-detail-milestone .ptrack-detail-dot { background: var(--surface); border: 2px solid var(--accent); }
+.ptrack-detail-setback .ptrack-detail-dot { background: #E5484D22; border: 2px solid #E5484D; }
+.ptrack-detail-body { flex: 1; min-width: 0; }
+.ptrack-detail-title { font-size: 12.5px; font-weight: 600; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
+.ptrack-detail-setback-tag { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: #E5484D; background: #E5484D1A; border-radius: 6px; padding: 1px 6px; }
+.ptrack-detail-text { font-size: 12px; color: var(--muted-2); margin-top: 2px; }
+.ptrack-detail-del { border: none; background: none; cursor: pointer; color: var(--muted); font-size: 12px; padding: 2px 4px; opacity: .6; flex-shrink: 0; }
+.ptrack-detail-del:hover { opacity: 1; color: #EF4444; }
+.ptrack-add { margin-top: 8px; padding: 10px; background: var(--card); border-radius: 9px; display: flex; flex-direction: column; gap: 8px; }
+.ptrack-add-title { width: 100%; }
+.ptrack-add-row { display: flex; align-items: center; gap: 8px; }
+.ptrack-add-detail { flex: 1; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font-size: 12.5px; }
+.ptrack-add-date { width: auto; }
+.ptrack-add-setback { font-size: 12.5px; }
+.ptrack-add-actions { display: flex; align-items: center; gap: 10px; }
+.ptrack-legend { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; font-size: 11px; color: var(--muted); }
+.ptrack-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.ptrack-legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.ptrack-legend-dot-stage { background: #6B7280; }
+.ptrack-legend-dot-milestone { background: var(--surface); border: 2px solid var(--accent); }
+.ptrack-legend-dot-setback { background: #E5484D22; border: 2px solid #E5484D; }
+.exec-present .ptrack-node-label, .exec-present .ptrack-detail-title { font-size: 13px; }
+
 /* Collapsible pipeline: collapsed shows a faded top slice, not nothing. */
 .pipeline-collapsible { position: relative; }
 .pipeline-collapse-toggle { display: inline-flex; align-items: center; gap: 6px; border: none; background: none; cursor: pointer; font-family: inherit; font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 2px 0; margin-bottom: 6px; }
