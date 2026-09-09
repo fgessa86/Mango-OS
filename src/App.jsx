@@ -1392,6 +1392,24 @@ function hashToRoute(hash) {
   return { view, instKey: null, personId: null, eventId };
 }
 
+// Progress Track: once Fahed explicitly deletes a deal's LAST stage_history
+// row, that deletion must stick, so a deal id goes into this permanent
+// localStorage set and the one-time backfill effect (below) never reseeds it
+// from "Moved to X" activities again, even on a browser where the backfill's
+// own one-time flag has not run yet.
+const STAGE_HISTORY_SETTLED_KEY = "mango-stage-history-settled-deals-v1";
+const readSettledDealIds = () => {
+  try { return new Set(JSON.parse(localStorage.getItem(STAGE_HISTORY_SETTLED_KEY) || "[]")); }
+  catch { return new Set(); }
+};
+const markDealStageHistorySettled = (dealId) => {
+  try {
+    const s = readSettledDealIds();
+    s.add(dealId);
+    localStorage.setItem(STAGE_HISTORY_SETTLED_KEY, JSON.stringify([...s]));
+  } catch { /* non critical, worst case a rare re-seed on a fresh browser */ }
+};
+
 export default function App() {
   // Boss View's homepage is the Week in Review (Andy's default landing page),
   // not Home. Fahed still lands on Home.
@@ -1589,7 +1607,10 @@ export default function App() {
   // prefixed with an explicit "Prospecting" origin at created_at; otherwise
   // seed a single entry at the deal's current stage using created_at. Guarded
   // like the mentions upgrade so it only ever runs once per browser, and only
-  // inserts for deals that still have no history row.
+  // inserts for deals that still have no history row AND have never been
+  // explicitly "settled" (see markDealStageHistorySettled): once Fahed
+  // deletes a deal's last auto stage node, that deal is permanently excluded
+  // here, so the deletion sticks instead of reappearing on the next sync.
   const stageBackfillRef = useRef(false);
   useEffect(() => {
     if (loading || bossMode || stageBackfillRef.current || !deals.length) return;
@@ -1598,7 +1619,8 @@ export default function App() {
     (async () => {
       try {
         const covered = new Set(stageHistory.map((h) => h.deal_id));
-        const missing = deals.filter((d) => !covered.has(d.id));
+        const settled = readSettledDealIds();
+        const missing = deals.filter((d) => !covered.has(d.id) && !settled.has(d.id));
         if (missing.length) {
           const transitions = buildStageTransitions(activities, deals);
           const rows = [];
@@ -1741,12 +1763,68 @@ export default function App() {
   // Progress track backbone: one row per pipeline stage change, written
   // wherever a deal's stage changes (drag, inline edit, the deal form), so the
   // tracked-institution progress track has an automatic record to draw from.
+  // No-ops when the deal's own MOST RECENT stage_history row already equals
+  // the new stage, so a re-sync or a redundant call never writes a duplicate
+  // consecutive entry (the caller's own "did the stage actually change" check
+  // guards the common case; this is the belt-and-suspenders check against the
+  // stored history itself, which is what actually matters for de-duplication).
   const recordStageChange = async (dealId, fromStage, toStage, changedAt) => {
+    const latest = stageHistory.filter((h) => h.deal_id === dealId).sort((a, b) => new Date(b.changed_at) - new Date(a.changed_at))[0];
+    if (latest?.to_stage === toStage) return;
     try {
       const rows = await api("stage_history", "POST", { deal_id: dealId, from_stage: fromStage || null, to_stage: toStage, changed_at: changedAt || new Date().toISOString() });
       const row = Array.isArray(rows) ? rows[0] : rows;
       if (row) setStageHistory((prev) => [...prev, row]);
     } catch { /* the progress track just misses this point; not worth blocking the move over */ }
+  };
+
+  // Manual curation of the auto stage-change backbone (Fahed-only): edit a
+  // node's stage/date, delete a wrong or duplicate one, add one the sync
+  // missed, or collapse an accumulated run of same-stage-same-day duplicates.
+  const addStageHistoryEntry = async (dealId, toStage, dateStr) => {
+    const changed_at = dateStr ? new Date(`${dateStr}T00:00:00`).toISOString() : new Date().toISOString();
+    const priorEntries = stageHistory.filter((h) => h.deal_id === dealId && h.changed_at <= changed_at).sort((a, b) => new Date(b.changed_at) - new Date(a.changed_at));
+    const from_stage = priorEntries[0]?.to_stage || null;
+    try {
+      const rows = await api("stage_history", "POST", { deal_id: dealId, from_stage, to_stage: toStage, changed_at });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setStageHistory((prev) => [...prev, row]);
+      showToast("Stage entry added");
+    } catch { showToast("Could not add stage entry"); }
+  };
+  const updateStageHistoryEntry = async (id, patch) => {
+    try {
+      await api("stage_history", "PATCH", patch, `?id=eq.${id}`);
+      setStageHistory((prev) => prev.map((h) => (h.id === id ? { ...h, ...patch } : h)));
+      savedToast();
+    } catch { showToast("Could not update stage entry"); }
+  };
+  // Deleting a deal's auto stage node must stick: mark the deal permanently
+  // "settled" so the one-time backfill effect never reseeds it from a "Moved
+  // to X" activity on a later render or on a fresh browser (see
+  // markDealStageHistorySettled above).
+  const removeStageHistoryEntry = async (id, dealId) => {
+    try {
+      await api("stage_history", "DELETE", null, `?id=eq.${id}`);
+      setStageHistory((prev) => prev.filter((h) => h.id !== id));
+      if (dealId) markDealStageHistorySettled(dealId);
+    } catch { showToast("Could not remove stage entry"); }
+  };
+  // Collapses identical consecutive stage entries (same to_stage on the same
+  // calendar day, the shape a re-sync duplicate takes) down to the earliest
+  // of each run.
+  const cleanupDuplicateStageHistory = async (dealId) => {
+    const sorted = stageHistory.filter((h) => h.deal_id === dealId).sort((a, b) => new Date(a.changed_at) - new Date(b.changed_at));
+    const toDelete = [];
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i].to_stage === sorted[i - 1].to_stage && isSameDay(sorted[i].changed_at, sorted[i - 1].changed_at)) toDelete.push(sorted[i].id);
+    }
+    if (!toDelete.length) { showToast("No duplicates found"); return; }
+    try {
+      await api("stage_history", "DELETE", null, `?id=in.(${toDelete.join(",")})`);
+      setStageHistory((prev) => prev.filter((h) => !toDelete.includes(h.id)));
+      showToast(`Removed ${toDelete.length} duplicate ${toDelete.length === 1 ? "entry" : "entries"}`);
+    } catch { showToast("Could not clean up duplicates"); }
   };
 
   const moveDeal = async (dealId, newStage) => {
@@ -4314,6 +4392,16 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       setProgressMilestones((prev) => prev.filter((m) => m.id !== id));
     } catch { showToast("Could not remove moment"); }
   };
+  const updateProgressMilestone = async (id, { title, detail, milestone_date, is_setback }) => {
+    const t = (title || "").trim();
+    if (!t) { showToast("Title is required"); return; }
+    const clean = { title: t, milestone_date, is_setback: !!is_setback, detail: upgradeTokenMentions((detail || "").trim()) };
+    try {
+      await api("progress_milestones", "PATCH", clean, `?id=eq.${id}`);
+      setProgressMilestones((prev) => prev.map((m) => (m.id === id ? { ...m, ...clean } : m)));
+      savedToast();
+    } catch { showToast("Could not update moment"); }
+  };
 
   /* ---- Exec Questions for the team, per-presentation. ---- */
   const execQuestionsFor = (pid) => execQuestions.filter((x) => x.presentation_id === pid).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
@@ -4787,7 +4875,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       if (inst.dealId) {
         stageHistory.filter((h) => h.deal_id === inst.dealId).forEach((h) => {
           trackNodes.push({
-            id: `stage-${h.id}`, kind: "stage",
+            id: `stage-${h.id}`, dbId: h.id, kind: "stage", stageId: h.to_stage,
             label: stageLabel(h.to_stage), fromLabel: h.from_stage ? stageLabel(h.from_stage) : null,
             date: h.changed_at, color: STAGES.find((s) => s.id === h.to_stage)?.color || null,
           });
@@ -4795,10 +4883,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       }
       progressMilestones
         .filter((m) => (inst.dealId && m.deal_id === inst.dealId) || (inst.enablerId && m.enabler_id === inst.enablerId) || (inst.orgId && m.organization_id === inst.orgId))
-        .forEach((m) => trackNodes.push({ id: `moment-${m.id}`, momentId: m.id, kind: "milestone", label: m.title, detail: m.detail || "", date: m.milestone_date, is_setback: !!m.is_setback }));
+        .forEach((m) => trackNodes.push({ id: `moment-${m.id}`, dbId: m.id, momentId: m.id, kind: "milestone", label: m.title, detail: m.detail || "", date: m.milestone_date, is_setback: !!m.is_setback }));
     }
     trackNodes.sort((a, b) => new Date(a.date) - new Date(b.date));
     const lastMovementAt = trackNodes.length ? trackNodes[trackNodes.length - 1].date : null;
+    const hasDuplicateStageNodes = trackNodes.filter((n) => n.kind === "stage")
+      .some((n, i, arr) => i > 0 && n.stageId === arr[i - 1].stageId && isSameDay(n.date, arr[i - 1].date));
     return {
       id: t.id,
       custom_note: t.custom_note || "",
@@ -4807,12 +4897,14 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       whats_next: t.whats_next || "",
       last_reviewed_at: t.last_reviewed_at || null,
       inst, fks,
+      dealId: inst?.dealId || null,
       name: inst?.name || "(institution not found)",
       instKey: inst?.key || null,
       typeMeta: inst?.type ? institutionTypeMeta(inst.type, customOptions) : null,
       tier: inst?.deal?.tier && inst.deal.tier !== "Untiered" ? inst.deal.tier : null,
       stage: inst?.stage || null,
       trackNodes,
+      hasDuplicateStageNodes,
       lastMovementAt,
       daysSinceMovement: lastMovementAt ? daysAgo(lastMovementAt) : null,
       // Drives auto-sort within a type group: the track's own most recent node.
@@ -4830,7 +4922,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     if (contact) {
       progressMilestones
         .filter((m) => m.contact_id === contact.id)
-        .forEach((m) => trackNodes.push({ id: `moment-${m.id}`, momentId: m.id, kind: "milestone", label: m.title, detail: m.detail || "", date: m.milestone_date, is_setback: !!m.is_setback }));
+        .forEach((m) => trackNodes.push({ id: `moment-${m.id}`, dbId: m.id, momentId: m.id, kind: "milestone", label: m.title, detail: m.detail || "", date: m.milestone_date, is_setback: !!m.is_setback }));
     }
     trackNodes.sort((a, b) => new Date(a.date) - new Date(b.date));
     const lastMovementAt = trackNodes.length ? trackNodes[trackNodes.length - 1].date : null;
@@ -5711,7 +5803,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onMarkTrackedPersonReviewed={markTrackedPersonReviewed}
           onRemoveTrackedPerson={removeExecTrackedPerson}
           onAddMilestone={addProgressMilestone}
+          onUpdateMilestone={updateProgressMilestone}
           onRemoveMilestone={removeProgressMilestone}
+          onAddStage={addStageHistoryEntry}
+          onUpdateStage={updateStageHistoryEntry}
+          onRemoveStage={removeStageHistoryEntry}
+          onCleanupDuplicates={cleanupDuplicateStageHistory}
           questionsFor={execQuestionsFor}
           onAddQuestion={addExecQuestion}
           onUpdateQuestion={updateExecQuestion}
@@ -5774,7 +5871,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onMarkTrackedPersonReviewed={markTrackedPersonReviewed}
           onRemoveTrackedPerson={removeExecTrackedPerson}
           onAddMilestone={addProgressMilestone}
+          onUpdateMilestone={updateProgressMilestone}
           onRemoveMilestone={removeProgressMilestone}
+          onAddStage={addStageHistoryEntry}
+          onUpdateStage={updateStageHistoryEntry}
+          onRemoveStage={removeStageHistoryEntry}
+          onCleanupDuplicates={cleanupDuplicateStageHistory}
         />
       )}
 
@@ -7600,34 +7702,126 @@ function ProgressTrack({ nodes = [], selectedId, onSelect }) {
   );
 }
 
+// Inline edit form for a MANUAL milestone node: title, optional
+// @-mention-aware detail (with voice capture), date, "is setback" toggle.
+// Shared shape with AddMomentForm below, just pre-filled and saving via PATCH.
+function EditMilestoneForm({ node, onSave, onCancel, showToast }) {
+  const [title, setTitle] = useState(node.label);
+  const [detail, setDetail] = useState(node.detail || "");
+  const [date, setDate] = useState((node.date || "").slice(0, 10));
+  const [isSetback, setIsSetback] = useState(!!node.is_setback);
+  const [saving, setSaving] = useState(false);
+  const submit = async () => {
+    const t = title.trim();
+    if (!t || saving) return;
+    setSaving(true);
+    try { await onSave({ title: t, detail: detail.trim(), milestone_date: date, is_setback: isSetback }); }
+    finally { setSaving(false); }
+  };
+  return (
+    <div className="ptrack-add" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); onCancel(); } }}>
+      <input className="input ptrack-add-title" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
+      <div className="ptrack-add-row">
+        <MentionEditor value={detail} onChange={setDetail} placeholder="Optional detail. Use @ to mention a person or institution." className="ptrack-add-detail" />
+        <VoiceRecorder mode="plain" compact showToast={showToast} title="Dictate a detail" onPlainText={(t) => setDetail((d) => (d ? `${d} ${t}` : t))} />
+      </div>
+      <div className="ptrack-add-row">
+        <input type="date" className="input ptrack-add-date" value={date} onChange={(e) => setDate(e.target.value)} />
+        <label className="checkbox-label ptrack-add-setback"><input type="checkbox" checked={isSetback} onChange={(e) => setIsSetback(e.target.checked)} /> This is a setback</label>
+      </div>
+      <div className="ptrack-add-actions">
+        <button type="button" className="btn-primary" disabled={saving || !title.trim()} onClick={submit}>{saving ? "Saving..." : "Save"}</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+        <span className="act-edit-hint">Esc to cancel</span>
+      </div>
+    </div>
+  );
+}
+
+// Inline edit form for an AUTO stage-change node: relabel the stage it moved
+// to, or correct the date it happened on, so a mis-recorded or duplicate
+// sync entry can be fixed in place instead of only deleted.
+function EditStageForm({ node, onSave, onCancel }) {
+  const [stageId, setStageId] = useState(node.stageId || "");
+  const [date, setDate] = useState((node.date || "").slice(0, 10));
+  const [saving, setSaving] = useState(false);
+  const submit = async () => {
+    if (saving || !stageId) return;
+    setSaving(true);
+    try { await onSave({ to_stage: stageId, changed_at: date ? new Date(`${date}T00:00:00`).toISOString() : node.date }); }
+    finally { setSaving(false); }
+  };
+  return (
+    <div className="ptrack-add" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); onCancel(); } }}>
+      <div className="ptrack-add-row">
+        <select className="input" value={stageId} onChange={(e) => setStageId(e.target.value)} autoFocus>
+          {STAGES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+        </select>
+        <input type="date" className="input ptrack-add-date" value={date} onChange={(e) => setDate(e.target.value)} />
+      </div>
+      <div className="ptrack-add-actions">
+        <button type="button" className="btn-primary" disabled={saving} onClick={submit}>{saving ? "Saving..." : "Save"}</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+        <span className="act-edit-hint">Esc to cancel</span>
+      </div>
+    </div>
+  );
+}
+
 // Chronological (newest first) list of the same nodes, each with its detail,
 // beneath the track: "list the milestones/stages chronologically with their
-// notes." Selecting a node on the track highlights its row here.
-function ProgressTrackDetailList({ nodes = [], selectedId, onSelectNode, onDeleteMilestone, readOnly }) {
+// notes." Selecting a node on the track highlights its row here. Every node,
+// auto stage-change or manual milestone alike, can be edited in place or
+// deleted (with a confirm), Fahed-only.
+function ProgressTrackDetailList({ nodes = [], selectedId, onSelectNode, editingId, onStartEdit, onCancelEdit, onSaveMilestone, onSaveStage, onDeleteMilestone, onDeleteStage, readOnly, showToast }) {
   if (!nodes.length) return null;
   const sorted = [...nodes].sort((a, b) => new Date(b.date) - new Date(a.date));
   return (
     <div className="ptrack-detail-list">
-      {sorted.map((n) => (
-        <div
-          key={n.id}
-          className={`ptrack-detail-row ptrack-detail-${n.kind} ${n.is_setback ? "ptrack-detail-setback" : ""} ${selectedId === n.id ? "ptrack-detail-active" : ""}`}
-          onClick={() => onSelectNode(n.id === selectedId ? null : n.id)}
-        >
-          <span className="ptrack-detail-date">{formatDate(n.date)}</span>
-          <span className="ptrack-detail-dot" style={n.color ? { "--node-color": n.color } : undefined} />
-          <div className="ptrack-detail-body">
-            <div className="ptrack-detail-title">
-              {n.kind === "stage" ? `Moved to ${n.label}` : n.label}
-              {n.is_setback && <span className="ptrack-detail-setback-tag">Setback</span>}
+      {sorted.map((n) => {
+        if (editingId === n.id) {
+          return (
+            <div key={n.id} className={`ptrack-detail-row ptrack-detail-${n.kind} ptrack-detail-editing`}>
+              {n.kind === "stage"
+                ? <EditStageForm node={n} onSave={async (patch) => { await onSaveStage(n.dbId, patch); onCancelEdit(); }} onCancel={onCancelEdit} />
+                : <EditMilestoneForm node={n} showToast={showToast} onSave={async (payload) => { await onSaveMilestone(n.dbId, payload); onCancelEdit(); }} onCancel={onCancelEdit} />}
             </div>
-            {n.detail && <div className="ptrack-detail-text"><MentionText text={n.detail} /></div>}
+          );
+        }
+        return (
+          <div
+            key={n.id}
+            className={`ptrack-detail-row ptrack-detail-${n.kind} ${n.is_setback ? "ptrack-detail-setback" : ""} ${selectedId === n.id ? "ptrack-detail-active" : ""}`}
+            onClick={() => onSelectNode(n.id === selectedId ? null : n.id)}
+          >
+            <span className="ptrack-detail-date">{formatDate(n.date)}</span>
+            <span className="ptrack-detail-dot" style={n.color ? { "--node-color": n.color } : undefined} />
+            <div className="ptrack-detail-body">
+              <div className="ptrack-detail-title">
+                {n.kind === "stage" ? `Moved to ${n.label}` : n.label}
+                {n.is_setback && <span className="ptrack-detail-setback-tag">Setback</span>}
+              </div>
+              {n.detail && <div className="ptrack-detail-text"><MentionText text={n.detail} /></div>}
+            </div>
+            {!readOnly && (
+              <span className="ptrack-detail-actions">
+                <button type="button" className="ptrack-detail-edit" onClick={(e) => { e.stopPropagation(); onStartEdit(n.id); }} title="Edit">✎</button>
+                <button
+                  type="button"
+                  className="ptrack-detail-del"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const label = n.kind === "stage" ? `the "${n.label}" stage entry` : `"${n.label}"`;
+                    if (!window.confirm(`Delete ${label} from the progress track? This cannot be undone.`)) return;
+                    if (n.kind === "stage") onDeleteStage(n.dbId); else onDeleteMilestone(n.dbId);
+                  }}
+                  title={n.kind === "stage" ? "Delete stage entry" : "Delete moment"}
+                >✕</button>
+              </span>
+            )}
           </div>
-          {!readOnly && n.kind === "milestone" && (
-            <button type="button" className="ptrack-detail-del" onClick={(e) => { e.stopPropagation(); onDeleteMilestone(n.momentId); }} title="Delete moment">✕</button>
-          )}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -7669,24 +7863,75 @@ function AddMomentForm({ onSave, onCancel, showToast }) {
   );
 }
 
+// Small inline "+ Add stage entry" form for supplementing an incomplete auto
+// backbone by hand: pick a stage and a date, writes straight to stage_history.
+function AddStageForm({ onSave, onCancel }) {
+  const [stageId, setStageId] = useState(STAGES[0]?.id || "");
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [saving, setSaving] = useState(false);
+  const submit = async () => {
+    if (saving || !stageId) return;
+    setSaving(true);
+    try { await onSave(stageId, date); onCancel(); } finally { setSaving(false); }
+  };
+  return (
+    <div className="ptrack-add" onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); onCancel(); } }}>
+      <div className="ptrack-add-row">
+        <select className="input" value={stageId} onChange={(e) => setStageId(e.target.value)} autoFocus>
+          {STAGES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+        </select>
+        <input type="date" className="input ptrack-add-date" value={date} onChange={(e) => setDate(e.target.value)} />
+      </div>
+      <div className="ptrack-add-actions">
+        <button type="button" className="btn-primary" disabled={saving} onClick={submit}>{saving ? "Adding..." : "Add stage entry"}</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+        <span className="act-edit-hint">Esc to cancel</span>
+      </div>
+    </div>
+  );
+}
+
 // The Progress Track section shared by institution and person cards: the
-// track itself, "+ Add moment", and the chronological detail list. Kept as
-// one component so both card types stay visually identical (portfolio
+// track itself, "+ Add moment" / "+ Add stage entry" (institutions only,
+// since a person has no deal stage), an optional "Clean up duplicates" link
+// when a same-stage-same-day run is detected, and the chronological detail
+// list where every node (auto or manual) is edited and deleted. Kept as one
+// component so both card types stay visually identical (portfolio
 // comparability is the point: every tracked account/person reads the same way).
-function ProgressTrackSection({ nodes, fks, readOnly, onAddMilestone, onRemoveMilestone, showToast }) {
-  const [adding, setAdding] = useState(false);
+function ProgressTrackSection({ nodes, fks, dealId, readOnly, hasDuplicateStageNodes, onAddMilestone, onUpdateMilestone, onRemoveMilestone, onAddStage, onUpdateStage, onRemoveStage, onCleanupDuplicates, showToast }) {
+  const [adding, setAdding] = useState(null); // null | "moment" | "stage"
   const [selectedId, setSelectedId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
   return (
     <div className="exec-track-sec ptrack-sec">
       <div className="ptrack-sec-head">
         <div className="exec-track-sec-label">Progress</div>
-        {!readOnly && !adding && <button type="button" className="link-btn" onClick={() => setAdding(true)}>+ Add moment</button>}
+        {!readOnly && (
+          <span className="ptrack-sec-actions">
+            {hasDuplicateStageNodes && <button type="button" className="link-btn" onClick={() => onCleanupDuplicates(dealId)}>Clean up duplicates</button>}
+            {!adding && (
+              <>
+                <button type="button" className="link-btn" onClick={() => setAdding("moment")}>+ Add moment</button>
+                {dealId && <button type="button" className="link-btn" onClick={() => setAdding("stage")}>+ Add stage entry</button>}
+              </>
+            )}
+          </span>
+        )}
       </div>
       <ProgressTrack nodes={nodes} selectedId={selectedId} onSelect={setSelectedId} />
-      {adding && (
-        <AddMomentForm showToast={showToast} onCancel={() => setAdding(false)} onSave={(payload) => onAddMilestone(fks, payload)} />
+      {adding === "moment" && (
+        <AddMomentForm showToast={showToast} onCancel={() => setAdding(null)} onSave={(payload) => onAddMilestone(fks, payload)} />
       )}
-      <ProgressTrackDetailList nodes={nodes} selectedId={selectedId} onSelectNode={setSelectedId} onDeleteMilestone={onRemoveMilestone} readOnly={readOnly} />
+      {adding === "stage" && (
+        <AddStageForm onCancel={() => setAdding(null)} onSave={(stageId, dateStr) => onAddStage(dealId, stageId, dateStr)} />
+      )}
+      <ProgressTrackDetailList
+        nodes={nodes} selectedId={selectedId} onSelectNode={setSelectedId}
+        editingId={editingId} onStartEdit={setEditingId} onCancelEdit={() => setEditingId(null)}
+        onSaveMilestone={onUpdateMilestone} onSaveStage={onUpdateStage}
+        onDeleteMilestone={onRemoveMilestone} onDeleteStage={(id) => onRemoveStage(id, dealId)}
+        readOnly={readOnly} showToast={showToast}
+      />
     </div>
   );
 }
@@ -7696,7 +7941,7 @@ function ProgressTrackSection({ nodes, fks, readOnly, onAddMilestone, onRemoveMi
 // and What's Next kept below for current framing. Cards are auto-ordered
 // (grouped by type, sorted by recency of the track's own last node) by the
 // parent, so there is no manual reorder here.
-function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onAddMilestone, onRemoveMilestone, onOpenInstitution, showToast }) {
+function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onAddMilestone, onUpdateMilestone, onRemoveMilestone, onAddStage, onUpdateStage, onRemoveStage, onCleanupDuplicates, onOpenInstitution, showToast }) {
   const tierMeta = card.tier ? DEAL_TIERS.find((t) => t.id === card.tier) : null;
   const stageMeta = card.stage ? STAGES.find((s) => s.id === card.stage) : null;
   const showLegacy = !readOnly && isContentEmpty(card.blockers) && isContentEmpty(card.whats_next) && !isContentEmpty(card.custom_note);
@@ -7719,7 +7964,12 @@ function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdat
         )}
       </div>
 
-      <ProgressTrackSection nodes={card.trackNodes} fks={card.fks} readOnly={readOnly} onAddMilestone={onAddMilestone} onRemoveMilestone={onRemoveMilestone} showToast={showToast} />
+      <ProgressTrackSection
+        nodes={card.trackNodes} fks={card.fks} dealId={card.dealId} readOnly={readOnly} hasDuplicateStageNodes={card.hasDuplicateStageNodes}
+        onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onRemoveMilestone={onRemoveMilestone}
+        onAddStage={onAddStage} onUpdateStage={onUpdateStage} onRemoveStage={onRemoveStage} onCleanupDuplicates={onCleanupDuplicates}
+        showToast={showToast}
+      />
 
       <div className="exec-track-sec exec-track-sec-commentary">
         <div className="exec-track-sec-label">New Updates</div>
@@ -7751,7 +8001,7 @@ function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdat
 // headline as institutions (key moments only, no pipeline stages), plus five
 // commentary sections: New Updates, What We Discussed, Direction, Blockers,
 // What's Next.
-function ExecTrackPersonCard({ card, readOnly, onUpdateNewUpdates, onUpdateDiscussion, onUpdateDirection, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onAddMilestone, onRemoveMilestone, onOpenPerson, onOpenInstitution, showToast }) {
+function ExecTrackPersonCard({ card, readOnly, onUpdateNewUpdates, onUpdateDiscussion, onUpdateDirection, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onAddMilestone, onUpdateMilestone, onRemoveMilestone, onOpenPerson, onOpenInstitution, showToast }) {
   return (
     <div className="exec-track-card">
       <div className="exec-track-head">
@@ -7773,7 +8023,7 @@ function ExecTrackPersonCard({ card, readOnly, onUpdateNewUpdates, onUpdateDiscu
         )}
       </div>
 
-      <ProgressTrackSection nodes={card.trackNodes} fks={card.fks} readOnly={readOnly} onAddMilestone={onAddMilestone} onRemoveMilestone={onRemoveMilestone} showToast={showToast} />
+      <ProgressTrackSection nodes={card.trackNodes} fks={card.fks} readOnly={readOnly} onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onRemoveMilestone={onRemoveMilestone} showToast={showToast} />
 
       <div className="exec-track-sec exec-track-sec-commentary">
         <div className="exec-track-sec-label">New Updates</div>
@@ -7846,7 +8096,8 @@ function ExecTracking({
   onAdd, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, trackOptions = [],
   onAddPerson, onCreateContact, contactOptions = [],
   onUpdatePersonNewUpdates, onUpdatePersonDiscussion, onUpdatePersonDirection, onUpdatePersonBlockers, onUpdatePersonNext, onMarkPersonReviewed, onRemovePerson,
-  onAddMilestone, onRemoveMilestone,
+  onAddMilestone, onUpdateMilestone, onRemoveMilestone,
+  onAddStage, onUpdateStage, onRemoveStage, onCleanupDuplicates,
   onOpenInstitution, onOpenPerson, showToast,
 }) {
   const [addingKind, setAddingKind] = useState(null); // null | "institution" | "person"
@@ -7884,7 +8135,7 @@ function ExecTracking({
               <ExecTrackPersonCard key={card.id} card={card} readOnly={readOnly}
                 onUpdateNewUpdates={onUpdatePersonNewUpdates} onUpdateDiscussion={onUpdatePersonDiscussion} onUpdateDirection={onUpdatePersonDirection}
                 onUpdateBlockers={onUpdatePersonBlockers} onUpdateNext={onUpdatePersonNext} onMarkReviewed={onMarkPersonReviewed} onRemove={onRemovePerson}
-                onAddMilestone={onAddMilestone} onRemoveMilestone={onRemoveMilestone}
+                onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onRemoveMilestone={onRemoveMilestone}
                 onOpenPerson={onOpenPerson} onOpenInstitution={onOpenInstitution} showToast={showToast} />
             ))}
           </div>
@@ -7897,7 +8148,8 @@ function ExecTracking({
             {g.cards.map((card) => (
               <ExecTrackCard key={card.id} card={card} readOnly={readOnly} presenting={presenting}
                 onUpdateNewUpdates={onUpdateNewUpdates} onUpdateBlockers={onUpdateBlockers} onUpdateNext={onUpdateNext} onMarkReviewed={onMarkReviewed} onRemove={onRemove}
-                onAddMilestone={onAddMilestone} onRemoveMilestone={onRemoveMilestone}
+                onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onRemoveMilestone={onRemoveMilestone}
+                onAddStage={onAddStage} onUpdateStage={onUpdateStage} onRemoveStage={onRemoveStage} onCleanupDuplicates={onCleanupDuplicates}
                 onOpenInstitution={onOpenInstitution} showToast={showToast} />
             ))}
           </div>
@@ -7972,7 +8224,8 @@ function ExecUpdateTab({
   trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, execTrackOptions = [],
   trackedPeopleRows = [], resolveTrackedPersonCard, onAddTrackedPerson, onCreateTrackedContact,
   onUpdateTrackedPersonNewUpdates, onUpdateTrackedPersonDiscussion, onUpdateTrackedPersonDirection, onUpdateTrackedPersonBlockers, onUpdateTrackedPersonNext, onMarkTrackedPersonReviewed, onRemoveTrackedPerson,
-  onAddMilestone, onRemoveMilestone,
+  onAddMilestone, onUpdateMilestone, onRemoveMilestone,
+  onAddStage, onUpdateStage, onRemoveStage, onCleanupDuplicates,
   questionsFor, onAddQuestion, onUpdateQuestion, onDeleteQuestion, onReorderQuestions,
   onOpenPerson, onOpenNote,
   onSync, onCloseAndStartNew,
@@ -8176,7 +8429,8 @@ function ExecUpdateTab({
           onAddPerson={onAddTrackedPerson} onCreateContact={onCreateTrackedContact} contactOptions={contacts} onOpenPerson={onOpenPerson}
           onUpdatePersonNewUpdates={onUpdateTrackedPersonNewUpdates} onUpdatePersonDiscussion={onUpdateTrackedPersonDiscussion} onUpdatePersonDirection={onUpdateTrackedPersonDirection}
           onUpdatePersonBlockers={onUpdateTrackedPersonBlockers} onUpdatePersonNext={onUpdateTrackedPersonNext} onMarkPersonReviewed={onMarkTrackedPersonReviewed} onRemovePerson={onRemoveTrackedPerson}
-          onAddMilestone={onAddMilestone} onRemoveMilestone={onRemoveMilestone} />
+          onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onRemoveMilestone={onRemoveMilestone}
+          onAddStage={onAddStage} onUpdateStage={onUpdateStage} onRemoveStage={onRemoveStage} onCleanupDuplicates={onCleanupDuplicates} />
       </div>
 
       <div className="exec-extra-section">
@@ -8208,7 +8462,8 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
   buildPipelineSnapshot, trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, execTrackOptions = [],
   trackedPeopleRows = [], resolveTrackedPersonCard, onAddTrackedPerson, onCreateTrackedContact,
   onUpdateTrackedPersonNewUpdates, onUpdateTrackedPersonDiscussion, onUpdateTrackedPersonDirection, onUpdateTrackedPersonBlockers, onUpdateTrackedPersonNext, onMarkTrackedPersonReviewed, onRemoveTrackedPerson,
-  onAddMilestone, onRemoveMilestone }) {
+  onAddMilestone, onUpdateMilestone, onRemoveMilestone,
+  onAddStage, onUpdateStage, onRemoveStage, onCleanupDuplicates }) {
   const readOnly = useReadOnly();
   const [start, setStart] = useState(() => startOfWeek(new Date()));
   const [end, setEnd] = useState(() => addDaysLocal(startOfWeek(new Date()), 6));
@@ -8675,7 +8930,8 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
           onAddPerson={onAddTrackedPerson} onCreateContact={onCreateTrackedContact} contactOptions={contacts} onOpenPerson={onOpenPerson}
           onUpdatePersonNewUpdates={onUpdateTrackedPersonNewUpdates} onUpdatePersonDiscussion={onUpdateTrackedPersonDiscussion} onUpdatePersonDirection={onUpdateTrackedPersonDirection}
           onUpdatePersonBlockers={onUpdateTrackedPersonBlockers} onUpdatePersonNext={onUpdateTrackedPersonNext} onMarkPersonReviewed={onMarkTrackedPersonReviewed} onRemovePerson={onRemoveTrackedPerson}
-          onAddMilestone={onAddMilestone} onRemoveMilestone={onRemoveMilestone} />
+          onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onRemoveMilestone={onRemoveMilestone}
+          onAddStage={onAddStage} onUpdateStage={onUpdateStage} onRemoveStage={onRemoveStage} onCleanupDuplicates={onCleanupDuplicates} />
       </div>
 
       <div className="wir-section">
