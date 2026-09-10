@@ -820,6 +820,7 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
   const more = [
     { id: "reports", label: "Reports", count: reportsUnreadCount },
     { id: "exec", label: "Exec Update" },
+    { id: "strategy", label: "Strategy" },
   ];
   const mapView = view === "institution-sheet" ? sheetOrigin : view === "person-sheet" ? "network" : view;
   return (
@@ -1364,7 +1365,7 @@ function TagPickerWithCustom({ options, value, onToggle }) {
 // (?view=boss) is left untouched, so Boss View survives every navigation.
 const ROUTE_TAB_VIEWS = new Set([
   "home", "calendar", "pipeline", "network", "map", "tasks",
-  "notes", "materials", "outreach", "reports", "exec",
+  "notes", "materials", "outreach", "reports", "exec", "strategy",
 ]);
 
 // A route: { view, instKey, personId, eventId }. Institution/person sheets get
@@ -1417,6 +1418,11 @@ export default function App() {
   const [execInitiatives, setExecInitiatives] = useState([]);
   const [execTracked, setExecTracked] = useState([]);
   const [execTrackedPeople, setExecTrackedPeople] = useState([]);
+  const [strategies, setStrategies] = useState([]);
+  const [strategyThreads, setStrategyThreads] = useState([]);
+  const [strategyRoutes, setStrategyRoutes] = useState([]);
+  const [progressMilestones, setProgressMilestones] = useState([]);
+  const [stageHistory, setStageHistory] = useState([]);
   const [execQuestions, setExecQuestions] = useState([]);
   const [execOpenId, setExecOpenId] = useState(null);
   const [execPresenting, setExecPresenting] = useState(false);
@@ -1486,7 +1492,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp, strat, sthr, sroutes, pms, sh] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1520,6 +1526,11 @@ export default function App() {
         api("exec_tracked_institutions", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("exec_questions", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("exec_tracked_people", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("strategies", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("strategy_threads", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("strategy_routes", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("progress_milestones", "GET", null, "?select=*&order=milestone_date.asc,created_at.asc").catch(() => []),
+        api("stage_history", "GET", null, "?select=*&order=changed_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []); setTodoContacts(tdc || []);
@@ -1530,6 +1541,8 @@ export default function App() {
       setExecPresentations(xp || []); setExecBlocks(xb || []);
       setDiscussionPoints(dp || []); setTopOfMind(tom || []);
       setExecInitiatives(xi || []); setExecTracked(xti || []); setExecQuestions(xq || []); setExecTrackedPeople(xtp || []);
+      setStrategies(strat || []); setStrategyThreads(sthr || []); setStrategyRoutes(sroutes || []);
+      setProgressMilestones(pms || []); setStageHistory(sh || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -4226,6 +4239,237 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Could not remove"); }
   };
 
+  /* ---- Strategy: strategies -> threads (one per institution/person) -> routes
+     (parallel paths toward the thread's goal) -> progress_milestones (dated
+     moments on a route's, or a thread's own, track). Plain per-entity
+     progress_milestones (thread_id/route_id both null, keyed on the entity's
+     own FK) power the separate per-institution/person tracks on the Tracking
+     section cards; those are covered further down. ---- */
+  const addStrategy = async (name, goal) => {
+    const clean = (name || "").trim();
+    if (!clean) return null;
+    try {
+      const sort_order = strategies.length ? Math.max(...strategies.map((s) => s.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("strategies", "POST", { name: clean, goal: (goal || "").trim() || null, sort_order, is_active: true });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setStrategies((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not create strategy"); return null; }
+  };
+  const updateStrategy = async (id, patch) => {
+    try {
+      await api("strategies", "PATCH", patch, `?id=eq.${id}`);
+      setStrategies((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+    } catch { showToast("Could not save"); }
+  };
+  const deleteStrategy = async (id) => {
+    try {
+      const threadIds = strategyThreads.filter((t) => t.strategy_id === id).map((t) => t.id);
+      const routeIds = strategyRoutes.filter((r) => threadIds.includes(r.thread_id)).map((r) => r.id);
+      if (routeIds.length) await api("progress_milestones", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+      if (threadIds.length) {
+        await api("progress_milestones", "DELETE", null, `?thread_id=in.(${threadIds.join(",")})`);
+        await api("strategy_routes", "DELETE", null, `?thread_id=in.(${threadIds.join(",")})`);
+        await api("strategy_threads", "DELETE", null, `?strategy_id=eq.${id}`);
+      }
+      await api("strategies", "DELETE", null, `?id=eq.${id}`);
+      setStrategies((prev) => prev.filter((s) => s.id !== id));
+      setStrategyThreads((prev) => prev.filter((t) => t.strategy_id !== id));
+      setStrategyRoutes((prev) => prev.filter((r) => !threadIds.includes(r.thread_id)));
+      setProgressMilestones((prev) => prev.filter((m) => !threadIds.includes(m.thread_id) && !routeIds.includes(m.route_id)));
+    } catch { showToast("Could not delete strategy"); }
+  };
+
+  const addStrategyThread = async (strategyId, { title, fks, goal }) => {
+    const clean = (title || "").trim();
+    if (!clean) return null;
+    try {
+      const siblings = strategyThreads.filter((t) => t.strategy_id === strategyId);
+      const sort_order = siblings.length ? Math.max(...siblings.map((t) => t.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("strategy_threads", "POST", { strategy_id: strategyId, title: clean, goal: (goal || "").trim() || null, ...fks, status: "active", sort_order });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setStrategyThreads((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not add thread"); return null; }
+  };
+  const updateStrategyThread = async (id, patch) => {
+    if ("goal" in patch) patch = { ...patch, goal: upgradeTokenMentions(patch.goal || "") };
+    try {
+      await api("strategy_threads", "PATCH", patch, `?id=eq.${id}`);
+      setStrategyThreads((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+    } catch { showToast("Could not save"); }
+  };
+  const deleteStrategyThread = async (id) => {
+    try {
+      const routeIds = strategyRoutes.filter((r) => r.thread_id === id).map((r) => r.id);
+      if (routeIds.length) await api("progress_milestones", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+      await api("progress_milestones", "DELETE", null, `?thread_id=eq.${id}`);
+      await api("strategy_routes", "DELETE", null, `?thread_id=eq.${id}`);
+      await api("strategy_threads", "DELETE", null, `?id=eq.${id}`);
+      setStrategyThreads((prev) => prev.filter((t) => t.id !== id));
+      setStrategyRoutes((prev) => prev.filter((r) => r.thread_id !== id));
+      setProgressMilestones((prev) => prev.filter((m) => m.thread_id !== id && !routeIds.includes(m.route_id)));
+    } catch { showToast("Could not delete thread"); }
+  };
+  const reorderStrategyThreads = async (orderedIds) => {
+    setStrategyThreads((prev) => prev.map((t) => { const i = orderedIds.indexOf(t.id); return i === -1 ? t : { ...t, sort_order: i }; }));
+    try { await Promise.all(orderedIds.map((id, i) => api("strategy_threads", "PATCH", { sort_order: i }, `?id=eq.${id}`))); }
+    catch { showToast("Could not save the new order"); }
+  };
+
+  const addStrategyRoute = async (threadId, title) => {
+    const clean = (title || "").trim();
+    if (!clean) return null;
+    try {
+      const siblings = strategyRoutes.filter((r) => r.thread_id === threadId);
+      const sort_order = siblings.length ? Math.max(...siblings.map((r) => r.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("strategy_routes", "POST", { thread_id: threadId, title: clean, state: "active", sort_order });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setStrategyRoutes((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not add route"); return null; }
+  };
+  const updateStrategyRoute = async (id, patch) => {
+    if ("outcome_note" in patch) patch = { ...patch, outcome_note: upgradeTokenMentions(patch.outcome_note || "") };
+    try {
+      await api("strategy_routes", "PATCH", patch, `?id=eq.${id}`);
+      setStrategyRoutes((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+    } catch { showToast("Could not save"); }
+  };
+  const deleteStrategyRoute = async (id) => {
+    try {
+      await api("progress_milestones", "DELETE", null, `?route_id=eq.${id}`);
+      await api("strategy_routes", "DELETE", null, `?id=eq.${id}`);
+      setStrategyRoutes((prev) => prev.filter((r) => r.id !== id));
+      setProgressMilestones((prev) => prev.filter((m) => m.route_id !== id));
+    } catch { showToast("Could not delete route"); }
+  };
+  const reorderStrategyRoutes = async (orderedIds) => {
+    setStrategyRoutes((prev) => prev.map((r) => { const i = orderedIds.indexOf(r.id); return i === -1 ? r : { ...r, sort_order: i }; }));
+    try { await Promise.all(orderedIds.map((id, i) => api("strategy_routes", "PATCH", { sort_order: i }, `?id=eq.${id}`))); }
+    catch { showToast("Could not save the new order"); }
+  };
+
+  /* ---- Progress milestones: generic dated moments on a track. Used both by
+     strategy routes (route_id set) and thread-level tracks (thread_id only),
+     AND independently by the plain per-institution/person Tracking-section
+     tracks (route_id/thread_id both null, keyed on the entity's own FK). ---- */
+  const addProgressMilestone = async (fks, { title, detail, milestone_date, is_setback, source_ref } = {}) => {
+    const clean = (title || "").trim();
+    if (!clean) return null;
+    try {
+      const rows = await api("progress_milestones", "POST", {
+        ...fks, title: clean, detail: (detail || "").trim() || null,
+        milestone_date: milestone_date || new Date().toISOString().slice(0, 10),
+        is_setback: !!is_setback, source_ref: source_ref || null,
+      });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setProgressMilestones((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not add milestone"); return null; }
+  };
+  const updateProgressMilestone = async (id, patch) => {
+    if ("title" in patch) patch = { ...patch, title: upgradeTokenMentions(patch.title || "") };
+    if ("detail" in patch) patch = { ...patch, detail: upgradeTokenMentions(patch.detail || "") };
+    try {
+      await api("progress_milestones", "PATCH", patch, `?id=eq.${id}`);
+      setProgressMilestones((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+    } catch { showToast("Could not save"); }
+  };
+  const deleteProgressMilestone = async (id) => {
+    try {
+      await api("progress_milestones", "DELETE", null, `?id=eq.${id}`);
+      setProgressMilestones((prev) => prev.filter((m) => m.id !== id));
+    } catch { showToast("Could not delete milestone"); }
+  };
+  // Bulk-insert from the "Pull existing moments" panel. Every row must share
+  // the same keys (PGRST102), so every payload carries the full fk set.
+  const bulkAddProgressMilestones = async (fks, picks) => {
+    if (!picks.length) return;
+    const rows = picks.map((p) => ({
+      thread_id: fks.thread_id || null, route_id: fks.route_id || null,
+      deal_id: fks.deal_id || null, enabler_id: fks.enabler_id || null, organization_id: fks.organization_id || null, contact_id: fks.contact_id || null,
+      title: upgradeTokenMentions((p.title || "").slice(0, 200)), detail: p.detail ? upgradeTokenMentions(p.detail) : null,
+      milestone_date: p.date, is_setback: false, source_ref: p.source_ref,
+    }));
+    try {
+      const created = (await api("progress_milestones", "POST", rows)) || [];
+      setProgressMilestones((prev) => [...prev, ...created]);
+      showToast(`Pulled ${created.length} moment${created.length === 1 ? "" : "s"} onto the track`);
+    } catch { showToast("Could not pull moments"); }
+  };
+
+  // Candidate moments for "Pull existing moments": activities, notes, stage
+  // history, and any already-created plain-entity progress milestone for the
+  // given entity, each tagged with a stable source_ref for dedup. Rough
+  // keyword matching against `hint` (the route/thread title) flags a likely
+  // fit; the user curates either way, nothing is auto-added.
+  const momentCandidatesFor = (fks, hint = "") => {
+    const matchesEntity = (row) => (fks.deal_id && row.deal_id === fks.deal_id) || (fks.enabler_id && row.enabler_id === fks.enabler_id)
+      || (fks.organization_id && row.organization_id === fks.organization_id) || (fks.contact_id && row.contact_id === fks.contact_id);
+    const out = [];
+    activities.filter(matchesEntity).forEach((a) => {
+      const text = mentionsToPlainText(firstLine(cleanActivityText(a.description || "")));
+      if (!text) return;
+      out.push({ source_ref: `activity:${a.id}`, date: (a.created_at || "").slice(0, 10), title: text.slice(0, 160), detail: null, kind: a.type || "activity" });
+    });
+    notes.filter(matchesEntity).forEach((n) => {
+      out.push({ source_ref: `note:${n.id}`, date: (n.updated_at || n.created_at || "").slice(0, 10), title: n.title || "Untitled note", detail: stripHtmlToText(n.content || "").slice(0, 300) || null, kind: "note" });
+    });
+    if (fks.deal_id) {
+      stageHistory.filter((h) => h.deal_id === fks.deal_id).forEach((h) => {
+        out.push({ source_ref: `stage:${h.id}`, date: (h.changed_at || "").slice(0, 10), title: `Moved ${stageLabel(h.from_stage) || "start"} to ${stageLabel(h.to_stage)}`, detail: null, kind: "stage" });
+      });
+    }
+    progressMilestones.filter((m) => matchesEntity(m) && !m.thread_id && !m.route_id).forEach((m) => {
+      out.push({ source_ref: `milestone:${m.id}`, date: m.milestone_date, title: m.title, detail: m.detail, kind: "milestone" });
+    });
+    const q = hint.trim().toLowerCase();
+    const words = q.split(/\s+/).filter((w) => w.length > 2 && !["the", "via", "and", "for", "with"].includes(w));
+    out.forEach((c) => { c.suggested = words.length ? words.some((w) => c.title.toLowerCase().includes(w)) : false; });
+    out.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    return out;
+  };
+  // Which candidates are already on THIS specific track (route, or thread when
+  // no route), so re-opening the panel never offers a duplicate.
+  const pulledSourceRefs = (fks) => {
+    const matches = (m) => {
+      if (fks.route_id) return m.route_id === fks.route_id;
+      if (fks.thread_id) return m.thread_id === fks.thread_id && !m.route_id;
+      // Plain entity track (Tracking-section progress, no thread/route at all):
+      // match on whichever entity fk is set, with no thread/route on the row.
+      return !m.thread_id && !m.route_id
+        && ((fks.deal_id && m.deal_id === fks.deal_id) || (fks.enabler_id && m.enabler_id === fks.enabler_id)
+          || (fks.organization_id && m.organization_id === fks.organization_id) || (fks.contact_id && m.contact_id === fks.contact_id));
+    };
+    return new Set(progressMilestones.filter(matches).map((m) => m.source_ref).filter(Boolean));
+  };
+
+  const threadsForStrategy = (strategyId) => strategyThreads.filter((t) => t.strategy_id === strategyId).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+  // Resolves a strategy thread's linked institution or person (a thread has
+  // exactly one, same fk shape as exec_tracked_institutions/exec_tracked_people)
+  // plus its routes, each carrying its own sorted milestones.
+  const resolveStrategyThreadCard = (t) => {
+    const isPerson = !!t.contact_id;
+    let name = t.title, entityKey = null, typeMeta = null, onOpen = null;
+    if (isPerson) {
+      const contact = contacts.find((c) => c.id === t.contact_id);
+      name = contact?.name || t.title;
+      onOpen = contact ? () => openPerson(contact.id) : null;
+    } else {
+      const inst = t.deal_id ? institutions.find((i) => i.dealId === t.deal_id)
+        : t.enabler_id ? institutions.find((i) => i.enablerId === t.enabler_id)
+        : institutions.find((i) => i.orgId === t.organization_id);
+      name = inst?.name || t.title;
+      entityKey = inst?.key || null;
+      typeMeta = inst?.type ? institutionTypeMeta(inst.type, customOptions) : null;
+      onOpen = inst ? () => openInstitution(inst.name) : null;
+    }
+    const routes = strategyRoutes.filter((r) => r.thread_id === t.id).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+      .map((r) => ({ ...r, milestones: progressMilestones.filter((m) => m.route_id === r.id).sort((a, b) => (a.milestone_date || "").localeCompare(b.milestone_date || "")) }));
+    return { ...t, isPerson, name, entityKey, typeMeta, onOpen, routes };
+  };
+
   /* ---- Exec Questions for the team, per-presentation. ---- */
   const execQuestionsFor = (pid) => execQuestions.filter((x) => x.presentation_id === pid).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   const addExecQuestion = async (presentationId, content) => {
@@ -4710,6 +4954,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     updates.sort((a, b) => new Date(b.date) - new Date(a.date));
     const newUpdates = updates.filter((u) => u.date && u.date >= boundary).slice(0, 12);
     const pastUpdates = updates.filter((u) => !u.date || u.date < boundary).slice(0, 15);
+    // The institution's own progress track: plain (no thread/route) milestones
+    // keyed on the same entity fks, independent of the Strategy feature.
+    const progressFks = { deal_id: inst?.dealId || null, enabler_id: inst?.enablerId || null, organization_id: inst?.orgId || null };
+    const progress = progressMilestones
+      .filter((m) => !m.thread_id && !m.route_id && ((progressFks.deal_id && m.deal_id === progressFks.deal_id) || (progressFks.enabler_id && m.enabler_id === progressFks.enabler_id) || (progressFks.organization_id && m.organization_id === progressFks.organization_id)))
+      .sort((a, b) => (a.milestone_date || "").localeCompare(b.milestone_date || ""));
     return {
       id: t.id,
       custom_note: t.custom_note || "",
@@ -4730,6 +4980,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       latestActivityAt: updates[0]?.date || null,
       newUpdates,
       pastUpdates,
+      progressFks,
+      progress,
     };
   };
 
@@ -4755,6 +5007,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     const pastUpdates = updates.filter((u) => !u.date || u.date < boundary).slice(0, 15);
     const roles = contact ? resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles }) : [];
     const primary = roles.find((r) => r.is_primary) || roles[0];
+    const progressFks = { contact_id: contact?.id || null };
+    const progress = contact
+      ? progressMilestones.filter((m) => !m.thread_id && !m.route_id && m.contact_id === contact.id).sort((a, b) => (a.milestone_date || "").localeCompare(b.milestone_date || ""))
+      : [];
     return {
       id: t.id,
       new_updates: t.new_updates || "",
@@ -4771,6 +5027,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       latestActivityAt: updates[0]?.date || null,
       newUpdates,
       pastUpdates,
+      progressFks,
+      progress,
     };
   };
 
@@ -4897,10 +5155,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // it back to the Week in Review, Andy's homepage, rather than a tab that is
   // no longer in his nav (M4).
   useEffect(() => {
-    if (bossMode && ["outreach", "notes", "home", "map", "materials", "exec"].includes(view)) setView("reports");
+    if (bossMode && ["outreach", "notes", "home", "map", "materials", "exec", "strategy"].includes(view)) setView("reports");
   }, [bossMode, view]);
 
-  const VIEW_BACK_LABELS = { home: "Home", calendar: "Calendar", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports", exec: "Exec Update" };
+  const VIEW_BACK_LABELS = { home: "Home", calendar: "Calendar", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports", exec: "Exec Update", strategy: "Strategy" };
   // Human label for the place a route points at, stored on each history entry as
   // state.back so Back on any sheet/module can name where it returns to.
   const describeRoute = useCallback((r) => {
@@ -5628,6 +5886,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onUpdateTrackedPersonNext={(id, html) => updateExecTrackedPerson(id, { whats_next: html })}
           onMarkTrackedPersonReviewed={markTrackedPersonReviewed}
           onRemoveTrackedPerson={removeExecTrackedPerson}
+          onAddMilestone={addProgressMilestone}
+          onUpdateMilestone={updateProgressMilestone}
+          onDeleteMilestone={deleteProgressMilestone}
+          momentCandidatesFor={momentCandidatesFor}
+          pulledSourceRefs={pulledSourceRefs}
+          onBulkAddMilestones={bulkAddProgressMilestones}
           questionsFor={execQuestionsFor}
           onAddQuestion={addExecQuestion}
           onUpdateQuestion={updateExecQuestion}
@@ -5639,6 +5903,34 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           presenting={execPresenting}
           onPresent={() => setExecPresenting(true)}
           onExitPresent={() => setExecPresenting(false)}
+          showToast={showToast}
+        />
+      )}
+
+      {/* STRATEGY */}
+      {view === "strategy" && (
+        <StrategyTab
+          strategies={strategies}
+          resolveThreadCard={resolveStrategyThreadCard}
+          threadsForStrategy={threadsForStrategy}
+          onAddStrategy={addStrategy}
+          onUpdateStrategy={updateStrategy}
+          onDeleteStrategy={deleteStrategy}
+          onAddThread={addStrategyThread}
+          onUpdateThreadGoal={(id, goal) => updateStrategyThread(id, { goal })}
+          onDeleteThread={deleteStrategyThread}
+          onAddRoute={addStrategyRoute}
+          onUpdateRoute={updateStrategyRoute}
+          onDeleteRoute={deleteStrategyRoute}
+          onAddMilestone={addProgressMilestone}
+          onUpdateMilestone={updateProgressMilestone}
+          onDeleteMilestone={deleteProgressMilestone}
+          momentCandidatesFor={momentCandidatesFor}
+          pulledSourceRefs={pulledSourceRefs}
+          onBulkAddMilestones={bulkAddProgressMilestones}
+          trackOptions={execTrackOptions}
+          contactOptions={contacts}
+          onCreateContact={createContactForMention}
           showToast={showToast}
         />
       )}
@@ -5689,6 +5981,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onUpdateTrackedPersonNext={(id, html) => updateExecTrackedPerson(id, { whats_next: html })}
           onMarkTrackedPersonReviewed={markTrackedPersonReviewed}
           onRemoveTrackedPerson={removeExecTrackedPerson}
+          onAddMilestone={addProgressMilestone}
+          onUpdateMilestone={updateProgressMilestone}
+          onDeleteMilestone={deleteProgressMilestone}
+          momentCandidatesFor={momentCandidatesFor}
+          pulledSourceRefs={pulledSourceRefs}
+          onBulkAddMilestones={bulkAddProgressMilestones}
         />
       )}
 
@@ -7489,7 +7787,41 @@ function ExecTrackUpdateList({ list, onOpenNote }) {
 // Past/New split on last_reviewed_at; "Mark as reviewed" rolls New into Past.
 // Cards are auto-ordered (grouped by type, sorted by recency within a group)
 // by the parent, so there is no manual reorder here.
-function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onOpenInstitution, onOpenNote, showToast }) {
+// The plain per-institution/person progress track on a Tracking-section card:
+// independent of Strategy threads/routes, keyed on the card's own entity fk
+// (progressFks). Same milestone chips as a Strategy route track, no state or
+// terminus glyph since a tracked institution/person is not a route.
+function EntityProgressTrack({ milestones, fks, readOnly, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onOpenPull }) {
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  return (
+    <div className="route-track">
+      <div className="route-track-line">
+        {milestones.map((m) => (
+          <RouteMilestoneChip key={m.id} milestone={m} readOnly={readOnly} editing={editingId === m.id}
+            onEdit={() => setEditingId(m.id)} onCancel={() => setEditingId(null)}
+            onSave={(patch) => { onUpdateMilestone(m.id, patch); setEditingId(null); }}
+            onDelete={() => onDeleteMilestone(m.id)} />
+        ))}
+        {milestones.length === 0 && <span className="route-track-empty">No progress logged yet.</span>}
+      </div>
+      {!readOnly && (
+        <div className="route-track-actions">
+          {adding ? (
+            <MilestoneAddForm onCancel={() => setAdding(false)} onSave={(vals) => { onAddMilestone(fks, vals); setAdding(false); }} />
+          ) : (
+            <>
+              <button type="button" className="link-btn" onClick={() => setAdding(true)}>+ Add milestone</button>
+              {onOpenPull && <button type="button" className="link-btn" onClick={() => onOpenPull(fks)}>Pull existing moments</button>}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onOpenInstitution, onOpenNote, showToast, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onOpenPull }) {
   const [pastOpen, setPastOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(true);
   const tierMeta = card.tier ? DEAL_TIERS.find((t) => t.id === card.tier) : null;
@@ -7534,6 +7866,15 @@ function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdat
         <ExecRichField value={card.new_updates} onSave={(html) => onUpdateNewUpdates(card.id, html)} readOnly={readOnly} placeholder="Your written update this period." showToast={showToast} />
       </div>
 
+      {card.progress && (card.progress.length > 0 || !readOnly) && (
+        <div className="exec-track-sec">
+          <div className="exec-track-sec-label">Progress Track</div>
+          <EntityProgressTrack milestones={card.progress} fks={card.progressFks} readOnly={readOnly}
+            onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+            onOpenPull={onOpenPull ? (fks) => onOpenPull(fks, card.name) : null} />
+        </div>
+      )}
+
       <div className="exec-track-sec exec-track-sec-commentary">
         <div className="exec-track-sec-label">Blockers</div>
         <ExecRichField value={card.blockers} onSave={(html) => onUpdateBlockers(card.id, html)} readOnly={readOnly} placeholder="What is stuck?" showToast={showToast} />
@@ -7559,7 +7900,7 @@ function ExecTrackCard({ card, readOnly, presenting, onUpdateNewUpdates, onUpdat
 // split as institutions, plus five commentary sections: New Updates, What We
 // Discussed, Direction, Blockers, What's Next. No legacy custom_note here,
 // this table is new.
-function ExecTrackPersonCard({ card, readOnly, onUpdateNewUpdates, onUpdateDiscussion, onUpdateDirection, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onOpenPerson, onOpenInstitution, onOpenNote, showToast }) {
+function ExecTrackPersonCard({ card, readOnly, onUpdateNewUpdates, onUpdateDiscussion, onUpdateDirection, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, onOpenPerson, onOpenInstitution, onOpenNote, showToast, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onOpenPull }) {
   const [pastOpen, setPastOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(true);
   return (
@@ -7602,6 +7943,15 @@ function ExecTrackPersonCard({ card, readOnly, onUpdateNewUpdates, onUpdateDiscu
         <div className="exec-track-sec-label">New Updates</div>
         <ExecRichField value={card.new_updates} onSave={(html) => onUpdateNewUpdates(card.id, html)} readOnly={readOnly} placeholder="Your written update this period." showToast={showToast} />
       </div>
+
+      {card.progress && (card.progress.length > 0 || !readOnly) && (
+        <div className="exec-track-sec">
+          <div className="exec-track-sec-label">Progress Track</div>
+          <EntityProgressTrack milestones={card.progress} fks={card.progressFks} readOnly={readOnly}
+            onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+            onOpenPull={onOpenPull ? (fks) => onOpenPull(fks, card.name) : null} />
+        </div>
+      )}
 
       <div className="exec-track-sec exec-track-sec-commentary">
         <div className="exec-track-sec-label">What We Discussed</div>
@@ -7669,6 +8019,7 @@ function ExecTracking({
   onAdd, onUpdateNewUpdates, onUpdateBlockers, onUpdateNext, onMarkReviewed, onRemove, trackOptions = [],
   onAddPerson, onCreateContact, contactOptions = [],
   onUpdatePersonNewUpdates, onUpdatePersonDiscussion, onUpdatePersonDirection, onUpdatePersonBlockers, onUpdatePersonNext, onMarkPersonReviewed, onRemovePerson,
+  onAddMilestone, onUpdateMilestone, onDeleteMilestone, onOpenPull,
   onOpenInstitution, onOpenPerson, onOpenNote, showToast,
 }) {
   const [addingKind, setAddingKind] = useState(null); // null | "institution" | "person"
@@ -7699,7 +8050,8 @@ function ExecTracking({
               <ExecTrackPersonCard key={card.id} card={card} readOnly={readOnly}
                 onUpdateNewUpdates={onUpdatePersonNewUpdates} onUpdateDiscussion={onUpdatePersonDiscussion} onUpdateDirection={onUpdatePersonDirection}
                 onUpdateBlockers={onUpdatePersonBlockers} onUpdateNext={onUpdatePersonNext} onMarkReviewed={onMarkPersonReviewed} onRemove={onRemovePerson}
-                onOpenPerson={onOpenPerson} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
+                onOpenPerson={onOpenPerson} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast}
+                onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onOpenPull={onOpenPull} />
             ))}
           </div>
         </div>
@@ -7711,7 +8063,8 @@ function ExecTracking({
             {g.cards.map((card) => (
               <ExecTrackCard key={card.id} card={card} readOnly={readOnly} presenting={presenting}
                 onUpdateNewUpdates={onUpdateNewUpdates} onUpdateBlockers={onUpdateBlockers} onUpdateNext={onUpdateNext} onMarkReviewed={onMarkReviewed} onRemove={onRemove}
-                onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast} />
+                onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast}
+                onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onOpenPull={onOpenPull} />
             ))}
           </div>
         </div>
@@ -7774,6 +8127,520 @@ function ExecQuestions({ items = [], readOnly = false, presenting = false, onAdd
   );
 }
 
+/* ============================================================
+   Strategy: strategies -> threads (one institution or person, each with a
+   goal) -> routes (parallel paths toward that goal, each its own progress
+   track and end state) -> progress_milestones (dated moments on a route, or
+   on a thread directly). Plus "pull existing moments" to seed a track from
+   activities/notes/stage history/older milestones already in the system.
+   ============================================================ */
+const STRATEGY_ROUTE_STATES = [
+  { id: "active", label: "Active", color: "#2A6FDB" },
+  { id: "paused", label: "Paused", color: "#9A8F7C" },
+  { id: "succeeded", label: "Succeeded", color: "#1F8A5B" },
+  { id: "dead_end", label: "Dead End", color: "#D9483A" },
+];
+const strategyRouteStateMeta = (id) => STRATEGY_ROUTE_STATES.find((s) => s.id === id) || STRATEGY_ROUTE_STATES[0];
+const strategyEndGlyph = (state) => (state === "dead_end" ? "✕" : state === "succeeded" ? "✓" : state === "paused" ? "❚❚" : "→");
+
+// Counts route-level movement across a set of resolved threads: routes with a
+// milestone dated this week (advanced), and routes that ended this week
+// dead_end/succeeded, so pruning a dead route shows as progress too.
+function strategyWeekSummary(threads) {
+  let advanced = 0, deadEnded = 0, succeeded = 0;
+  threads.forEach((t) => t.routes.forEach((r) => {
+    if (r.milestones.some((m) => isThisWeek(m.milestone_date))) advanced++;
+    if (r.state === "dead_end" && r.ended_at && isThisWeek(r.ended_at)) deadEnded++;
+    if (r.state === "succeeded" && r.ended_at && isThisWeek(r.ended_at)) succeeded++;
+  }));
+  return { advanced, deadEnded, succeeded };
+}
+
+// A plain-text @ mention field (goal / outcome note) with the same
+// local-draft-then-save-on-exit pattern as ExecRichField, just over
+// MentionField's token text instead of rich HTML.
+function StrategyMentionField({ value, onSave, readOnly, placeholder }) {
+  const [draft, setDraft] = useState(value || "");
+  useEffect(() => { setDraft(value || ""); }, [value]);
+  return (
+    <MentionField value={draft} onChange={setDraft} readOnly={readOnly} placeholder={placeholder}
+      onSave={() => { if ((draft || "") !== (value || "")) onSave(draft); }} />
+  );
+}
+
+function MilestoneAddForm({ onCancel, onSave }) {
+  const [title, setTitle] = useState("");
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const submit = () => { if (!title.trim()) return; onSave({ title: title.trim(), milestone_date: date }); };
+  return (
+    <div className="route-chip-edit" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}>
+      <MentionEditor value={title} onChange={setTitle} multiline={false} placeholder="What happened" autoFocus onSubmit={submit} />
+      <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} />
+      <div className="route-chip-edit-actions">
+        <button type="button" className="btn-primary" onClick={submit}>Add</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function MilestoneEditForm({ milestone, onCancel, onSave }) {
+  const [title, setTitle] = useState(milestone.title || "");
+  const [detail, setDetail] = useState(milestone.detail || "");
+  const [date, setDate] = useState(milestone.milestone_date || "");
+  const [setback, setSetback] = useState(!!milestone.is_setback);
+  const submit = () => { if (!title.trim()) return; onSave({ title: title.trim(), detail: detail.trim() || null, milestone_date: date, is_setback: setback }); };
+  return (
+    <div className="route-chip-edit" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}>
+      <MentionEditor value={title} onChange={setTitle} multiline={false} placeholder="What happened" autoFocus onSubmit={submit} />
+      <MentionEditor value={detail} onChange={setDetail} multiline={false} placeholder="Detail (optional)" onSubmit={submit} />
+      <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} />
+      <label className="route-chip-setback-toggle"><input type="checkbox" checked={setback} onChange={(e) => setSetback(e.target.checked)} /> Setback</label>
+      <div className="route-chip-edit-actions">
+        <button type="button" className="btn-primary" onClick={submit}>Save</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// One milestone on a track: a dated chip, click to edit in place, an always
+// visible delete x. @ mentions in the title render as blue clickable chips.
+function RouteMilestoneChip({ milestone, readOnly, editing, onEdit, onCancel, onSave, onDelete }) {
+  if (editing) return <MilestoneEditForm milestone={milestone} onCancel={onCancel} onSave={onSave} />;
+  return (
+    <div className={`route-chip ${milestone.is_setback ? "route-chip-setback" : ""}`} onClick={readOnly ? undefined : onEdit} title={milestone.detail ? mentionsToPlainText(milestone.detail) : ""}>
+      <span className="route-chip-date">{formatDate(milestone.milestone_date)}</span>
+      <span className="route-chip-title"><MentionText text={milestone.title} /></span>
+      {!readOnly && <button type="button" className="route-chip-del" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete milestone">✕</button>}
+    </div>
+  );
+}
+
+// A route's own horizontal progress track: milestones in date order, ending in
+// a terminus glyph for its state (open arrow / red X / green check / pause).
+function RouteTrack({ route, readOnly, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onOpenPull }) {
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const dead = route.state === "dead_end";
+  return (
+    <div className={`route-track ${dead ? "route-track-dead" : ""}`}>
+      <div className="route-track-line">
+        {route.milestones.map((m) => (
+          <RouteMilestoneChip key={m.id} milestone={m} readOnly={readOnly} editing={editingId === m.id}
+            onEdit={() => setEditingId(m.id)} onCancel={() => setEditingId(null)}
+            onSave={(patch) => { onUpdateMilestone(m.id, patch); setEditingId(null); }}
+            onDelete={() => onDeleteMilestone(m.id)} />
+        ))}
+        {route.milestones.length === 0 && <span className="route-track-empty">No milestones yet.</span>}
+        <span className={`route-track-end route-track-end-${route.state}`} title={strategyRouteStateMeta(route.state).label}>{strategyEndGlyph(route.state)}</span>
+      </div>
+      {route.outcome_note && (route.state === "dead_end" || route.state === "succeeded") && (
+        <div className={`route-outcome ${route.state === "dead_end" ? "route-outcome-dead" : "route-outcome-success"}`}><MentionText text={route.outcome_note} /></div>
+      )}
+      {!readOnly && (
+        <div className="route-track-actions">
+          {adding ? (
+            <MilestoneAddForm onCancel={() => setAdding(false)} onSave={(vals) => { onAddMilestone(vals); setAdding(false); }} />
+          ) : (
+            <>
+              <button type="button" className="link-btn" onClick={() => setAdding(true)}>+ Add milestone</button>
+              {onOpenPull && <button type="button" className="link-btn" onClick={onOpenPull}>Pull existing moments</button>}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Confirms the date and why-it-ended note before a route moves to Dead End or
+// Succeeded, since those states carry that context permanently.
+function RouteStatePrompt({ state, onCancel, onConfirm }) {
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [note, setNote] = useState("");
+  return (
+    <div className="route-state-prompt" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}>
+      <div className="route-state-prompt-label">{state === "dead_end" ? "Why did this route end?" : "How was the goal reached?"}</div>
+      <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} />
+      <MentionEditor value={note} onChange={setNote} multiline={false} placeholder={state === "dead_end" ? "What killed this route..." : "What worked..."} />
+      <div className="route-chip-edit-actions">
+        <button type="button" className="btn-primary" onClick={() => onConfirm({ ended_at: date, outcome_note: note.trim() || null })}>Confirm</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// A route's header: editable title, a state control, and the delete control.
+// Picking Dead End or Succeeded opens RouteStatePrompt before it commits.
+function RouteHeader({ route, readOnly, onUpdate, onDelete }) {
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [title, setTitle] = useState(route.title);
+  const [statePrompt, setStatePrompt] = useState(null);
+  const meta = strategyRouteStateMeta(route.state);
+  const pickState = (next) => {
+    if (next === route.state) return;
+    if (next === "dead_end" || next === "succeeded") { setStatePrompt(next); return; }
+    onUpdate(route.id, { state: next, ended_at: null });
+  };
+  return (
+    <div className="route-head">
+      {editingTitle && !readOnly ? (
+        <input className="input route-title-input" value={title} onChange={(e) => setTitle(e.target.value)}
+          onBlur={() => { if (title.trim() && title.trim() !== route.title) onUpdate(route.id, { title: title.trim() }); setEditingTitle(false); }}
+          onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") { setTitle(route.title); setEditingTitle(false); } }} autoFocus />
+      ) : (
+        <span className={`route-title ${readOnly ? "" : "route-title-edit"}`} onClick={() => !readOnly && setEditingTitle(true)}>{route.title}</span>
+      )}
+      <span className="badge route-state-badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{meta.label}</span>
+      {route.ended_at && <span className="route-ended-date">Ended {formatDate(route.ended_at)}</span>}
+      {!readOnly && (
+        <span className="route-head-right">
+          <select className="input route-state-select" value={route.state} onChange={(e) => pickState(e.target.value)}>
+            {STRATEGY_ROUTE_STATES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+          </select>
+          <button type="button" className="exec-track-remove" onClick={() => { if (window.confirm("Delete this route and its milestones?")) onDelete(route.id); }} title="Delete route">✕</button>
+        </span>
+      )}
+      {statePrompt && (
+        <RouteStatePrompt state={statePrompt} onCancel={() => setStatePrompt(null)}
+          onConfirm={(vals) => { onUpdate(route.id, { state: statePrompt, ...vals }); setStatePrompt(null); }} />
+      )}
+    </div>
+  );
+}
+
+// Compact route bar for the collapsed Board card: a short line with a few
+// evenly-spaced dots and the same terminus glyph, muted when dead-ended.
+function RouteMiniBar({ route }) {
+  const meta = strategyRouteStateMeta(route.state);
+  const dead = route.state === "dead_end";
+  const n = Math.min(route.milestones.length, 6);
+  return (
+    <div className={`route-mini ${dead ? "route-mini-dead" : ""}`}>
+      <span className="route-mini-title">{route.title}</span>
+      <div className="route-mini-bar">
+        <span className="route-mini-line" style={{ background: dead ? "var(--border)" : meta.color + "55" }} />
+        {Array.from({ length: n }).map((_, i) => (
+          <span key={i} className="route-mini-dot" style={{ background: dead ? "var(--muted)" : meta.color, left: `${((i + 1) / (n + 1)) * 100}%` }} />
+        ))}
+        <span className={`route-mini-end route-mini-end-${route.state}`}>{strategyEndGlyph(route.state)}</span>
+      </div>
+    </div>
+  );
+}
+
+// One thread (institution or person) within a strategy: name, editable goal,
+// and its parallel routes, either full tracks (expanded) or mini bars (Board
+// default, per spec 5: "institution card shows goal and routes as mini
+// progress bars").
+function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpdateGoal, onDeleteThread, onAddRoute, onUpdateRoute, onDeleteRoute, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onOpenPull }) {
+  const [addingRoute, setAddingRoute] = useState(false);
+  const [routeTitle, setRouteTitle] = useState("");
+  const submitRoute = () => { if (!routeTitle.trim()) return; onAddRoute(thread.id, routeTitle.trim()); setRouteTitle(""); setAddingRoute(false); };
+  const movedThisWeek = thread.routes.some((r) => r.milestones.some((m) => isThisWeek(m.milestone_date)) || (r.ended_at && isThisWeek(r.ended_at)));
+  return (
+    <div className={`strategy-thread ${movedThisWeek ? "strategy-thread-moved" : ""}`}>
+      <div className="strategy-thread-head">
+        <button type="button" className="exec-track-name" onClick={() => thread.onOpen && thread.onOpen()} disabled={!thread.onOpen}>{thread.name}</button>
+        {thread.typeMeta && <span className="badge" style={{ background: thread.typeMeta.color + "22", color: thread.typeMeta.color, border: `1px solid ${thread.typeMeta.color}44` }}>{thread.typeMeta.label}</span>}
+        {movedThisWeek && <span className="strategy-moved-badge">Moved this week</span>}
+        <span className="strategy-thread-head-right">
+          <button type="button" className="link-btn strategy-expand-btn" onClick={onToggleExpand}>{expanded ? "Collapse" : "Expand"}</button>
+          {!readOnly && <button type="button" className="exec-track-remove" onClick={() => { if (window.confirm("Remove this thread and all of its routes?")) onDeleteThread(thread.id); }} title="Remove thread">✕</button>}
+        </span>
+      </div>
+      <div className="strategy-thread-goal">
+        <span className="strategy-goal-label">Goal</span>
+        <StrategyMentionField value={thread.goal || ""} onSave={(v) => onUpdateGoal(thread.id, v)} readOnly={readOnly} placeholder="What are we trying to achieve here?" />
+      </div>
+      {expanded ? (
+        <div className="strategy-routes">
+          {thread.routes.map((route) => (
+            <div key={route.id} className="strategy-route">
+              <RouteHeader route={route} readOnly={readOnly} onUpdate={onUpdateRoute} onDelete={onDeleteRoute} />
+              <RouteTrack route={route} readOnly={readOnly}
+                onAddMilestone={(vals) => onAddMilestone({ thread_id: thread.id, route_id: route.id }, vals)}
+                onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+                onOpenPull={readOnly ? null : () => onOpenPull({ thread_id: thread.id, route_id: route.id }, { deal_id: thread.deal_id, enabler_id: thread.enabler_id, organization_id: thread.organization_id, contact_id: thread.contact_id }, route.title)} />
+            </div>
+          ))}
+          {thread.routes.length === 0 && <div className="empty-small">No routes yet. Add the first path toward this goal.</div>}
+          {!readOnly && (
+            addingRoute ? (
+              <div className="exec-track-add">
+                <input className="input" autoFocus value={routeTitle} onChange={(e) => setRouteTitle(e.target.value)} placeholder="Route name, e.g. Conference outreach" onKeyDown={(e) => { if (e.key === "Enter") submitRoute(); if (e.key === "Escape") setAddingRoute(false); }} />
+                <button type="button" className="btn-primary" onClick={submitRoute}>Add</button>
+                <button type="button" className="link-btn" onClick={() => setAddingRoute(false)}>Cancel</button>
+              </div>
+            ) : <button type="button" className="btn-sec exec-track-addbtn" onClick={() => setAddingRoute(true)}>+ Add route</button>
+          )}
+        </div>
+      ) : (
+        <div className="strategy-mini-bars">
+          {thread.routes.map((route) => <RouteMiniBar key={route.id} route={route} />)}
+          {thread.routes.length === 0 && <div className="strategy-mini-empty">No routes yet.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StrategyBoardView({ threads, expandedIds, onToggleExpand, ...handlers }) {
+  return (
+    <div className="strategy-board">
+      {threads.map((t) => (
+        <StrategyThreadCard key={t.id} thread={t} expanded={expandedIds.has(t.id)} onToggleExpand={() => onToggleExpand(t.id)} {...handlers} />
+      ))}
+      {threads.length === 0 && <div className="empty-small">No institutions or people threaded into this strategy yet.</div>}
+    </div>
+  );
+}
+
+// One swimlane per route, grouped under its thread's header, all sharing one
+// proportional date axis so relative timing across routes is comparable.
+// Dead-end lanes fade and show their red X terminus exactly at ended_at.
+function StrategyTimelineView({ threads, onOpenPull }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const allDates = [today];
+  threads.forEach((t) => t.routes.forEach((r) => { r.milestones.forEach((m) => allDates.push(m.milestone_date)); if (r.ended_at) allDates.push(r.ended_at); }));
+  const minD = allDates.reduce((a, b) => (a < b ? a : b));
+  const maxD = allDates.reduce((a, b) => (a > b ? a : b));
+  const span = Math.max(1, (new Date(maxD) - new Date(minD)) / 86400000);
+  const pct = (d) => Math.min(100, Math.max(0, ((new Date(d) - new Date(minD)) / 86400000 / span) * 100));
+  const weekStartPct = pct(startOfWeek(new Date()).toISOString().slice(0, 10));
+  const weekEndPct = pct(addDaysLocal(startOfWeek(new Date()), 6).toISOString().slice(0, 10));
+  return (
+    <div className="strategy-timeline">
+      <div className="strategy-timeline-scale"><span>{formatDate(minD)}</span><span className="strategy-timeline-today-label">This week</span><span>{formatDate(maxD)}</span></div>
+      {threads.map((t) => (
+        <div key={t.id} className="strategy-timeline-group">
+          <div className="strategy-timeline-group-head">
+            <button type="button" className="exec-track-name" onClick={() => t.onOpen && t.onOpen()} disabled={!t.onOpen}>{t.name}</button>
+            <span className="strategy-timeline-goal">{t.goal ? <MentionText text={t.goal} /> : "No goal set"}</span>
+          </div>
+          {t.routes.map((route) => {
+            const meta = strategyRouteStateMeta(route.state);
+            const dead = route.state === "dead_end";
+            const lastMilestonePct = route.milestones.length ? pct(route.milestones[route.milestones.length - 1].milestone_date) : 0;
+            const endPct = route.ended_at ? pct(route.ended_at) : Math.max(pct(today), lastMilestonePct);
+            return (
+              <div key={route.id} className={`strategy-swimlane ${dead ? "strategy-swimlane-dead" : ""}`}>
+                <div className="strategy-swimlane-label">
+                  <span className="badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{route.title}</span>
+                  {onOpenPull && <button type="button" className="link-btn strategy-swimlane-pull" onClick={() => onOpenPull({ thread_id: t.id, route_id: route.id }, { deal_id: t.deal_id, enabler_id: t.enabler_id, organization_id: t.organization_id, contact_id: t.contact_id }, route.title)}>Pull moments</button>}
+                </div>
+                <div className="strategy-swimlane-track">
+                  <div className="strategy-swimlane-week" style={{ left: `${weekStartPct}%`, width: `${Math.max(0.6, weekEndPct - weekStartPct)}%` }} />
+                  <div className="strategy-swimlane-line" style={{ width: `${endPct}%`, background: dead ? "var(--border)" : meta.color + "66" }} />
+                  {route.milestones.map((m) => (
+                    <span key={m.id} className={`strategy-swimlane-dot ${m.is_setback ? "strategy-swimlane-dot-setback" : ""}`}
+                      style={{ left: `${pct(m.milestone_date)}%`, background: dead ? "var(--muted)" : meta.color }}
+                      title={`${formatDate(m.milestone_date)}: ${mentionsToPlainText(m.title)}`} />
+                  ))}
+                  <span className={`strategy-swimlane-end strategy-swimlane-end-${route.state}`} style={{ left: `${endPct}%` }} title={meta.label}>{strategyEndGlyph(route.state)}</span>
+                </div>
+              </div>
+            );
+          })}
+          {t.routes.length === 0 && <div className="strategy-mini-empty">No routes yet.</div>}
+        </div>
+      ))}
+      {threads.length === 0 && <div className="empty-small">No institutions or people threaded into this strategy yet.</div>}
+    </div>
+  );
+}
+
+// "+ Add institution or person to this strategy": one picker, either kind,
+// title defaults to the picked name but is editable.
+function StrategyAddThreadForm({ trackOptions, contactOptions, onCreateContact, onAdd, onCancel }) {
+  const [kind, setKind] = useState("institution");
+  const [pickedInst, setPickedInst] = useState("");
+  const [pickedPersonId, setPickedPersonId] = useState("");
+  const [customTitle, setCustomTitle] = useState("");
+  const submit = async () => {
+    if (kind === "institution") {
+      if (!pickedInst) return;
+      const i = pickedInst.indexOf(":"); const type = pickedInst.slice(0, i); const id = pickedInst.slice(i + 1);
+      const label = trackOptions.find((o) => o.value === pickedInst)?.label || "Institution";
+      await onAdd({ [`${type}_id`]: id }, customTitle.trim() || label);
+    } else {
+      if (!pickedPersonId) return;
+      const person = contactOptions.find((c) => c.id === pickedPersonId);
+      await onAdd({ contact_id: pickedPersonId }, customTitle.trim() || person?.name || "Person");
+    }
+  };
+  return (
+    <div className="exec-track-add strategy-add-form">
+      <div className="strategy-add-kind">
+        <button type="button" className={kind === "institution" ? "active" : ""} onClick={() => setKind("institution")}>Institution</button>
+        <button type="button" className={kind === "person" ? "active" : ""} onClick={() => setKind("person")}>Person</button>
+      </div>
+      {kind === "institution"
+        ? <EntityPicker placeholder="Search institutions..." options={trackOptions} value={pickedInst} onChange={setPickedInst} />
+        : <ContactConnectPicker contacts={contactOptions} value={pickedPersonId} onChange={setPickedPersonId} onCreateContact={onCreateContact} placeholder="Search people..." />}
+      <input className="input" value={customTitle} onChange={(e) => setCustomTitle(e.target.value)} placeholder="Thread title (optional)" />
+      <button type="button" className="btn-primary" onClick={submit}>Add</button>
+      <button type="button" className="link-btn" onClick={onCancel}>Cancel</button>
+    </div>
+  );
+}
+
+// "Pull existing moments": candidates from activities/notes/stage history/
+// older plain milestones for the target entity, pre-checked when they look
+// like a keyword match to the route/thread title, curated by Fahed either way.
+function PullMomentsPanel({ title, candidates, onConfirm, onClose }) {
+  const [selected, setSelected] = useState(() => new Set(candidates.filter((c) => c.suggested).map((c) => c.source_ref)));
+  const toggle = (ref) => setSelected((prev) => { const n = new Set(prev); if (n.has(ref)) n.delete(ref); else n.add(ref); return n; });
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal pull-moments-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div className="modal-title">Pull existing moments{title ? `: ${title}` : ""}</div>
+          <button type="button" className="close-btn" onClick={onClose}>✕</button>
+        </div>
+        <div className="pull-moments-tools">
+          <button type="button" className="link-btn" onClick={() => setSelected(new Set(candidates.map((c) => c.source_ref)))}>Select all</button>
+          <button type="button" className="link-btn" onClick={() => setSelected(new Set())}>Select none</button>
+          <span className="pull-moments-count">{selected.size} selected</span>
+        </div>
+        <div className="pull-moments-list">
+          {candidates.length === 0 && <div className="empty-small">Nothing new found for this entity, or everything here has already been pulled.</div>}
+          {candidates.map((c) => (
+            <label key={c.source_ref} className={`pull-moment-row ${c.suggested ? "pull-moment-suggested" : ""}`}>
+              <input type="checkbox" checked={selected.has(c.source_ref)} onChange={() => toggle(c.source_ref)} />
+              <span className="pull-moment-date">{formatDate(c.date)}</span>
+              <span className="pull-moment-title">{c.title}</span>
+              <span className="pull-moment-kind">{c.kind}</span>
+            </label>
+          ))}
+        </div>
+        <div className="exec-edit-actions">
+          <button type="button" className="btn-primary" disabled={!selected.size} onClick={() => onConfirm(candidates.filter((c) => selected.has(c.source_ref)))}>Add {selected.size || ""} to track</button>
+          <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StrategyTab({
+  strategies, resolveThreadCard, threadsForStrategy,
+  onAddStrategy, onUpdateStrategy, onDeleteStrategy,
+  onAddThread, onUpdateThreadGoal, onDeleteThread,
+  onAddRoute, onUpdateRoute, onDeleteRoute,
+  onAddMilestone, onUpdateMilestone, onDeleteMilestone,
+  momentCandidatesFor, pulledSourceRefs, onBulkAddMilestones,
+  trackOptions, contactOptions, onCreateContact, showToast,
+}) {
+  const readOnly = useReadOnly();
+  const [activeStrategyId, setActiveStrategyId] = useState(null);
+  const strategy = strategies.find((s) => s.id === activeStrategyId) || strategies[0] || null;
+  useEffect(() => { if (!activeStrategyId && strategies.length) setActiveStrategyId(strategies[0].id); }, [activeStrategyId, strategies]);
+  const [mode, setMode] = useState("board");
+  const [expandedIds, setExpandedIds] = useState(() => new Set());
+  const toggleExpand = (id) => setExpandedIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const [addingStrategy, setAddingStrategy] = useState(false);
+  const [newStratName, setNewStratName] = useState("");
+  const [newStratGoal, setNewStratGoal] = useState("");
+  const [addingThread, setAddingThread] = useState(false);
+  const [pullTarget, setPullTarget] = useState(null);
+
+  const threads = strategy ? threadsForStrategy(strategy.id).map(resolveThreadCard) : [];
+  const week = strategyWeekSummary(threads);
+
+  const submitStrategy = async () => {
+    if (!newStratName.trim()) return;
+    const row = await onAddStrategy(newStratName.trim(), newStratGoal.trim());
+    if (row) { setActiveStrategyId(row.id); setNewStratName(""); setNewStratGoal(""); setAddingStrategy(false); }
+  };
+  const handleAddThread = async (fks, title) => {
+    if (!strategy) return;
+    await onAddThread(strategy.id, { title, fks });
+    setAddingThread(false);
+  };
+  // A route pull searches candidates against the THREAD's linked entity
+  // (searchFks) but saves the picked ones onto the route/thread (saveFks), so
+  // the two are kept separate here.
+  const openPull = (saveFks, searchFks, ttl) => setPullTarget({ saveFks, searchFks, title: ttl });
+  const candidates = pullTarget ? momentCandidatesFor(pullTarget.searchFks, pullTarget.title).filter((c) => !pulledSourceRefs(pullTarget.saveFks).has(c.source_ref)) : [];
+
+  return (
+    <div className="strategy-tab">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">Strategy</h1>
+          <p className="page-sub">Parallel routes toward each institution's goal, dead ends included.</p>
+        </div>
+        {!readOnly && !addingStrategy && <button className="btn-primary" onClick={() => setAddingStrategy(true)}>+ New Strategy</button>}
+      </div>
+
+      {addingStrategy && (
+        <div className="exec-track-add strategy-add-form">
+          <input className="input" autoFocus value={newStratName} onChange={(e) => setNewStratName(e.target.value)} placeholder="Strategy name" />
+          <input className="input" value={newStratGoal} onChange={(e) => setNewStratGoal(e.target.value)} placeholder="Overall goal (optional)" />
+          <button type="button" className="btn-primary" onClick={submitStrategy}>Create</button>
+          <button type="button" className="link-btn" onClick={() => setAddingStrategy(false)}>Cancel</button>
+        </div>
+      )}
+
+      {strategies.length === 0 && !addingStrategy ? (
+        <div className="empty-small">No strategies yet. Create one to start mapping routes.</div>
+      ) : strategy && (
+        <>
+          {strategies.length > 1 && (
+            <div className="strategy-switcher">
+              {strategies.map((s) => (
+                <button key={s.id} type="button" className={`strategy-chip ${s.id === strategy.id ? "active" : ""}`}
+                  style={s.id === strategy.id ? { borderColor: s.color || "var(--mango)", color: s.color || undefined } : undefined}
+                  onClick={() => setActiveStrategyId(s.id)}>{s.name}</button>
+              ))}
+            </div>
+          )}
+
+          <div className="strategy-toolbar">
+            <div className="strategy-goal-header">
+              <span className="strategy-goal-label">Strategy goal</span>
+              <StrategyMentionField value={strategy.goal || ""} onSave={(v) => onUpdateStrategy(strategy.id, { goal: v })} readOnly={readOnly} placeholder="What is this strategy trying to achieve overall?" />
+            </div>
+            <div className="strategy-view-toggle">
+              <button type="button" className={mode === "board" ? "active" : ""} onClick={() => setMode("board")}>Board</button>
+              <button type="button" className={mode === "timeline" ? "active" : ""} onClick={() => setMode("timeline")}>Timeline</button>
+            </div>
+          </div>
+
+          <div className="strategy-week-summary">
+            <span><b>{week.advanced}</b> route{week.advanced === 1 ? "" : "s"} advanced this week</span>
+            <span className="strategy-week-dead"><b>{week.deadEnded}</b> dead-ended this week</span>
+            {week.succeeded > 0 && <span className="strategy-week-success"><b>{week.succeeded}</b> succeeded this week</span>}
+          </div>
+
+          {!readOnly && (
+            addingThread ? (
+              <StrategyAddThreadForm trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact} onAdd={handleAddThread} onCancel={() => setAddingThread(false)} />
+            ) : <button type="button" className="btn-sec exec-track-addbtn" onClick={() => setAddingThread(true)}>+ Add institution or person to this strategy</button>
+          )}
+
+          {mode === "board" ? (
+            <StrategyBoardView threads={threads} readOnly={readOnly} expandedIds={expandedIds} onToggleExpand={toggleExpand}
+              onUpdateGoal={onUpdateThreadGoal} onDeleteThread={onDeleteThread} onAddRoute={onAddRoute} onUpdateRoute={onUpdateRoute} onDeleteRoute={onDeleteRoute}
+              onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onOpenPull={openPull} />
+          ) : (
+            <StrategyTimelineView threads={threads} onOpenPull={readOnly ? null : openPull} />
+          )}
+        </>
+      )}
+
+      {pullTarget && (
+        <PullMomentsPanel title={pullTarget.title} candidates={candidates}
+          onConfirm={(picks) => { onBulkAddMilestones(pullTarget.saveFks, picks); setPullTarget(null); }}
+          onClose={() => setPullTarget(null)} />
+      )}
+    </div>
+  );
+}
+
 function ExecUpdateTab({
   contacts = [],
   presentations, blocksFor, openId, onOpen, onCreate, generating,
@@ -7785,6 +8652,7 @@ function ExecUpdateTab({
   trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, execTrackOptions = [],
   trackedPeopleRows = [], resolveTrackedPersonCard, onAddTrackedPerson, onCreateTrackedContact,
   onUpdateTrackedPersonNewUpdates, onUpdateTrackedPersonDiscussion, onUpdateTrackedPersonDirection, onUpdateTrackedPersonBlockers, onUpdateTrackedPersonNext, onMarkTrackedPersonReviewed, onRemoveTrackedPerson,
+  onAddMilestone, onUpdateMilestone, onDeleteMilestone, momentCandidatesFor, pulledSourceRefs, onBulkAddMilestones,
   questionsFor, onAddQuestion, onUpdateQuestion, onDeleteQuestion, onReorderQuestions,
   onOpenPerson, onOpenNote,
   onSync, onCloseAndStartNew,
@@ -7793,6 +8661,7 @@ function ExecUpdateTab({
   const readOnly = useReadOnly();
   const [dragId, setDragId] = useState(null);
   const [syncing, setSyncing] = useState(false);
+  const [pullTarget, setPullTarget] = useState(null);
   const pres = presentations.find((p) => p.id === openId) || null;
   const blocks = pres ? blocksFor(pres.id) : [];
   // The three curated sections for the open presentation. Tracked institutions
@@ -7987,7 +8856,9 @@ function ExecUpdateTab({
           trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast}
           onAddPerson={onAddTrackedPerson} onCreateContact={onCreateTrackedContact} contactOptions={contacts} onOpenPerson={onOpenPerson}
           onUpdatePersonNewUpdates={onUpdateTrackedPersonNewUpdates} onUpdatePersonDiscussion={onUpdateTrackedPersonDiscussion} onUpdatePersonDirection={onUpdateTrackedPersonDirection}
-          onUpdatePersonBlockers={onUpdateTrackedPersonBlockers} onUpdatePersonNext={onUpdateTrackedPersonNext} onMarkPersonReviewed={onMarkTrackedPersonReviewed} onRemovePerson={onRemoveTrackedPerson} />
+          onUpdatePersonBlockers={onUpdateTrackedPersonBlockers} onUpdatePersonNext={onUpdateTrackedPersonNext} onMarkPersonReviewed={onMarkTrackedPersonReviewed} onRemovePerson={onRemoveTrackedPerson}
+          onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+          onOpenPull={readOnly ? null : (fks, title) => setPullTarget({ fks, title })} />
       </div>
 
       <div className="exec-extra-section">
@@ -8011,6 +8882,12 @@ function ExecUpdateTab({
           content as the top, so Fahed can open on the frame and close on it. */}
       <ExecSummaryPanel pres={pres} readOnly={readOnly} placement="bottom" showToast={showToast}
         onSave={(key, html) => onUpdatePresentation(pres.id, { [key]: html })} />
+
+      {pullTarget && (
+        <PullMomentsPanel title={pullTarget.title} candidates={momentCandidatesFor(pullTarget.fks, pullTarget.title).filter((c) => !pulledSourceRefs(pullTarget.fks).has(c.source_ref))}
+          onConfirm={(picks) => { onBulkAddMilestones(pullTarget.fks, picks); setPullTarget(null); }}
+          onClose={() => setPullTarget(null)} />
+      )}
     </div>
   );
 }
@@ -8018,11 +8895,13 @@ function ExecUpdateTab({
 function WeekInReviewTab({ deals, contacts, enablers, organizations, activities, todos, todoContacts = [], bossComments, commentAuthor, onPostComment, onMarkCommentRead, calendarEvents, dealContacts, enablerContacts, networkEdges, contactRoles, institutions = [], onOpenInstitution, onOpenPerson, onOpenNote, onOpenTaskLink, showToast,
   buildPipelineSnapshot, trackedRows = [], resolveTrackedCard, onAddTracked, onUpdateTrackedNewUpdates, onUpdateTrackedBlockers, onUpdateTrackedNext, onMarkTrackedReviewed, onRemoveTracked, execTrackOptions = [],
   trackedPeopleRows = [], resolveTrackedPersonCard, onAddTrackedPerson, onCreateTrackedContact,
-  onUpdateTrackedPersonNewUpdates, onUpdateTrackedPersonDiscussion, onUpdateTrackedPersonDirection, onUpdateTrackedPersonBlockers, onUpdateTrackedPersonNext, onMarkTrackedPersonReviewed, onRemoveTrackedPerson }) {
+  onUpdateTrackedPersonNewUpdates, onUpdateTrackedPersonDiscussion, onUpdateTrackedPersonDirection, onUpdateTrackedPersonBlockers, onUpdateTrackedPersonNext, onMarkTrackedPersonReviewed, onRemoveTrackedPerson,
+  onAddMilestone, onUpdateMilestone, onDeleteMilestone, momentCandidatesFor, pulledSourceRefs, onBulkAddMilestones }) {
   const readOnly = useReadOnly();
   const [start, setStart] = useState(() => startOfWeek(new Date()));
   const [end, setEnd] = useState(() => addDaysLocal(startOfWeek(new Date()), 6));
   const [showCustom, setShowCustom] = useState(false);
+  const [pullTarget, setPullTarget] = useState(null);
   const [blockers, setBlockers] = useState([]);
   const [newBlocker, setNewBlocker] = useState("");
   const [copied, setCopied] = useState(null);
@@ -8484,8 +9363,15 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
           trackOptions={execTrackOptions} onOpenInstitution={onOpenInstitution} onOpenNote={onOpenNote} showToast={showToast}
           onAddPerson={onAddTrackedPerson} onCreateContact={onCreateTrackedContact} contactOptions={contacts} onOpenPerson={onOpenPerson}
           onUpdatePersonNewUpdates={onUpdateTrackedPersonNewUpdates} onUpdatePersonDiscussion={onUpdateTrackedPersonDiscussion} onUpdatePersonDirection={onUpdateTrackedPersonDirection}
-          onUpdatePersonBlockers={onUpdateTrackedPersonBlockers} onUpdatePersonNext={onUpdateTrackedPersonNext} onMarkPersonReviewed={onMarkTrackedPersonReviewed} onRemovePerson={onRemoveTrackedPerson} />
+          onUpdatePersonBlockers={onUpdateTrackedPersonBlockers} onUpdatePersonNext={onUpdateTrackedPersonNext} onMarkPersonReviewed={onMarkTrackedPersonReviewed} onRemovePerson={onRemoveTrackedPerson}
+          onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+          onOpenPull={readOnly ? null : (fks, title) => setPullTarget({ fks, title })} />
       </div>
+      {pullTarget && (
+        <PullMomentsPanel title={pullTarget.title} candidates={momentCandidatesFor(pullTarget.fks, pullTarget.title).filter((c) => !pulledSourceRefs(pullTarget.fks).has(c.source_ref))}
+          onConfirm={(picks) => { onBulkAddMilestones(pullTarget.fks, picks); setPullTarget(null); }}
+          onClose={() => setPullTarget(null)} />
+      )}
 
       <div className="wir-section">
         <div className="wir-section-title">Coming Up Next Week</div>
