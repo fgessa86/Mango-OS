@@ -20,6 +20,25 @@ const useReadOnly = () => useContext(ReadOnlyContext);
 // Initial-based avatars: deterministic color per name (cycles the design palette),
 // first+last initials. Replaces emoji/photo avatars everywhere people are shown.
 const AVATAR_COLORS = ["#F5A623", "#2A6FDB", "#1F8A5B", "#8B5CF6", "#E5484D", "#0EA5A5"];
+// Default color cycle offered to a new Strategy (Payer, Provider, Government, ...).
+const STRATEGY_COLORS = ["#2A6FDB", "#F5A623", "#1F8A5B", "#8B5CF6", "#E5484D", "#0EA5A5", "#B5791A", "#6B7280"];
+const THREAD_STATUSES = [
+  { id: "active", label: "Active", color: "#2A6FDB" },
+  { id: "paused", label: "Paused", color: "#9A8F7C" },
+  { id: "done", label: "Done", color: "#1F8A5B" },
+];
+// A resolved thread card's own institution/person FKs, for attaching a moment
+// logged from its "+ moment" control (paired with thread_id by the caller).
+const threadFks = (tc) => tc.inst
+  ? { deal_id: tc.inst.dealId || null, enabler_id: tc.inst.enablerId || null, organization_id: tc.inst.orgId || null }
+  : tc.contact ? { contact_id: tc.contact.id } : {};
+// A week window [start, start+7 days). Shared by the Strategy board's "what
+// moved this week" highlight and the timeline's week scrubber.
+const movedInWindow = (dateStr, windowStart) => {
+  if (!dateStr || !windowStart) return false;
+  const d = new Date(dateStr);
+  return d >= windowStart && d < addDaysLocal(windowStart, 7);
+};
 const avatarColor = (name) => {
   const s = (name || "?").trim();
   let h = 0;
@@ -694,6 +713,11 @@ function NavIcon({ shape }) {
       <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6"><rect x="2.5" y="3.5" width="11" height="10" rx="1.5" /><path d="M2.5 6.5h11M5.5 2v3M10.5 2v3" strokeLinecap="round" /></svg>
     </span>
   );
+  if (shape === "target") return (
+    <span className="nav-icon nav-icon-target">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="8" cy="8" r="5.5" /><circle cx="8" cy="8" r="2.5" /><circle cx="8" cy="8" r="0.6" fill="currentColor" stroke="none" /></svg>
+    </span>
+  );
   return null;
 }
 
@@ -804,6 +828,7 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
     { id: "reports", label: "Week in Review", shape: "doc" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Ecosystem", shape: "circle" },
+    { id: "strategy", label: "Strategy", shape: "target" },
     { id: "calendar", label: "Calendar", shape: "calendar" },
     { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
   ] : [
@@ -811,6 +836,7 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
     { id: "calendar", label: "Calendar", shape: "calendar" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Ecosystem", shape: "circle" },
+    { id: "strategy", label: "Strategy", shape: "target" },
     { id: "map", label: "Network Map", shape: "diamond" },
     { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
     { id: "notes", label: "Notes", shape: "note" },
@@ -1363,7 +1389,7 @@ function TagPickerWithCustom({ options, value, onToggle }) {
 // server rewrite is needed on the static host, and the search string
 // (?view=boss) is left untouched, so Boss View survives every navigation.
 const ROUTE_TAB_VIEWS = new Set([
-  "home", "calendar", "pipeline", "network", "map", "tasks",
+  "home", "calendar", "pipeline", "network", "strategy", "map", "tasks",
   "notes", "materials", "outreach", "reports", "exec",
 ]);
 
@@ -1440,6 +1466,11 @@ export default function App() {
   // manual key moments Fahed adds, for tracked institution/person cards.
   const [stageHistory, setStageHistory] = useState([]);
   const [progressMilestones, setProgressMilestones] = useState([]);
+  // Strategy view: top-level strategies (Payer, Provider, Government, ...) and
+  // the threads (specific angles) pursued within each, tied to an institution
+  // or a person.
+  const [strategies, setStrategies] = useState([]);
+  const [strategyThreads, setStrategyThreads] = useState([]);
   const [execOpenId, setExecOpenId] = useState(null);
   const [execPresenting, setExecPresenting] = useState(false);
   const [execGenerating, setExecGenerating] = useState(false);
@@ -1508,7 +1539,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp, sh, pm] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp, sh, pm, strat, sthreads] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1544,6 +1575,8 @@ export default function App() {
         api("exec_tracked_people", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("stage_history", "GET", null, "?select=*&order=changed_at.asc").catch(() => []),
         api("progress_milestones", "GET", null, "?select=*&order=milestone_date.asc").catch(() => []),
+        api("strategies", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("strategy_threads", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
       setDealContacts(dc || []); setEnablerContacts(ec || []); setTodos(td || []); setTodoContacts(tdc || []);
@@ -1555,6 +1588,7 @@ export default function App() {
       setDiscussionPoints(dp || []); setTopOfMind(tom || []);
       setExecInitiatives(xi || []); setExecTracked(xti || []); setExecQuestions(xq || []); setExecTrackedPeople(xtp || []);
       setStageHistory(sh || []); setProgressMilestones(pm || []);
+      setStrategies(strat || []); setStrategyThreads(sthreads || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -4403,6 +4437,90 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Could not update moment"); }
   };
 
+  /* ---- Strategy view: top-level strategies and the threads pursued within
+     each. Strategy -> Institution (via threads) -> Thread -> milestones. ---- */
+  const addStrategy = async ({ name, description, goal, color }) => {
+    const n = (name || "").trim();
+    if (!n) { showToast("Name is required"); return null; }
+    try {
+      const sort_order = strategies.length ? Math.max(...strategies.map((s) => s.sort_order ?? 0)) + 1 : 0;
+      const clean = { name: n, color: color || STRATEGY_COLORS[strategies.length % STRATEGY_COLORS.length], sort_order, is_active: true };
+      const desc = (description || "").trim(); if (desc) clean.description = desc;
+      const g = (goal || "").trim(); if (g) clean.goal = g;
+      const rows = await api("strategies", "POST", clean);
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setStrategies((prev) => [...prev, row]);
+      showToast("Strategy added");
+      return row;
+    } catch { showToast("Could not add strategy"); return null; }
+  };
+  const updateStrategy = async (id, patch) => {
+    try {
+      await api("strategies", "PATCH", patch, `?id=eq.${id}`);
+      setStrategies((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+      savedToast();
+    } catch { showToast("Could not update strategy"); }
+  };
+  // Cascades its threads first (each detaches its milestones' thread_id
+  // rather than deleting them, so real history is never lost), then the
+  // strategy row itself.
+  const removeStrategy = async (id) => {
+    try {
+      const ids = strategyThreads.filter((t) => t.strategy_id === id).map((t) => t.id);
+      if (ids.length) {
+        await api("progress_milestones", "PATCH", { thread_id: null }, `?thread_id=in.(${ids.join(",")})`).catch(() => {});
+        await api("strategy_threads", "DELETE", null, `?id=in.(${ids.join(",")})`);
+      }
+      await api("strategies", "DELETE", null, `?id=eq.${id}`);
+      setStrategyThreads((prev) => prev.filter((t) => t.strategy_id !== id));
+      setStrategies((prev) => prev.filter((s) => s.id !== id));
+      setProgressMilestones((prev) => prev.map((m) => (ids.includes(m.thread_id) ? { ...m, thread_id: null } : m)));
+      showToast("Strategy removed");
+    } catch { showToast("Could not remove strategy"); }
+  };
+  const reorderStrategies = async (orderedIds) => {
+    setStrategies((prev) => prev.map((s) => { const i = orderedIds.indexOf(s.id); return i === -1 ? s : { ...s, sort_order: i }; }));
+    try { await Promise.all(orderedIds.map((id, i) => api("strategies", "PATCH", { sort_order: i }, `?id=eq.${id}`))); }
+    catch { showToast("Could not save the new order"); }
+  };
+
+  const addStrategyThread = async (strategyId, { title, fks }) => {
+    const t = (title || "").trim();
+    if (!t) { showToast("Thread title is required"); return null; }
+    try {
+      const siblings = strategyThreads.filter((x) => x.strategy_id === strategyId);
+      const sort_order = siblings.length ? Math.max(...siblings.map((x) => x.sort_order ?? 0)) + 1 : 0;
+      const clean = { strategy_id: strategyId, title: t, status: "active", sort_order, deal_id: null, enabler_id: null, organization_id: null, contact_id: null, ...fks };
+      const rows = await api("strategy_threads", "POST", clean);
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setStrategyThreads((prev) => [...prev, row]);
+      showToast("Thread added");
+      return row;
+    } catch { showToast("Could not add thread"); return null; }
+  };
+  const updateStrategyThread = async (id, patch) => {
+    try {
+      await api("strategy_threads", "PATCH", patch, `?id=eq.${id}`);
+      setStrategyThreads((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+    } catch { showToast("Could not update thread"); }
+  };
+  // Moves a thread to a different strategy (board drag, or an explicit picker),
+  // appending it to the end of the target column.
+  const moveStrategyThread = async (id, strategyId) => {
+    const siblings = strategyThreads.filter((x) => x.strategy_id === strategyId && x.id !== id);
+    const sort_order = siblings.length ? Math.max(...siblings.map((x) => x.sort_order ?? 0)) + 1 : 0;
+    await updateStrategyThread(id, { strategy_id: strategyId, sort_order });
+  };
+  const removeStrategyThread = async (id) => {
+    try {
+      await api("progress_milestones", "PATCH", { thread_id: null }, `?thread_id=eq.${id}`).catch(() => {});
+      await api("strategy_threads", "DELETE", null, `?id=eq.${id}`);
+      setStrategyThreads((prev) => prev.filter((t) => t.id !== id));
+      setProgressMilestones((prev) => prev.map((m) => (m.thread_id === id ? { ...m, thread_id: null } : m)));
+      showToast("Thread removed");
+    } catch { showToast("Could not remove thread"); }
+  };
+
   /* ---- Exec Questions for the team, per-presentation. ---- */
   const execQuestionsFor = (pid) => execQuestions.filter((x) => x.presentation_id === pid).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   const addExecQuestion = async (presentationId, content) => {
@@ -4859,6 +4977,40 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       : institutions.find((i) => i.orgId === linkId);
     return inst ? { label: inst.name, onOpen: () => openInstitution(inst.name) } : null;
   };
+  // Builds the shared progress-track node list for one institution: automatic
+  // stage_history nodes for its deal (if it has one) plus EVERY
+  // progress_milestones row against any of its FKs, regardless of whether a
+  // milestone also carries a thread_id (the Strategy view's drilldown reuses
+  // this exact institution-level track, undifferentiated by thread). Sorted
+  // oldest to newest. Shared by resolveTrackedCard below and the Strategy
+  // view's drilldown panel, so the two never drift.
+  const buildInstTrackNodes = (inst) => {
+    const trackNodes = [];
+    if (!inst) return trackNodes;
+    if (inst.dealId) {
+      stageHistory.filter((h) => h.deal_id === inst.dealId).forEach((h) => {
+        trackNodes.push({
+          id: `stage-${h.id}`, dbId: h.id, kind: "stage", stageId: h.to_stage,
+          label: stageLabel(h.to_stage), fromLabel: h.from_stage ? stageLabel(h.from_stage) : null,
+          date: h.changed_at, color: STAGES.find((s) => s.id === h.to_stage)?.color || null,
+        });
+      });
+    }
+    progressMilestones
+      .filter((m) => (inst.dealId && m.deal_id === inst.dealId) || (inst.enablerId && m.enabler_id === inst.enablerId) || (inst.orgId && m.organization_id === inst.orgId))
+      .forEach((m) => trackNodes.push({ id: `moment-${m.id}`, dbId: m.id, momentId: m.id, kind: "milestone", label: m.title, detail: m.detail || "", date: m.milestone_date, is_setback: !!m.is_setback }));
+    trackNodes.sort((a, b) => new Date(a.date) - new Date(b.date));
+    return trackNodes;
+  };
+  // Sibling of buildInstTrackNodes for a person: milestones only (no stages).
+  const buildPersonTrackNodes = (contact) => {
+    if (!contact) return [];
+    const trackNodes = progressMilestones.filter((m) => m.contact_id === contact.id)
+      .map((m) => ({ id: `moment-${m.id}`, dbId: m.id, momentId: m.id, kind: "milestone", label: m.title, detail: m.detail || "", date: m.milestone_date, is_setback: !!m.is_setback }));
+    trackNodes.sort((a, b) => new Date(a.date) - new Date(b.date));
+    return trackNodes;
+  };
+
   // Resolve a tracked row to a card: institution meta, the PROGRESS TRACK
   // (stage_history nodes plus progress_milestones nodes, oldest to newest),
   // and Fahed's New Updates / Blockers / What's Next commentary. The track,
@@ -4870,22 +5022,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       : t.enabler_id ? institutions.find((i) => i.enablerId === t.enabler_id)
       : institutions.find((i) => i.orgId === t.organization_id);
     const fks = { deal_id: t.deal_id || null, enabler_id: t.enabler_id || null, organization_id: t.organization_id || null };
-    const trackNodes = [];
-    if (inst) {
-      if (inst.dealId) {
-        stageHistory.filter((h) => h.deal_id === inst.dealId).forEach((h) => {
-          trackNodes.push({
-            id: `stage-${h.id}`, dbId: h.id, kind: "stage", stageId: h.to_stage,
-            label: stageLabel(h.to_stage), fromLabel: h.from_stage ? stageLabel(h.from_stage) : null,
-            date: h.changed_at, color: STAGES.find((s) => s.id === h.to_stage)?.color || null,
-          });
-        });
-      }
-      progressMilestones
-        .filter((m) => (inst.dealId && m.deal_id === inst.dealId) || (inst.enablerId && m.enabler_id === inst.enablerId) || (inst.orgId && m.organization_id === inst.orgId))
-        .forEach((m) => trackNodes.push({ id: `moment-${m.id}`, dbId: m.id, momentId: m.id, kind: "milestone", label: m.title, detail: m.detail || "", date: m.milestone_date, is_setback: !!m.is_setback }));
-    }
-    trackNodes.sort((a, b) => new Date(a.date) - new Date(b.date));
+    const trackNodes = buildInstTrackNodes(inst);
     const lastMovementAt = trackNodes.length ? trackNodes[trackNodes.length - 1].date : null;
     const hasDuplicateStageNodes = trackNodes.filter((n) => n.kind === "stage")
       .some((n, i, arr) => i > 0 && n.stageId === arr[i - 1].stageId && isSameDay(n.date, arr[i - 1].date));
@@ -4918,13 +5055,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // institution). Sibling of resolveTrackedCard above.
   const resolveTrackedPersonCard = (t) => {
     const contact = contacts.find((c) => c.id === t.contact_id);
-    const trackNodes = [];
-    if (contact) {
-      progressMilestones
-        .filter((m) => m.contact_id === contact.id)
-        .forEach((m) => trackNodes.push({ id: `moment-${m.id}`, dbId: m.id, momentId: m.id, kind: "milestone", label: m.title, detail: m.detail || "", date: m.milestone_date, is_setback: !!m.is_setback }));
-    }
-    trackNodes.sort((a, b) => new Date(a.date) - new Date(b.date));
+    const trackNodes = buildPersonTrackNodes(contact);
     const lastMovementAt = trackNodes.length ? trackNodes[trackNodes.length - 1].date : null;
     const roles = contact ? resolveContactRoles(contact, { deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles }) : [];
     const primary = roles.find((r) => r.is_primary) || roles[0];
@@ -4947,6 +5078,47 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       latestActivityAt: lastMovementAt,
     };
   };
+
+  // Resolve one strategy_threads row to a display-ready card: its subject
+  // (an institution via deal/enabler/organization, or a person via
+  // contact_id), a mini progress read (the linked deal's pipeline stage index
+  // plus this thread's OWN milestones, scoped by progress_milestones.thread_id
+  // so multiple threads on the same institution show distinct progress), and
+  // the single most recent event driving "last movement".
+  const resolveThread = (t) => {
+    const inst = t.deal_id ? institutions.find((i) => i.dealId === t.deal_id)
+      : t.enabler_id ? institutions.find((i) => i.enablerId === t.enabler_id)
+      : t.organization_id ? institutions.find((i) => i.orgId === t.organization_id)
+      : null;
+    const contact = t.contact_id ? contacts.find((c) => c.id === t.contact_id) : null;
+    const deal = t.deal_id ? deals.find((d) => d.id === t.deal_id) : null;
+    const threadMilestones = progressMilestones.filter((m) => m.thread_id === t.id);
+    const dealStageEvents = deal ? stageHistory.filter((h) => h.deal_id === deal.id) : [];
+    const events = [
+      ...threadMilestones.map((m) => ({ kind: "milestone", label: m.title, date: m.milestone_date, is_setback: !!m.is_setback })),
+      ...dealStageEvents.map((h) => ({ kind: "stage", label: stageLabel(h.to_stage), date: h.changed_at })),
+    ].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const latest = events[events.length - 1] || null;
+    const stageIdx = deal ? STAGES.findIndex((s) => s.id === deal.stage) : -1;
+    return {
+      id: t.id,
+      strategyId: t.strategy_id,
+      title: t.title,
+      status: t.status || "active",
+      statusMeta: THREAD_STATUSES.find((s) => s.id === (t.status || "active")) || THREAD_STATUSES[0],
+      inst, contact, deal,
+      subjectName: inst?.name || contact?.name || "(unlinked)",
+      subjectKey: inst?.key || (contact ? `person:${contact.id}` : `thread:${t.id}`),
+      typeMeta: inst?.type ? institutionTypeMeta(inst.type, customOptions) : null,
+      warmthMeta: !inst && contact ? WARMTH_LEVELS.find((w) => w.id === (contact.warmth || "unknown")) : null,
+      stageIdx, stageMeta: stageIdx >= 0 ? STAGES[stageIdx] : null,
+      events,
+      milestoneCount: threadMilestones.length,
+      latest,
+      lastMovedAt: latest?.date || t.created_at || null,
+    };
+  };
+  const strategyThreadCards = strategyThreads.map(resolveThread);
 
   // Navigate to whatever entity a mention chip references. One delegated
   // listener covers every chip on the page (rendered live in an editor, via
@@ -5074,7 +5246,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     if (bossMode && ["outreach", "notes", "home", "map", "materials", "exec"].includes(view)) setView("reports");
   }, [bossMode, view]);
 
-  const VIEW_BACK_LABELS = { home: "Home", calendar: "Calendar", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports", exec: "Exec Update" };
+  const VIEW_BACK_LABELS = { home: "Home", calendar: "Calendar", pipeline: "Pipeline", network: "Ecosystem", strategy: "Strategy", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports", exec: "Exec Update" };
   // Human label for the place a route points at, stored on each history entry as
   // state.back so Back on any sheet/module can name where it returns to.
   const describeRoute = useCallback((r) => {
@@ -5450,6 +5622,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onOpenNotesView={() => navigateTab("notes")}
           onNewNote={async () => { await createNote(); navigateTab("notes"); }}
           onOpenMaterials={() => navigateTab("materials")}
+          onOpenStrategy={() => navigateTab("strategy")}
           briefs={meetingBriefs}
           onPrepBrief={prepBriefForMeeting}
           onOpenBrief={setBriefViewId}
@@ -5582,6 +5755,38 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onOpenSearch={() => setSearchOpen(true)}
           />
         </div>
+      )}
+
+      {/* STRATEGY: the shotgun BD map, board (default) or timeline view. */}
+      {view === "strategy" && (
+        <StrategyTab
+          strategies={strategies}
+          threadCards={strategyThreadCards}
+          institutionOptions={execTrackOptions}
+          contactOptions={contacts}
+          onCreateInstitution={createInstitutionInline}
+          onCreateContact={createContactForMention}
+          onAddStrategy={addStrategy}
+          onUpdateStrategy={updateStrategy}
+          onRemoveStrategy={removeStrategy}
+          onReorderStrategies={reorderStrategies}
+          onAddThread={addStrategyThread}
+          onUpdateThread={updateStrategyThread}
+          onMoveThread={moveStrategyThread}
+          onRemoveThread={removeStrategyThread}
+          onAddMilestone={addProgressMilestone}
+          onUpdateMilestone={updateProgressMilestone}
+          onRemoveMilestone={removeProgressMilestone}
+          onAddStage={addStageHistoryEntry}
+          onUpdateStage={updateStageHistoryEntry}
+          onRemoveStage={removeStageHistoryEntry}
+          onCleanupDuplicates={cleanupDuplicateStageHistory}
+          buildInstTrackNodes={buildInstTrackNodes}
+          buildPersonTrackNodes={buildPersonTrackNodes}
+          onOpenInstitution={openInstitution}
+          onOpenPerson={openPerson}
+          showToast={showToast}
+        />
       )}
 
       {/* MAP (desktop only; the force graph is not usable on a phone) */}
@@ -6042,7 +6247,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 // Command Center: the mobile landing screen (also the first desktop tab). A
 // morning briefing of unread boss notes, today's meetings, urgent tasks, recent
 // activity, and stale deals. Purely presentational; all data is derived in App.
-function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, eventDiscussionHint, onPrepBriefEvent, onOpenCalendarEvent, onOpenCalendar, urgentTasks, onToggleTodo, onNavigateTask, recentActivities, onUpdateActivity, onDeleteActivity, activityLinkOptions = {}, customOptions = [], onAddCustomOption = () => {}, deals, enablers, organizations, contacts, todoContacts = [], dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
+function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, meetings, eventEntityRow, eventDiscussionHint, onPrepBriefEvent, onOpenCalendarEvent, onOpenCalendar, urgentTasks, onToggleTodo, onNavigateTask, recentActivities, onUpdateActivity, onDeleteActivity, activityLinkOptions = {}, customOptions = [], onAddCustomOption = () => {}, deals, enablers, organizations, contacts, todoContacts = [], dealContacts, enablerContacts, networkEdges, contactRoles, onOpenInstitution, onOpenPerson, staleDeals, entityName, onOpenEntity, isMobile, bossMode, onOpenReports, notes = [], onOpenNote, onOpenNotesView, onNewNote, onOpenMaterials, onOpenStrategy, briefs = [], onPrepBrief, onOpenBrief, onNewBrief, briefGenerating, needsNudgeCount = 0, onOpenOutreach, onRefresh, onOpenSearch }) {
   const hour = new Date().getHours();
   const partOfDay = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
   return (
@@ -6286,6 +6491,7 @@ function HomeTab({ greetingName, unreadComments, onMarkRead, commentTargetName, 
         <>
           <button className="home-reports-link" onClick={onOpenMaterials}>View Materials</button>
           <button className="home-reports-link" onClick={onOpenReports}>View Reports</button>
+          <button className="home-reports-link" onClick={onOpenStrategy}>View Strategy</button>
         </>
       )}
     </div>
@@ -9010,6 +9216,498 @@ function WeekInReviewTab({ deals, contacts, enablers, organizations, activities,
           onConsumeReply={() => setPendingReply(null)}
         />
       </div>
+    </div>
+  );
+}
+
+/* ================= STRATEGY VIEW =================
+   The shotgun BD map: Strategy -> Institution (via threads) -> Thread ->
+   milestones/stage history. A Board (columns per strategy) is the primary
+   view; a Timeline (swimlanes over weeks) is a toggle. Both drill down into
+   the same per-institution/person PROGRESS TRACK already built for Tracking,
+   reused here via buildInstTrackNodes/buildPersonTrackNodes so nothing about
+   history storage or editing is duplicated. */
+
+// Small add/edit form for a strategy: name, goal, description, color swatch.
+function StrategyForm({ initial = {}, onSave, onCancel }) {
+  const [name, setName] = useState(initial.name || "");
+  const [goal, setGoal] = useState(initial.goal || "");
+  const [description, setDescription] = useState(initial.description || "");
+  const [color, setColor] = useState(initial.color || STRATEGY_COLORS[0]);
+  const [saving, setSaving] = useState(false);
+  const submit = async () => {
+    const n = name.trim();
+    if (!n || saving) return;
+    setSaving(true);
+    try { await onSave({ name: n, goal: goal.trim(), description: description.trim(), color }); }
+    finally { setSaving(false); }
+  };
+  return (
+    <div className="st-strategy-form" onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); onCancel(); } }}>
+      <input className="input" placeholder="Strategy name, e.g. Payer Strategy" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+      <input className="input" placeholder="Goal (optional)" value={goal} onChange={(e) => setGoal(e.target.value)} />
+      <textarea className="input st-strategy-form-desc" placeholder="Description (optional)" value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
+      <div className="st-color-row">
+        {STRATEGY_COLORS.map((c) => (
+          <button key={c} type="button" className={`st-color-swatch ${color === c ? "selected" : ""}`} style={{ background: c }} onClick={() => setColor(c)} title={c} />
+        ))}
+      </div>
+      <div className="ptrack-add-actions">
+        <button type="button" className="btn-primary" disabled={saving || !name.trim()} onClick={submit}>{saving ? "Saving..." : "Save"}</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+        <span className="act-edit-hint">Esc to cancel</span>
+      </div>
+    </div>
+  );
+}
+
+// Small add-thread form: title plus an institution-or-person picker, same
+// tab pattern ExecTracking uses for "+ Add institution/person to track".
+function AddThreadForm({ strategyId, institutionOptions, contactOptions, onCreateInstitution, onCreateContact, onSave, onCancel }) {
+  const [title, setTitle] = useState("");
+  const [subjectMode, setSubjectMode] = useState("institution");
+  const [instValue, setInstValue] = useState("");
+  const [personValue, setPersonValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const ready = title.trim() && (subjectMode === "institution" ? instValue : personValue);
+  const submit = async () => {
+    if (!ready || saving) return;
+    let fks = {};
+    if (subjectMode === "institution") {
+      const i = instValue.indexOf(":");
+      fks = { [`${instValue.slice(0, i)}_id`]: instValue.slice(i + 1) };
+    } else {
+      fks = { contact_id: personValue };
+    }
+    setSaving(true);
+    try { await onSave(strategyId, { title: title.trim(), fks }); onCancel(); } finally { setSaving(false); }
+  };
+  return (
+    <div className="st-add-thread" onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); onCancel(); } }}>
+      <input className="input" placeholder="Thread title, e.g. VBC pilot" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
+      <div className="st-add-thread-tabs">
+        <button type="button" className={`st-add-thread-tab ${subjectMode === "institution" ? "active" : ""}`} onClick={() => setSubjectMode("institution")}>Institution</button>
+        <button type="button" className={`st-add-thread-tab ${subjectMode === "person" ? "active" : ""}`} onClick={() => setSubjectMode("person")}>Person</button>
+      </div>
+      {subjectMode === "institution"
+        ? <EntityPicker placeholder="Search institutions..." options={institutionOptions} value={instValue} onChange={setInstValue} onCreateInstitution={onCreateInstitution} />
+        : <ContactConnectPicker contacts={contactOptions} value={personValue} onChange={setPersonValue} onCreateContact={onCreateContact} placeholder="Search people..." />}
+      <div className="ptrack-add-actions">
+        <button type="button" className="btn-primary" disabled={saving || !ready} onClick={submit}>{saving ? "Adding..." : "Add thread"}</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+        <span className="act-edit-hint">Esc to cancel</span>
+      </div>
+    </div>
+  );
+}
+
+// One thread's compact row on the board: title (rename inline), status,
+// pipeline-stage mini bar when deal-linked, latest event + time since, a
+// "NEW" glow when it moved within the highlighted week, "+ moment" (writes a
+// progress_milestone with this thread's own thread_id), rename, and delete.
+function ThreadRow({ tc, isFresh, readOnly, onOpen, onUpdate, onRemove, onAddMilestone, showToast, onDragStart }) {
+  const [editing, setEditing] = useState(false);
+  const [addingMoment, setAddingMoment] = useState(false);
+  const [title, setTitle] = useState(tc.title);
+  useEffect(() => { setTitle(tc.title); }, [tc.title]);
+  const daysSince = tc.lastMovedAt ? daysAgo(tc.lastMovedAt) : null;
+  const commitTitle = () => { const t = title.trim(); if (t && t !== tc.title) onUpdate(tc.id, { title: t }); setEditing(false); };
+  return (
+    <div className={`st-thread-row ${isFresh ? "st-thread-fresh" : "st-thread-dim"}`}>
+      <div className="st-thread-head">
+        {!readOnly && <span className="st-thread-grip" title="Drag to another strategy" draggable onDragStart={() => onDragStart(tc.id)}>⠿</span>}
+        {editing ? (
+          <input
+            className="input st-thread-edit-title" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus
+            onKeyDown={(e) => { if (e.key === "Enter") commitTitle(); if (e.key === "Escape") { setTitle(tc.title); setEditing(false); } }}
+            onBlur={commitTitle}
+          />
+        ) : (
+          <button type="button" className="st-thread-title" onClick={() => onOpen(tc)}>{tc.title}</button>
+        )}
+        {isFresh && <span className="st-thread-new">NEW</span>}
+        {!readOnly && (
+          <span className="st-thread-actions">
+            <BadgeSelect options={THREAD_STATUSES} value={tc.status} color={tc.statusMeta.color} onChange={(v) => onUpdate(tc.id, { status: v })} title="Thread status" />
+            <button type="button" className="ptrack-detail-edit" onClick={() => setEditing(true)} title="Rename thread">✎</button>
+            <button
+              type="button" className="ptrack-detail-del"
+              onClick={() => { if (window.confirm(`Remove thread "${tc.title}"? Its milestones are kept, just unlinked.`)) onRemove(tc.id); }}
+              title="Delete thread"
+            >✕</button>
+          </span>
+        )}
+        {readOnly && <span className="badge" style={{ background: tc.statusMeta.color + "22", color: tc.statusMeta.color, border: `1px solid ${tc.statusMeta.color}44` }}>{tc.statusMeta.label}</span>}
+      </div>
+      {tc.stageMeta && (
+        <div className="st-thread-stagebar" title={`Pipeline stage: ${tc.stageMeta.label}`}>
+          {STAGES.map((s, i) => <span key={s.id} className="st-thread-stagebar-seg" style={i <= tc.stageIdx ? { background: tc.stageMeta.color } : undefined} />)}
+        </div>
+      )}
+      <div className="st-thread-latest">
+        {tc.latest ? (
+          <>
+            <span className={`st-thread-latest-dot st-thread-latest-${tc.latest.kind} ${tc.latest.is_setback ? "st-thread-latest-setback" : ""}`} />
+            <span className="st-thread-latest-text">{tc.latest.kind === "stage" ? `Moved to ${tc.latest.label}` : tc.latest.label}</span>
+            <span className="st-thread-latest-time">{daysSince === 0 ? "today" : `${daysSince}d ago`}</span>
+          </>
+        ) : <span className="st-thread-latest-empty">No progress yet</span>}
+      </div>
+      {!readOnly && (
+        addingMoment ? (
+          <AddMomentForm showToast={showToast} onCancel={() => setAddingMoment(false)}
+            onSave={(payload) => onAddMilestone({ ...threadFks(tc), thread_id: tc.id }, payload)} />
+        ) : <button type="button" className="link-btn st-thread-addmoment" onClick={() => setAddingMoment(true)}>+ moment</button>
+      )}
+    </div>
+  );
+}
+
+// One strategy's column: header (color, goal, description, edit/delete),
+// threads grouped by subject (institution or person, most-recently-moved
+// group first), "+ Add thread", and a drop target for moving a dragged
+// thread here from another column.
+function StrategyBoardColumn({
+  strategy, threadCards, currentWeekStart, readOnly, dragThreadId, onDragStart, onDropThread,
+  dragStrategyId, onColumnDragStart, onColumnDrop,
+  institutionOptions, contactOptions, onCreateInstitution, onCreateContact,
+  onEditStrategy, onDeleteStrategy, onAddThread, onUpdateThread, onRemoveThread, onOpenThread, onAddMilestone, showToast,
+}) {
+  const [addingThread, setAddingThread] = useState(false);
+  const groups = new Map();
+  threadCards.forEach((tc) => {
+    if (!groups.has(tc.subjectKey)) groups.set(tc.subjectKey, { subjectKey: tc.subjectKey, subjectName: tc.subjectName, typeMeta: tc.typeMeta, warmthMeta: tc.warmthMeta, sample: tc, cards: [] });
+    groups.get(tc.subjectKey).cards.push(tc);
+  });
+  const groupList = [...groups.values()].sort((a, b) => {
+    const am = Math.max(0, ...a.cards.map((c) => (c.lastMovedAt ? new Date(c.lastMovedAt).getTime() : 0)));
+    const bm = Math.max(0, ...b.cards.map((c) => (c.lastMovedAt ? new Date(c.lastMovedAt).getTime() : 0)));
+    return bm - am;
+  });
+  return (
+    <div
+      className="st-col"
+      onDragOver={(e) => { if (dragThreadId || dragStrategyId) e.preventDefault(); }}
+      onDrop={() => { if (dragThreadId) onDropThread(dragThreadId, strategy.id); else if (dragStrategyId) onColumnDrop(strategy.id); }}
+    >
+      <div className="st-col-head" style={{ borderTopColor: strategy.color }}>
+        <div className="st-col-head-top">
+          {!readOnly && <span className="st-thread-grip" title="Drag to reorder strategies" draggable onDragStart={() => onColumnDragStart(strategy.id)}>⠿</span>}
+          <span className="st-col-dot" style={{ background: strategy.color }} />
+          <span className="st-col-name">{strategy.name}</span>
+          <span className="st-col-count">{threadCards.length}</span>
+          {!readOnly && (
+            <span className="st-col-actions">
+              <button type="button" className="ptrack-detail-edit" onClick={() => onEditStrategy(strategy)} title="Edit strategy">✎</button>
+              <button
+                type="button" className="ptrack-detail-del"
+                onClick={() => { if (window.confirm(`Delete strategy "${strategy.name}"? Its threads are removed too (milestones are kept, just unlinked).`)) onDeleteStrategy(strategy.id); }}
+                title="Delete strategy"
+              >✕</button>
+            </span>
+          )}
+        </div>
+        {strategy.goal && <div className="st-col-goal">🎯 {strategy.goal}</div>}
+        {strategy.description && <div className="st-col-desc">{strategy.description}</div>}
+      </div>
+      <div className="st-col-body">
+        {groupList.length === 0 && <div className="st-col-empty">No threads yet.</div>}
+        {groupList.map((g) => (
+          <div key={g.subjectKey} className="st-subject-group">
+            <button type="button" className="st-subject-name" onClick={() => onOpenThread(g.sample)}>
+              {g.typeMeta && <span className="badge" style={{ background: g.typeMeta.color + "22", color: g.typeMeta.color, border: `1px solid ${g.typeMeta.color}44` }}>{g.typeMeta.label}</span>}
+              {g.warmthMeta && <span className="badge" style={{ background: g.warmthMeta.color + "22", color: g.warmthMeta.color, border: `1px solid ${g.warmthMeta.color}44` }}>{g.warmthMeta.label}</span>}
+              {g.subjectName}
+            </button>
+            {g.cards.map((tc) => (
+              <ThreadRow
+                key={tc.id} tc={tc} isFresh={movedInWindow(tc.lastMovedAt, currentWeekStart)} readOnly={readOnly}
+                onOpen={onOpenThread} onUpdate={onUpdateThread} onRemove={onRemoveThread} onAddMilestone={onAddMilestone}
+                showToast={showToast} onDragStart={onDragStart}
+              />
+            ))}
+          </div>
+        ))}
+      </div>
+      {!readOnly && (
+        addingThread ? (
+          <AddThreadForm
+            strategyId={strategy.id} institutionOptions={institutionOptions} contactOptions={contactOptions}
+            onCreateInstitution={onCreateInstitution} onCreateContact={onCreateContact}
+            onSave={onAddThread} onCancel={() => setAddingThread(false)}
+          />
+        ) : <button type="button" className="btn-sec st-col-addthread" onClick={() => setAddingThread(true)}>+ Add thread</button>
+      )}
+    </div>
+  );
+}
+
+// The Board: one column per strategy, in sort_order. Drag state (which
+// thread is being dragged) is lifted here so any column can be the drop target.
+function StrategyBoard({
+  strategies, threadCards, currentWeekStart, readOnly,
+  institutionOptions, contactOptions, onCreateInstitution, onCreateContact,
+  onEditStrategy, onDeleteStrategy, onAddThread, onUpdateThread, onMoveThread, onRemoveThread, onOpenThread, onAddMilestone, onReorderStrategies, showToast,
+}) {
+  const [dragThreadId, setDragThreadId] = useState(null);
+  const [dragStrategyId, setDragStrategyId] = useState(null);
+  const dropColumn = (targetId) => {
+    if (!dragStrategyId || dragStrategyId === targetId) { setDragStrategyId(null); return; }
+    const ids = strategies.map((s) => s.id);
+    const from = ids.indexOf(dragStrategyId), to = ids.indexOf(targetId);
+    if (from !== -1 && to !== -1) { ids.splice(to, 0, ids.splice(from, 1)[0]); onReorderStrategies(ids); }
+    setDragStrategyId(null);
+  };
+  return (
+    <div className="st-board">
+      {strategies.map((s) => (
+        <StrategyBoardColumn
+          key={s.id} strategy={s} threadCards={threadCards.filter((tc) => tc.strategyId === s.id)}
+          currentWeekStart={currentWeekStart} readOnly={readOnly}
+          institutionOptions={institutionOptions} contactOptions={contactOptions}
+          onCreateInstitution={onCreateInstitution} onCreateContact={onCreateContact}
+          onEditStrategy={onEditStrategy} onDeleteStrategy={onDeleteStrategy}
+          onAddThread={onAddThread} onUpdateThread={onUpdateThread} onRemoveThread={onRemoveThread} onOpenThread={onOpenThread}
+          onAddMilestone={onAddMilestone} showToast={showToast}
+          dragThreadId={dragThreadId} onDragStart={setDragThreadId}
+          onDropThread={(id, strategyId) => { onMoveThread(id, strategyId); setDragThreadId(null); }}
+          dragStrategyId={dragStrategyId} onColumnDragStart={setDragStrategyId} onColumnDrop={dropColumn}
+        />
+      ))}
+    </div>
+  );
+}
+
+// Swimlane Timeline: rows are threads, grouped by strategy then subject
+// (institution/person), columns are weeks. A CSS-grid column highlight
+// stands in for a "vertical band" (every cell in the selected week's column
+// shares the highlight background, which reads as one continuous strip down
+// the grid). Node opacity does the rest of the highlighting: full for
+// anything in the selected week, dimmed otherwise.
+function StrategyTimeline({ strategies, threadCards, onOpenThread }) {
+  const currentWeekStart = startOfWeek(new Date());
+  const [selectedWeekStart, setSelectedWeekStart] = useState(currentWeekStart);
+  const scrollRef = useRef(null);
+
+  const allDates = [];
+  threadCards.forEach((tc) => tc.events.forEach((e) => e.date && allDates.push(new Date(e.date))));
+  const earliest = allDates.length ? new Date(Math.min(...allDates.map((d) => d.getTime()))) : currentWeekStart;
+  const rangeStart = startOfWeek(new Date(Math.min(startOfWeek(earliest).getTime(), addDaysLocal(currentWeekStart, -7 * 7).getTime())));
+  const weeks = [];
+  for (let w = new Date(rangeStart); w <= currentWeekStart; w = addDaysLocal(w, 7)) weeks.push(new Date(w));
+  const selectedIdx = weeks.findIndex((w) => w.getTime() === selectedWeekStart.getTime());
+
+  const jumpTo = (idx, smooth = true) => {
+    if (idx < 0 || idx >= weeks.length) return;
+    setSelectedWeekStart(weeks[idx]);
+    const el = scrollRef.current?.querySelector(`[data-week-idx="${idx}"]`);
+    el?.scrollIntoView({ behavior: smooth ? "smooth" : "auto", inline: "center", block: "nearest" });
+  };
+  // Default to current week AND start scrolled to it, so "this week" is
+  // immediately visible rather than requiring a manual scroll on open.
+  useEffect(() => { jumpTo(weeks.length - 1, false); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const groups = new Map();
+  strategies.forEach((s) => groups.set(s.id, { strategy: s, subjects: new Map() }));
+  threadCards.forEach((tc) => {
+    const g = groups.get(tc.strategyId);
+    if (!g) return;
+    if (!g.subjects.has(tc.subjectKey)) g.subjects.set(tc.subjectKey, { subjectName: tc.subjectName, sample: tc, cards: [] });
+    g.subjects.get(tc.subjectKey).cards.push(tc);
+  });
+
+  const weekCols = `220px repeat(${weeks.length}, 56px)`;
+
+  return (
+    <div className="st-timeline">
+      <div className="st-timeline-toolbar">
+        <button type="button" className="btn-sec" onClick={() => jumpTo(selectedIdx - 1)} disabled={selectedIdx <= 0}>‹ Prev week</button>
+        <span className="st-timeline-weeklabel">Week of {formatDate(selectedWeekStart)}{selectedWeekStart.getTime() === currentWeekStart.getTime() ? " (this week)" : ""}</span>
+        <button type="button" className="btn-sec" onClick={() => jumpTo(selectedIdx + 1)} disabled={selectedIdx >= weeks.length - 1}>Next week ›</button>
+        <button type="button" className="btn-sec" onClick={() => jumpTo(weeks.length - 1)}>This week</button>
+      </div>
+      <div className="st-timeline-scroll" ref={scrollRef}>
+        <div className="st-timeline-grid" style={{ gridTemplateColumns: weekCols }}>
+          <div className="st-tl-cell st-tl-corner" />
+          {weeks.map((w, i) => (
+            <div key={i} data-week-idx={i} className={`st-tl-cell st-tl-weekhead ${i === selectedIdx ? "st-tl-col-selected" : ""}`}>{formatDate(w)}</div>
+          ))}
+          {[...groups.values()].filter((g) => g.subjects.size > 0).map((g) => (
+            <Fragment key={g.strategy.id}>
+              <div className="st-tl-cell st-tl-strategyhead" style={{ gridColumn: `1 / -1`, color: g.strategy.color, borderLeftColor: g.strategy.color }}>{g.strategy.name}</div>
+              {[...g.subjects.values()].map((sub) => (
+                <Fragment key={sub.subjectName + sub.sample.id}>
+                  <div className="st-tl-cell st-tl-subjecthead" style={{ gridColumn: `1 / -1` }}>
+                    <button type="button" className="link-btn" onClick={() => onOpenThread(sub.sample)}>{sub.subjectName}</button>
+                  </div>
+                  {sub.cards.map((tc) => (
+                    <Fragment key={tc.id}>
+                      <button type="button" className="st-tl-cell st-tl-lanelabel" onClick={() => onOpenThread(tc)} title="Open progress track">{tc.title}</button>
+                      {weeks.map((w, i) => {
+                        const nodesHere = tc.events.filter((e) => e.date && movedInWindow(e.date, w));
+                        const selected = i === selectedIdx;
+                        return (
+                          <div key={i} className={`st-tl-cell st-tl-lanecell ${selected ? "st-tl-col-selected" : ""}`}>
+                            {nodesHere.map((n, j) => (
+                              <span
+                                key={j}
+                                className={`st-tl-node st-tl-node-${n.kind} ${n.is_setback ? "st-tl-node-setback" : ""} ${selected ? "st-tl-node-active" : "st-tl-node-dim"}`}
+                                title={`${n.kind === "stage" ? "Moved to " : ""}${n.label} (${formatDate(n.date)})`}
+                              />
+                            ))}
+                          </div>
+                        );
+                      })}
+                    </Fragment>
+                  ))}
+                </Fragment>
+              ))}
+            </Fragment>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The drill-down: the SAME per-institution/person progress track built for
+// Tracking, reused as-is (ProgressTrackSection), opened as a slide-in panel
+// over the board or timeline. Shows every thread at this subject too, so the
+// strategy context is visible alongside the raw history.
+function StrategyDrilldownPanel({
+  subject, threads, nodes, readOnly,
+  onClose, onOpenSheet,
+  onAddMilestone, onUpdateMilestone, onRemoveMilestone,
+  onAddStage, onUpdateStage, onRemoveStage, onCleanupDuplicates,
+  showToast,
+}) {
+  if (!subject) return null;
+  const fks = subject.kind === "institution"
+    ? { deal_id: subject.inst.dealId || null, enabler_id: subject.inst.enablerId || null, organization_id: subject.inst.orgId || null }
+    : { contact_id: subject.contact.id };
+  const dealId = subject.kind === "institution" ? subject.inst.dealId || null : null;
+  const hasDuplicateStageNodes = nodes.filter((n) => n.kind === "stage")
+    .some((n, i, arr) => i > 0 && n.stageId === arr[i - 1].stageId && isSameDay(n.date, arr[i - 1].date));
+  const name = subject.kind === "institution" ? subject.inst.name : subject.contact.name;
+  return (
+    <div className="st-drilldown-overlay" onClick={onClose}>
+      <div className="st-drilldown-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="st-drilldown-head">
+          <button type="button" className="link-btn st-drilldown-name" onClick={onOpenSheet}>{name}</button>
+          <button type="button" className="exec-present-exit" onClick={onClose} title="Close">✕</button>
+        </div>
+        {threads.length > 0 && (
+          <div className="st-drilldown-threads">
+            {threads.map((t) => (
+              <span key={t.id} className="badge" style={{ background: "#F5A62322", color: "#B5791A", border: "1px solid #F5A62344" }}>{t.title}</span>
+            ))}
+          </div>
+        )}
+        <ProgressTrackSection
+          nodes={nodes} fks={fks} dealId={dealId} readOnly={readOnly} hasDuplicateStageNodes={hasDuplicateStageNodes}
+          onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onRemoveMilestone={onRemoveMilestone}
+          onAddStage={onAddStage} onUpdateStage={onUpdateStage} onRemoveStage={onRemoveStage} onCleanupDuplicates={onCleanupDuplicates}
+          showToast={showToast}
+        />
+      </div>
+    </div>
+  );
+}
+
+// Prominent weekly-progress summary at the top of the tab: how many threads
+// moved this week, across every strategy, and their names.
+function StrategyWeekSummary({ movedCards, onOpenThread }) {
+  if (!movedCards.length) return <div className="st-week-summary st-week-summary-empty">No threads moved this week yet.</div>;
+  return (
+    <div className="st-week-summary">
+      <div className="st-week-summary-count">{movedCards.length} thread{movedCards.length === 1 ? "" : "s"} moved this week</div>
+      <div className="st-week-summary-list">
+        {movedCards.map((tc) => (
+          <button key={tc.id} type="button" className="st-week-summary-pill" onClick={() => onOpenThread(tc)}>{tc.subjectName}: {tc.title}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StrategyTab({
+  strategies = [], threadCards = [],
+  institutionOptions = [], contactOptions = [],
+  onCreateInstitution, onCreateContact,
+  onAddStrategy, onUpdateStrategy, onRemoveStrategy, onReorderStrategies,
+  onAddThread, onUpdateThread, onMoveThread, onRemoveThread,
+  onAddMilestone, onUpdateMilestone, onRemoveMilestone,
+  onAddStage, onUpdateStage, onRemoveStage, onCleanupDuplicates,
+  buildInstTrackNodes, buildPersonTrackNodes,
+  onOpenInstitution, onOpenPerson, showToast,
+}) {
+  const readOnly = useReadOnly();
+  const [viewMode, setViewMode] = useState("board");
+  const [addingStrategy, setAddingStrategy] = useState(false);
+  const [editingStrategy, setEditingStrategy] = useState(null);
+  const [drilldown, setDrilldown] = useState(null); // { kind: "institution", inst } | { kind: "person", contact }
+
+  const currentWeekStart = startOfWeek(new Date());
+  const movedThisWeek = threadCards.filter((tc) => movedInWindow(tc.lastMovedAt, currentWeekStart));
+
+  const openThread = (tc) => {
+    if (tc.inst) setDrilldown({ kind: "institution", inst: tc.inst });
+    else if (tc.contact) setDrilldown({ kind: "person", contact: tc.contact });
+  };
+  const drilldownThreads = drilldown
+    ? threadCards.filter((tc) => (drilldown.kind === "institution" ? tc.inst?.key === drilldown.inst.key : tc.contact?.id === drilldown.contact.id))
+    : [];
+  const drilldownNodes = drilldown
+    ? (drilldown.kind === "institution" ? buildInstTrackNodes(drilldown.inst) : buildPersonTrackNodes(drilldown.contact))
+    : [];
+
+  return (
+    <div className="section-pad st-tab">
+      <div className="page-header" style={{ padding: "0 0 14px" }}>
+        <div>
+          <div className="page-title">Strategy</div>
+          <div className="page-sub">The shotgun BD map: strategies, the institutions and people inside each, and how fast every angle is moving.</div>
+        </div>
+        {!readOnly && !addingStrategy && <button type="button" className="btn-primary" onClick={() => setAddingStrategy(true)}>+ Add strategy</button>}
+      </div>
+
+      {addingStrategy && (
+        <StrategyForm onCancel={() => setAddingStrategy(false)} onSave={async (v) => { await onAddStrategy(v); setAddingStrategy(false); }} />
+      )}
+      {editingStrategy && (
+        <StrategyForm initial={editingStrategy} onCancel={() => setEditingStrategy(null)} onSave={async (v) => { await onUpdateStrategy(editingStrategy.id, v); setEditingStrategy(null); }} />
+      )}
+
+      <StrategyWeekSummary movedCards={movedThisWeek} onOpenThread={openThread} />
+
+      <div className="st-viewtoggle">
+        <button type="button" className={`st-viewtoggle-btn ${viewMode === "board" ? "active" : ""}`} onClick={() => setViewMode("board")}>Board</button>
+        <button type="button" className={`st-viewtoggle-btn ${viewMode === "timeline" ? "active" : ""}`} onClick={() => setViewMode("timeline")}>Timeline</button>
+      </div>
+
+      {strategies.length === 0 ? (
+        <div className="st-empty">No strategies yet. Add one (Payer Strategy, Provider Strategy, Government Strategy...) to start mapping the approach.</div>
+      ) : viewMode === "board" ? (
+        <StrategyBoard
+          strategies={strategies} threadCards={threadCards} currentWeekStart={currentWeekStart} readOnly={readOnly}
+          institutionOptions={institutionOptions} contactOptions={contactOptions}
+          onCreateInstitution={onCreateInstitution} onCreateContact={onCreateContact}
+          onEditStrategy={setEditingStrategy} onDeleteStrategy={onRemoveStrategy}
+          onAddThread={onAddThread} onUpdateThread={onUpdateThread} onMoveThread={onMoveThread} onRemoveThread={onRemoveThread}
+          onOpenThread={openThread} onAddMilestone={onAddMilestone} onReorderStrategies={onReorderStrategies} showToast={showToast}
+        />
+      ) : (
+        <StrategyTimeline strategies={strategies} threadCards={threadCards} onOpenThread={openThread} />
+      )}
+
+      <StrategyDrilldownPanel
+        subject={drilldown} threads={drilldownThreads} nodes={drilldownNodes} readOnly={readOnly}
+        onClose={() => setDrilldown(null)}
+        onOpenSheet={() => { if (drilldown?.kind === "institution") onOpenInstitution(drilldown.inst.name); else if (drilldown?.kind === "person") onOpenPerson(drilldown.contact.id); }}
+        onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onRemoveMilestone={onRemoveMilestone}
+        onAddStage={onAddStage} onUpdateStage={onUpdateStage} onRemoveStage={onRemoveStage} onCleanupDuplicates={onCleanupDuplicates}
+        showToast={showToast}
+      />
     </div>
   );
 }
