@@ -8640,19 +8640,23 @@ function computeStrategyGridWeeks(strategyThreadsList, rangeWeeks) {
 }
 
 // One moment inside a grid cell: the same labeled node used everywhere else
-// (title, date, kind icon, planned/setback/stage styling), prefixed with the
-// thread (institution/person) it belongs to, since a cell can mix progress
-// from several threads in the same strategy in the same week, and the route
-// title too when that thread has more than one route running, e.g. "KFSHRC:
-// champion path confirmed". Click to edit in place.
-function StrategyGridMoment({ entry, showRoute, readOnly, onUpdateMilestone, onDeleteMilestone }) {
+// (title, date, kind icon, planned/setback/stage styling). At a merged level
+// (a collapsed institution or strategy) it is prefixed with whichever thread
+// (institution/person) it belongs to, since the cell mixes several threads'
+// or routes' progress that week, e.g. "KFSHRC: champion path confirmed"; at
+// route level the row itself already gives that context, so the node shows
+// only what advanced. Click to edit in place.
+function StrategyGridMoment({ entry, showThread, showRoute, readOnly, onUpdateMilestone, onDeleteMilestone }) {
   const [editing, setEditing] = useState(false);
   const todayISO = new Date().toISOString().slice(0, 10);
   return (
     <div className="strategy-grid-moment">
-      <button type="button" className="strategy-grid-moment-thread" onClick={() => entry.onOpen && entry.onOpen()} disabled={!entry.onOpen}>
-        {entry.name}{showRoute ? `: ${entry.route.title}` : ""}
-      </button>
+      {showThread && (
+        <button type="button" className="strategy-grid-moment-thread" onClick={() => entry.onOpen && entry.onOpen()} disabled={!entry.onOpen}>
+          {entry.name}{showRoute ? `: ${entry.route.title}` : ""}
+        </button>
+      )}
+      {!showThread && showRoute && <span className="strategy-grid-moment-route">{entry.route.title}</span>}
       {entry.kind === "terminus" ? (
         <RouteTerminusNode route={entry.route} />
       ) : (
@@ -8664,15 +8668,20 @@ function StrategyGridMoment({ entry, showRoute, readOnly, onUpdateMilestone, onD
     </div>
   );
 }
-// One strategy-row x week-column cell: the moments that advanced for that
-// strategy in that week, grouped by thread so several hits on the same
-// institution still read as one thread doing several things. A quiet cell
-// (nothing moved) renders empty and subtle, so stalls read at a glance across
-// the row. A crowded cell shows a few plus a "+N more" expander rather than
-// growing the row without bound.
-function StrategyGridCell({ items, readOnly, onUpdateMilestone, onDeleteMilestone }) {
+// One row x week-column cell: the moments that advanced in that week at
+// whatever level this row represents (a single route, a collapsed
+// institution's routes merged, or a collapsed strategy's institutions
+// merged), grouped by thread so several hits on the same institution still
+// read as one thread doing several things. `labelThread` names the thread in
+// the node only when the cell can mix more than one (merged levels); a plain
+// route row never needs it, since the row itself already says who and what.
+// A quiet cell (nothing moved) renders empty and subtle, so stalls read at a
+// glance across the row; a muted cell (past a dead-ended route's end) fades
+// further, since nothing more will ever land there. A crowded cell shows a
+// few plus a "+N more" expander rather than growing the row without bound.
+function StrategyGridCell({ items, labelThread, muted, readOnly, onUpdateMilestone, onDeleteMilestone }) {
   const [showAll, setShowAll] = useState(false);
-  if (items.length === 0) return <div className="strategy-grid-cell strategy-grid-cell-empty" />;
+  if (items.length === 0) return <div className={`strategy-grid-cell strategy-grid-cell-empty ${muted ? "strategy-grid-cell-muted" : ""}`} />;
   const flat = [];
   groupWeekItemsByThread(items).forEach((g) => {
     const showRoute = new Set(g.items.map((it) => it.route.id)).size > 1;
@@ -8681,21 +8690,105 @@ function StrategyGridCell({ items, readOnly, onUpdateMilestone, onDeleteMileston
   const visible = showAll ? flat : flat.slice(0, STRATEGY_GRID_CELL_LIMIT);
   const hidden = flat.length - visible.length;
   return (
-    <div className="strategy-grid-cell">
+    <div className={`strategy-grid-cell ${muted ? "strategy-grid-cell-muted" : ""}`}>
       {visible.map(({ entry, showRoute }) => (
         <StrategyGridMoment key={entry.kind === "terminus" ? `term-${entry.route.id}` : entry.milestone.id}
-          entry={entry} showRoute={showRoute} readOnly={readOnly}
+          entry={entry} showThread={labelThread} showRoute={showRoute} readOnly={readOnly}
           onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
       ))}
       {hidden > 0 && <button type="button" className="moment-cluster-btn strategy-grid-more" onClick={() => setShowAll(true)}>+{hidden} more</button>}
     </div>
   );
 }
-// One strategy's row: a sticky name/goal header, then one cell per shared
-// week column. Collapsed replaces the row of cells with a single summary
-// line spanning every week column, so a strategy can be tucked away without
-// losing its place in the grid.
-function StrategyGridRow({ strategy, threads, weeks, collapsed, onToggleCollapse, onUpdateGoal, readOnly, onUpdateMilestone, onDeleteMilestone }) {
+// A row of N blank week cells, for a header-only row (an expanded parent
+// whose children carry the real cells, or an inline add-form row).
+function StrategyGridBlankCells({ weeks }) {
+  return <>{weeks.map((w) => <div key={w.key} className="strategy-grid-cell strategy-grid-cell-empty" />)}</>;
+}
+
+// The ROUTE row (leaf level): title, state glyph, and its own moments across
+// the shared week columns. A dead-ended route mutes its row past the week it
+// ended, since nothing will ever land there again.
+function StrategyGridRouteRow({ thread, route, weeks, readOnly, onUpdateMilestone, onDeleteMilestone }) {
+  const byWeek = useMemo(() => bucketThreadsByWeek([{ ...thread, routes: [route] }]), [thread, route]);
+  const meta = strategyRouteStateMeta(route.state);
+  const dead = route.state === "dead_end";
+  return (
+    <>
+      <div className={`strategy-grid-rowhead strategy-grid-rowhead-route ${dead ? "strategy-grid-rowhead-route-dead" : ""}`}>
+        <span className="strategy-grid-route-glyph" style={{ color: meta.color }}>{strategyEndGlyph(route.state)}</span>
+        <span className="strategy-grid-route-title">{route.title}</span>
+        <span className="badge strategy-grid-route-badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{meta.label}</span>
+      </div>
+      {weeks.map((w) => (
+        <StrategyGridCell key={w.key} items={byWeek.get(w.key) || []} labelThread={false} readOnly={readOnly}
+          muted={dead && !!route.ended_at && w.key > route.ended_at}
+          onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+      ))}
+    </>
+  );
+}
+// The INSTITUTION row (person or institution "threaded" into the strategy):
+// name, type, editable goal, and either its merged week cells (collapsed) or
+// its own row of ROUTE rows (expanded), plus an inline "+ Add route" row.
+function StrategyGridInstitutionRow({
+  thread, weeks, collapsed, onToggleCollapse, onUpdateGoal, readOnly, onUpdateMilestone, onDeleteMilestone,
+  addingRoute, onStartAddRoute, onCancelAddRoute, onAddRoute,
+}) {
+  const byWeek = useMemo(() => bucketThreadsByWeek([thread]), [thread]);
+  const [routeTitle, setRouteTitle] = useState("");
+  const submitRoute = () => { if (!routeTitle.trim()) return; onAddRoute(thread.id, routeTitle.trim()); setRouteTitle(""); };
+  return (
+    <>
+      <div className="strategy-grid-rowhead strategy-grid-rowhead-institution">
+        <button type="button" className="link-btn strategy-grid-tree-toggle" onClick={onToggleCollapse}>{collapsed ? "▸" : "▾"}</button>
+        <div className="strategy-grid-rowhead-body">
+          <button type="button" className="strategy-grid-rowhead-name-btn" onClick={() => thread.onOpen && thread.onOpen()} disabled={!thread.onOpen}>{thread.name}</button>
+          {thread.typeMeta && <span className="badge" style={{ background: thread.typeMeta.color + "22", color: thread.typeMeta.color, border: `1px solid ${thread.typeMeta.color}44` }}>{thread.typeMeta.label}</span>}
+          <span className="strategy-grid-rowhead-goal"><StrategyMentionField value={thread.goal || ""} onSave={(v) => onUpdateGoal(thread.id, v)} readOnly={readOnly} placeholder="Goal" /></span>
+        </div>
+      </div>
+      {collapsed ? (
+        weeks.map((w) => (
+          <StrategyGridCell key={w.key} items={byWeek.get(w.key) || []} labelThread={false} readOnly={readOnly}
+            onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+        ))
+      ) : (
+        <>
+          <StrategyGridBlankCells weeks={weeks} />
+          {thread.routes.map((route) => (
+            <StrategyGridRouteRow key={route.id} thread={thread} route={route} weeks={weeks} readOnly={readOnly}
+              onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+          ))}
+          {!readOnly && (
+            <>
+              <div className="strategy-grid-rowhead strategy-grid-rowhead-addroute">
+                {addingRoute ? (
+                  <div className="exec-track-add strategy-grid-add-form">
+                    <input className="input" autoFocus value={routeTitle} onChange={(e) => setRouteTitle(e.target.value)}
+                      placeholder="Route name" onKeyDown={(e) => { if (e.key === "Enter") submitRoute(); if (e.key === "Escape") onCancelAddRoute(); }} />
+                    <button type="button" className="btn-primary" onClick={submitRoute}>Add</button>
+                    <button type="button" className="link-btn" onClick={onCancelAddRoute}>Cancel</button>
+                  </div>
+                ) : <button type="button" className="link-btn" onClick={onStartAddRoute}>+ Add route</button>}
+              </div>
+              <StrategyGridBlankCells weeks={weeks} />
+            </>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+// The STRATEGY row (top-level band): color-coded header, editable overall
+// goal, and either its merged week cells (collapsed) or its own stack of
+// INSTITUTION rows (expanded), plus an inline "+ Add institution" row.
+function StrategyGridStrategyRow({
+  strategy, threads, weeks, collapsed, onToggleCollapse, onUpdateGoal, readOnly, onUpdateMilestone, onDeleteMilestone,
+  collapsedInstitutionIds, onToggleInstitutionCollapse, onUpdateThreadGoal,
+  addingRouteFor, onStartAddRoute, onCancelAddRoute, onAddRoute,
+  addingThread, onStartAddThread, onCancelAddThread, onAddThread, trackOptions, contactOptions, onCreateContact,
+}) {
   const byWeek = useMemo(() => bucketThreadsByWeek(threads), [threads]);
   const lastMoveDate = threads.reduce((acc, t) => t.routes.reduce((acc2, r) => {
     const d = r.ended_at || r.milestones[r.milestones.length - 1]?.milestone_date;
@@ -8703,39 +8796,70 @@ function StrategyGridRow({ strategy, threads, weeks, collapsed, onToggleCollapse
   }, acc), "");
   return (
     <>
-      <div className="strategy-grid-rowhead" style={{ borderLeftColor: strategy.color || "var(--mango)" }}>
+      <div className="strategy-grid-rowhead strategy-grid-rowhead-strategy" style={{ borderLeftColor: strategy.color || "var(--mango)" }}>
+        <button type="button" className="link-btn strategy-grid-tree-toggle" onClick={onToggleCollapse}>{collapsed ? "▸" : "▾"}</button>
         <span className="strategy-grid-rowhead-dot" style={{ background: strategy.color || "var(--mango)" }} />
         <div className="strategy-grid-rowhead-body">
           <span className="strategy-grid-rowhead-name">{strategy.name}</span>
           <span className="strategy-grid-rowhead-goal"><StrategyMentionField value={strategy.goal || ""} onSave={(v) => onUpdateGoal(strategy.id, v)} readOnly={readOnly} placeholder="Overall goal" /></span>
           {lastMoveDate && <span className="strategy-grid-rowhead-move">Last movement {formatDate(lastMoveDate)}</span>}
         </div>
-        <button type="button" className="link-btn strategy-grid-rowhead-toggle" onClick={onToggleCollapse}>{collapsed ? "Expand" : "Collapse"}</button>
       </div>
       {collapsed ? (
-        <div className="strategy-grid-summary" style={{ gridColumn: `2 / span ${weeks.length}` }}>
-          <span className="strategy-grid-summary-text">
-            {threads.length} thread{threads.length === 1 ? "" : "s"}{lastMoveDate ? `, last movement ${formatDate(lastMoveDate)}` : ", no movement yet"}
-          </span>
-        </div>
-      ) : weeks.map((w) => (
-        <StrategyGridCell key={w.key} items={byWeek.get(w.key) || []} readOnly={readOnly}
-          onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
-      ))}
+        weeks.map((w) => (
+          <StrategyGridCell key={w.key} items={byWeek.get(w.key) || []} labelThread readOnly={readOnly}
+            onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+        ))
+      ) : (
+        <>
+          <StrategyGridBlankCells weeks={weeks} />
+          {threads.map((thread) => (
+            <StrategyGridInstitutionRow key={thread.id} thread={thread} weeks={weeks}
+              collapsed={collapsedInstitutionIds.has(thread.id)} onToggleCollapse={() => onToggleInstitutionCollapse(thread.id)}
+              onUpdateGoal={onUpdateThreadGoal} readOnly={readOnly} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+              addingRoute={addingRouteFor === thread.id} onStartAddRoute={() => onStartAddRoute(thread.id)} onCancelAddRoute={onCancelAddRoute} onAddRoute={onAddRoute} />
+          ))}
+          {!readOnly && (
+            <>
+              <div className="strategy-grid-rowhead strategy-grid-rowhead-addinst">
+                {addingThread ? (
+                  <StrategyAddThreadForm trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
+                    onAdd={(fks, title) => onAddThread(strategy.id, { title, fks })} onCancel={onCancelAddThread} />
+                ) : <button type="button" className="link-btn" onClick={onStartAddThread}>+ Add institution</button>}
+              </div>
+              <StrategyGridBlankCells weeks={weeks} />
+            </>
+          )}
+        </>
+      )}
     </>
   );
 }
-// The primary Timeline view: strategies are rows, weeks are columns. The
-// header row (week date ranges) and the header column (strategy name/goal)
-// stay pinned while the grid scrolls beneath them; scrolling right moves
-// forward through time. A range control bounds how far back the shared week
-// axis goes (it always still extends forward through the furthest planned
-// moment, so upcoming moves are never cut off).
-function StrategyGrid({ strategyThreadsList, onUpdateStrategyGoal, readOnly, onUpdateMilestone, onDeleteMilestone }) {
+// The primary Timeline view: a nested Strategy > Institution > Route tree in
+// the fixed left column, weeks as shared columns to its right. The header
+// row (week date ranges) and the header column stay pinned while the grid
+// scrolls beneath them; scrolling right moves forward through time. Each
+// level is independently collapsible: a collapsed institution merges its
+// routes' week cells, a collapsed strategy merges all of its institutions',
+// so the same grid zooms from a single route's own advancements out to a
+// whole strategy's, without changing the week axis underneath it. A range
+// control bounds how far back the shared axis goes (it always still extends
+// forward through the furthest planned moment, so upcoming moves are never
+// cut off).
+function StrategyGrid({
+  strategyThreadsList, onUpdateStrategyGoal, onUpdateThreadGoal, readOnly, onUpdateMilestone, onDeleteMilestone,
+  onAddThread, onAddRoute, trackOptions, contactOptions, onCreateContact,
+}) {
   const [rangeId, setRangeId] = useState("8w");
   const range = STRATEGY_GRID_RANGES.find((r) => r.id === rangeId) || STRATEGY_GRID_RANGES[0];
-  const [collapsedIds, setCollapsedIds] = useState(() => new Set());
-  const toggleCollapse = (id) => setCollapsedIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const [collapsedStrategyIds, setCollapsedStrategyIds] = useState(() => new Set());
+  const [collapsedInstitutionIds, setCollapsedInstitutionIds] = useState(() => new Set());
+  const toggleStrategyCollapse = (id) => setCollapsedStrategyIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const toggleInstitutionCollapse = (id) => setCollapsedInstitutionIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const collapseAll = () => setCollapsedStrategyIds(new Set(strategyThreadsList.map(({ strategy }) => strategy.id)));
+  const expandAll = () => { setCollapsedStrategyIds(new Set()); setCollapsedInstitutionIds(new Set()); };
+  const [addingThreadFor, setAddingThreadFor] = useState(null);
+  const [addingRouteFor, setAddingRouteFor] = useState(null);
   const weeks = useMemo(() => computeStrategyGridWeeks(strategyThreadsList, range.weeks), [strategyThreadsList, range.weeks]);
   const scrollRef = useRef(null);
   // Land scrolled to the right edge (This Week, and any planned weeks past
@@ -8749,6 +8873,10 @@ function StrategyGrid({ strategyThreadsList, onUpdateStrategyGoal, readOnly, onU
         <div className="strategy-view-toggle">
           {STRATEGY_GRID_RANGES.map((r) => <button key={r.id} type="button" className={rangeId === r.id ? "active" : ""} onClick={() => setRangeId(r.id)}>{r.label}</button>)}
         </div>
+        <div className="strategy-view-toggle">
+          <button type="button" onClick={expandAll}>Expand all</button>
+          <button type="button" onClick={collapseAll}>Collapse all</button>
+        </div>
         <div className="strategy-timeline-legend">
           {Object.entries(MOMENT_KIND_META).map(([k, meta]) => (
             <span key={k} className="strategy-timeline-legend-item"><span className={`moment-node-icon moment-node-icon-${k}`}>{meta.icon}</span>{meta.label}</span>
@@ -8759,7 +8887,7 @@ function StrategyGrid({ strategyThreadsList, onUpdateStrategyGoal, readOnly, onU
         <div className="empty-small">No strategies yet. Create one to start mapping routes.</div>
       ) : (
         <div className="strategy-grid-wrap" ref={scrollRef}>
-          <div className="strategy-grid" style={{ gridTemplateColumns: `220px repeat(${weeks.length}, 200px)` }}>
+          <div className="strategy-grid" style={{ gridTemplateColumns: `260px repeat(${weeks.length}, 200px)`, width: `${260 + weeks.length * 200}px` }}>
             <div className="strategy-grid-corner" />
             {weeks.map((w) => (
               <div key={w.key} className={`strategy-grid-weekhead ${w.offset === 0 ? "strategy-grid-weekhead-current" : ""} ${w.offset > 0 ? "strategy-grid-weekhead-future" : ""}`}>
@@ -8767,10 +8895,20 @@ function StrategyGrid({ strategyThreadsList, onUpdateStrategyGoal, readOnly, onU
               </div>
             ))}
             {strategyThreadsList.map(({ strategy, threads }) => (
-              <StrategyGridRow key={strategy.id} strategy={strategy} threads={threads} weeks={weeks}
-                collapsed={collapsedIds.has(strategy.id)} onToggleCollapse={() => toggleCollapse(strategy.id)}
-                onUpdateGoal={onUpdateStrategyGoal} readOnly={readOnly}
-                onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+              <StrategyGridStrategyRow key={strategy.id} strategy={strategy} threads={threads} weeks={weeks}
+                collapsed={collapsedStrategyIds.has(strategy.id)} onToggleCollapse={() => toggleStrategyCollapse(strategy.id)}
+                onUpdateGoal={onUpdateStrategyGoal} onUpdateThreadGoal={onUpdateThreadGoal} readOnly={readOnly}
+                onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+                collapsedInstitutionIds={collapsedInstitutionIds} onToggleInstitutionCollapse={toggleInstitutionCollapse}
+                addingRouteFor={addingRouteFor}
+                onStartAddRoute={(threadId) => setAddingRouteFor(threadId)}
+                onCancelAddRoute={() => setAddingRouteFor(null)}
+                onAddRoute={(threadId, title) => { onAddRoute(threadId, title); setAddingRouteFor(null); }}
+                addingThread={addingThreadFor === strategy.id}
+                onStartAddThread={() => setAddingThreadFor(strategy.id)}
+                onCancelAddThread={() => setAddingThreadFor(null)}
+                onAddThread={(sid, vals) => { onAddThread(sid, vals); setAddingThreadFor(null); }}
+                trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact} />
             ))}
           </div>
         </div>
@@ -8855,8 +8993,10 @@ function StrategyTab({
 
           {mode === "timeline" ? (
             <StrategyGrid strategyThreadsList={allStrategyThreadsList}
-              onUpdateStrategyGoal={(id, v) => onUpdateStrategy(id, { goal: v })} readOnly={readOnly}
-              onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+              onUpdateStrategyGoal={(id, v) => onUpdateStrategy(id, { goal: v })} onUpdateThreadGoal={onUpdateThreadGoal} readOnly={readOnly}
+              onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+              onAddThread={onAddThread} onAddRoute={onAddRoute}
+              trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact} />
           ) : (
             <>
               {strategies.length > 1 && (
