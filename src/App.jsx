@@ -7793,18 +7793,9 @@ function ExecTrackUpdateList({ list, onOpenNote }) {
 // terminus glyph since a tracked institution/person is not a route.
 function EntityProgressTrack({ milestones, fks, readOnly, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onOpenPull }) {
   const [adding, setAdding] = useState(false);
-  const [editingId, setEditingId] = useState(null);
   return (
     <div className="route-track">
-      <div className="route-track-line">
-        {milestones.map((m) => (
-          <RouteMilestoneChip key={m.id} milestone={m} readOnly={readOnly} editing={editingId === m.id}
-            onEdit={() => setEditingId(m.id)} onCancel={() => setEditingId(null)}
-            onSave={(patch) => { onUpdateMilestone(m.id, patch); setEditingId(null); }}
-            onDelete={() => onDeleteMilestone(m.id)} />
-        ))}
-        {milestones.length === 0 && <span className="route-track-empty">No progress logged yet.</span>}
-      </div>
+      <MomentTrackLine milestones={milestones} readOnly={readOnly} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
       {!readOnly && (
         <div className="route-track-actions">
           {adding ? (
@@ -8206,35 +8197,137 @@ function MilestoneEditForm({ milestone, onCancel, onSave }) {
 
 // One milestone on a track: a dated chip, click to edit in place, an always
 // visible delete x. @ mentions in the title render as blue clickable chips.
-function RouteMilestoneChip({ milestone, readOnly, editing, onEdit, onCancel, onSave, onDelete }) {
+// A moment's TYPE, derived (no schema change): a future date is "planned"
+// regardless of anything else; otherwise a manually-flagged setback wins;
+// otherwise a moment pulled from stage_history (its source_ref carries the
+// "stage:" prefix, see "Pull existing moments") reads as a stage change;
+// everything else is a plain manual milestone.
+const MOMENT_KIND_META = {
+  planned: { icon: "◇", label: "Planned" },
+  setback: { icon: "⚠", label: "Setback" },
+  stage: { icon: "▲", label: "Stage change" },
+  manual: { icon: "●", label: "Milestone" },
+};
+function momentKind(m, todayISO) {
+  if (m.milestone_date > todayISO) return "planned";
+  if (m.is_setback) return "setback";
+  if ((m.source_ref || "").startsWith("stage:")) return "stage";
+  return "manual";
+}
+// A connector's width scales with the days between two moments (longer gap,
+// longer connector), clamped so it never dominates the row; a gap past this
+// many days reads as a stall, not just a wait.
+const CONNECTOR_STALL_DAYS = 14;
+const connectorWidth = (days) => Math.max(20, Math.min(96, 20 + days * 3));
+
+// One moment on a track: a labeled, dated, kind-colored node, not a bare dot,
+// so scanning a lane left to right reads as a sentence of progress. Click to
+// edit in place (unless readOnly); delete is always visible. A future-dated
+// moment (planned) renders outlined/dashed rather than filled, a setback in
+// warning color, a stage-change and a manual milestone each with their own
+// icon; a moment dated in the current week gets a subtle highlight ring.
+function MomentNode({ milestone, todayISO, readOnly, editing, onEdit, onCancel, onSave, onDelete }) {
   if (editing) return <MilestoneEditForm milestone={milestone} onCancel={onCancel} onSave={onSave} />;
+  const kind = momentKind(milestone, todayISO);
+  const meta = MOMENT_KIND_META[kind];
+  const plainTitle = mentionsToPlainText(milestone.title);
+  const plainDetail = milestone.detail ? mentionsToPlainText(milestone.detail) : "";
+  const tip = `${formatDate(milestone.milestone_date)}: ${plainTitle}${plainDetail ? `\n${plainDetail}` : ""}`;
   return (
-    <div className={`route-chip ${milestone.is_setback ? "route-chip-setback" : ""}`} onClick={readOnly ? undefined : onEdit} title={milestone.detail ? mentionsToPlainText(milestone.detail) : ""}>
-      <span className="route-chip-date">{formatDate(milestone.milestone_date)}</span>
-      <span className="route-chip-title"><MentionText text={milestone.title} /></span>
-      {!readOnly && <button type="button" className="route-chip-del" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete milestone">✕</button>}
+    <div className={`moment-node moment-node-${kind} ${isThisWeek(milestone.milestone_date) ? "moment-node-thisweek" : ""} ${readOnly ? "" : "moment-node-clickable"}`}
+      onClick={readOnly ? undefined : onEdit} title={tip}>
+      <span className="moment-node-icon" aria-hidden="true">{meta.icon}</span>
+      <span className="moment-node-body">
+        <span className="moment-node-title"><MentionText text={milestone.title} /></span>
+        <span className="moment-node-date">{formatDate(milestone.milestone_date)}</span>
+      </span>
+      {!readOnly && <button type="button" className="moment-node-del" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete moment">✕</button>}
     </div>
   );
 }
 
-// A route's own horizontal progress track: milestones in date order, ending in
-// a terminus glyph for its state (open arrow / red X / green check / pause).
-function RouteTrack({ route, readOnly, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onOpenPull }) {
-  const [adding, setAdding] = useState(false);
-  const [editingId, setEditingId] = useState(null);
-  const dead = route.state === "dead_end";
+// The arrow between two consecutive moments. Its width encodes elapsed time;
+// past CONNECTOR_STALL_DAYS it renders visually distinct (dashed, muted) so a
+// long silence on a route is obvious without reading either date.
+function MomentConnector({ fromDate, toDate }) {
+  const days = Math.max(0, Math.round((new Date(toDate) - new Date(fromDate)) / 86400000));
+  const stalled = days >= CONNECTOR_STALL_DAYS;
   return (
-    <div className={`route-track ${dead ? "route-track-dead" : ""}`}>
-      <div className="route-track-line">
-        {route.milestones.map((m) => (
-          <RouteMilestoneChip key={m.id} milestone={m} readOnly={readOnly} editing={editingId === m.id}
+    <span className={`moment-connector ${stalled ? "moment-connector-stalled" : ""}`} style={{ width: connectorWidth(days) }}
+      title={days > 0 ? `${days} day${days === 1 ? "" : "s"}${stalled ? ", stalled" : ""}` : ""}>
+      <span className="moment-connector-arrow">→</span>
+    </span>
+  );
+}
+
+// A route's terminus: not just a glyph, a node in the same visual language as
+// a moment (icon, a short label, its date), so the end of the story reads the
+// same way the moments leading up to it do. Active shows an open arrow,
+// paused a pause mark, dead_end a red X, succeeded a green check; the last
+// two fold a short preview of the outcome note into the label.
+function RouteTerminusNode({ route }) {
+  const meta = strategyRouteStateMeta(route.state);
+  const isEnd = route.state === "dead_end" || route.state === "succeeded";
+  const label = isEnd ? meta.label : (route.state === "paused" ? "Paused" : "Ongoing");
+  const outcomePlain = route.outcome_note ? mentionsToPlainText(route.outcome_note) : "";
+  const tip = `${label}${route.ended_at ? `, ${formatDate(route.ended_at)}` : ""}${outcomePlain ? `\n${outcomePlain}` : ""}`;
+  return (
+    <div className={`moment-node moment-terminus moment-terminus-${route.state}`} title={tip}>
+      <span className="moment-node-icon" aria-hidden="true">{strategyEndGlyph(route.state)}</span>
+      <span className="moment-node-body">
+        <span className="moment-node-title">{label}{outcomePlain ? `: ${outcomePlain}` : ""}</span>
+        {route.ended_at && <span className="moment-node-date">{formatDate(route.ended_at)}</span>}
+      </span>
+    </div>
+  );
+}
+
+// The MOMENT_CLUSTER_LIMIT most recent moments render inline, connected by
+// time-scaled arrows; anything older sits behind a "+N earlier" expander, so
+// a busy track stays readable by default rather than crowding into unreadable
+// bare dots. An optional terminusNode (a route's state) closes the line.
+const MOMENT_CLUSTER_LIMIT = 6;
+function MomentTrackLine({ milestones, readOnly, onUpdateMilestone, onDeleteMilestone, terminusNode }) {
+  const [editingId, setEditingId] = useState(null);
+  const [showAll, setShowAll] = useState(false);
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const hidden = !showAll && milestones.length > MOMENT_CLUSTER_LIMIT ? milestones.length - MOMENT_CLUSTER_LIMIT : 0;
+  const visible = hidden ? milestones.slice(hidden) : milestones;
+  return (
+    <div className="moment-track-line">
+      {hidden > 0 && <button type="button" className="moment-cluster-btn" onClick={() => setShowAll(true)}>+{hidden} earlier</button>}
+      {visible.map((m, i) => (
+        <Fragment key={m.id}>
+          {i > 0 && <MomentConnector fromDate={visible[i - 1].milestone_date} toDate={m.milestone_date} />}
+          <MomentNode milestone={m} todayISO={todayISO} readOnly={readOnly} editing={editingId === m.id}
             onEdit={() => setEditingId(m.id)} onCancel={() => setEditingId(null)}
             onSave={(patch) => { onUpdateMilestone(m.id, patch); setEditingId(null); }}
             onDelete={() => onDeleteMilestone(m.id)} />
-        ))}
-        {route.milestones.length === 0 && <span className="route-track-empty">No milestones yet.</span>}
-        <span className={`route-track-end route-track-end-${route.state}`} title={strategyRouteStateMeta(route.state).label}>{strategyEndGlyph(route.state)}</span>
-      </div>
+        </Fragment>
+      ))}
+      {visible.length === 0 && !terminusNode && <span className="route-track-empty">No progress logged yet.</span>}
+      {terminusNode && (
+        <>
+          {visible.length > 0 && <MomentConnector fromDate={visible[visible.length - 1].milestone_date} toDate={terminusNode.date} />}
+          {terminusNode.node}
+        </>
+      )}
+    </div>
+  );
+}
+
+// A route's own horizontal progress track: moments as labeled connected
+// nodes, ending in a terminus node for its state (open arrow / red X / green
+// check / pause).
+function RouteTrack({ route, readOnly, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onOpenPull }) {
+  const [adding, setAdding] = useState(false);
+  const dead = route.state === "dead_end";
+  const terminusDate = route.ended_at || new Date().toISOString().slice(0, 10);
+  return (
+    <div className={`route-track ${dead ? "route-track-dead" : ""}`}>
+      <MomentTrackLine milestones={route.milestones} readOnly={readOnly}
+        onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+        terminusNode={{ date: terminusDate, node: <RouteTerminusNode route={route} /> }} />
       {route.outcome_note && (route.state === "dead_end" || route.state === "succeeded") && (
         <div className={`route-outcome ${route.state === "dead_end" ? "route-outcome-dead" : "route-outcome-success"}`}><MentionText text={route.outcome_note} /></div>
       )}
@@ -8398,55 +8491,59 @@ function StrategyBoardView({ threads, expandedIds, onToggleExpand, ...handlers }
   );
 }
 
-// One swimlane per route, grouped under its thread's header, all sharing one
-// proportional date axis so relative timing across routes is comparable.
-// Dead-end lanes fade and show their red X terminus exactly at ended_at.
-function StrategyTimelineView({ threads, onOpenPull }) {
-  const today = new Date().toISOString().slice(0, 10);
-  const allDates = [today];
-  threads.forEach((t) => t.routes.forEach((r) => { r.milestones.forEach((m) => allDates.push(m.milestone_date)); if (r.ended_at) allDates.push(r.ended_at); }));
-  const minD = allDates.reduce((a, b) => (a < b ? a : b));
-  const maxD = allDates.reduce((a, b) => (a > b ? a : b));
-  const span = Math.max(1, (new Date(maxD) - new Date(minD)) / 86400000);
-  const pct = (d) => Math.min(100, Math.max(0, ((new Date(d) - new Date(minD)) / 86400000 / span) * 100));
-  const weekStartPct = pct(startOfWeek(new Date()).toISOString().slice(0, 10));
-  const weekEndPct = pct(addDaysLocal(startOfWeek(new Date()), 6).toISOString().slice(0, 10));
+// One swimlane per route, grouped under its thread's header. Moments render
+// as the same labeled, connected nodes as a route's own track (MomentTrackLine),
+// so a lane reads left to right as a sentence of progress rather than
+// unlabeled dots on a date axis; a dead-end lane fades with its red X
+// terminus, a succeeded one ends in a green check. The lane label shows the
+// route's state and moment count, and the thread header shows its goal and
+// last movement, so what a lane is about is legible before reading a single
+// node.
+function StrategyTimelineView({ threads, readOnly, onOpenPull, onUpdateMilestone, onDeleteMilestone }) {
+  const todayISO = new Date().toISOString().slice(0, 10);
   return (
     <div className="strategy-timeline">
-      <div className="strategy-timeline-scale"><span>{formatDate(minD)}</span><span className="strategy-timeline-today-label">This week</span><span>{formatDate(maxD)}</span></div>
-      {threads.map((t) => (
-        <div key={t.id} className="strategy-timeline-group">
-          <div className="strategy-timeline-group-head">
-            <button type="button" className="exec-track-name" onClick={() => t.onOpen && t.onOpen()} disabled={!t.onOpen}>{t.name}</button>
-            <span className="strategy-timeline-goal">{t.goal ? <MentionText text={t.goal} /> : "No goal set"}</span>
+      <div className="strategy-timeline-legend">
+        {Object.entries(MOMENT_KIND_META).map(([k, meta]) => (
+          <span key={k} className="strategy-timeline-legend-item"><span className={`moment-node-icon moment-node-icon-${k}`}>{meta.icon}</span>{meta.label}</span>
+        ))}
+        <span className="strategy-timeline-legend-item"><span className="strategy-timeline-legend-week" /> This week</span>
+      </div>
+      {threads.map((t) => {
+        const lastMoveDate = t.routes.reduce((acc, r) => {
+          const d = r.ended_at || r.milestones[r.milestones.length - 1]?.milestone_date;
+          return d && d > acc ? d : acc;
+        }, "");
+        return (
+          <div key={t.id} className="strategy-timeline-group">
+            <div className="strategy-timeline-group-head">
+              <button type="button" className="exec-track-name" onClick={() => t.onOpen && t.onOpen()} disabled={!t.onOpen}>{t.name}</button>
+              <span className="strategy-timeline-goal">{t.goal ? <MentionText text={t.goal} /> : "No goal set"}</span>
+              {lastMoveDate && <span className="strategy-timeline-lastmove">Last movement {formatDate(lastMoveDate)}</span>}
+            </div>
+            {t.routes.map((route) => {
+              const meta = strategyRouteStateMeta(route.state);
+              const dead = route.state === "dead_end";
+              const terminusDate = route.ended_at || todayISO;
+              return (
+                <div key={route.id} className={`strategy-swimlane ${dead ? "strategy-swimlane-dead" : ""}`}>
+                  <div className="strategy-swimlane-label">
+                    <span className="badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{route.title}</span>
+                    <span className="strategy-swimlane-state">{meta.label}{route.milestones.length ? `, ${route.milestones.length} moment${route.milestones.length === 1 ? "" : "s"}` : ""}</span>
+                    {onOpenPull && <button type="button" className="link-btn strategy-swimlane-pull" onClick={() => onOpenPull({ thread_id: t.id, route_id: route.id }, { deal_id: t.deal_id, enabler_id: t.enabler_id, organization_id: t.organization_id, contact_id: t.contact_id }, route.title)}>Pull moments</button>}
+                  </div>
+                  <div className="strategy-swimlane-track">
+                    <MomentTrackLine milestones={route.milestones} readOnly={readOnly}
+                      onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+                      terminusNode={{ date: terminusDate, node: <RouteTerminusNode route={route} /> }} />
+                  </div>
+                </div>
+              );
+            })}
+            {t.routes.length === 0 && <div className="strategy-mini-empty">No routes yet.</div>}
           </div>
-          {t.routes.map((route) => {
-            const meta = strategyRouteStateMeta(route.state);
-            const dead = route.state === "dead_end";
-            const lastMilestonePct = route.milestones.length ? pct(route.milestones[route.milestones.length - 1].milestone_date) : 0;
-            const endPct = route.ended_at ? pct(route.ended_at) : Math.max(pct(today), lastMilestonePct);
-            return (
-              <div key={route.id} className={`strategy-swimlane ${dead ? "strategy-swimlane-dead" : ""}`}>
-                <div className="strategy-swimlane-label">
-                  <span className="badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{route.title}</span>
-                  {onOpenPull && <button type="button" className="link-btn strategy-swimlane-pull" onClick={() => onOpenPull({ thread_id: t.id, route_id: route.id }, { deal_id: t.deal_id, enabler_id: t.enabler_id, organization_id: t.organization_id, contact_id: t.contact_id }, route.title)}>Pull moments</button>}
-                </div>
-                <div className="strategy-swimlane-track">
-                  <div className="strategy-swimlane-week" style={{ left: `${weekStartPct}%`, width: `${Math.max(0.6, weekEndPct - weekStartPct)}%` }} />
-                  <div className="strategy-swimlane-line" style={{ width: `${endPct}%`, background: dead ? "var(--border)" : meta.color + "66" }} />
-                  {route.milestones.map((m) => (
-                    <span key={m.id} className={`strategy-swimlane-dot ${m.is_setback ? "strategy-swimlane-dot-setback" : ""}`}
-                      style={{ left: `${pct(m.milestone_date)}%`, background: dead ? "var(--muted)" : meta.color }}
-                      title={`${formatDate(m.milestone_date)}: ${mentionsToPlainText(m.title)}`} />
-                  ))}
-                  <span className={`strategy-swimlane-end strategy-swimlane-end-${route.state}`} style={{ left: `${endPct}%` }} title={meta.label}>{strategyEndGlyph(route.state)}</span>
-                </div>
-              </div>
-            );
-          })}
-          {t.routes.length === 0 && <div className="strategy-mini-empty">No routes yet.</div>}
-        </div>
-      ))}
+        );
+      })}
       {threads.length === 0 && <div className="empty-small">No institutions or people threaded into this strategy yet.</div>}
     </div>
   );
@@ -8627,7 +8724,8 @@ function StrategyTab({
               onUpdateGoal={onUpdateThreadGoal} onDeleteThread={onDeleteThread} onAddRoute={onAddRoute} onUpdateRoute={onUpdateRoute} onDeleteRoute={onDeleteRoute}
               onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onOpenPull={openPull} />
           ) : (
-            <StrategyTimelineView threads={threads} onOpenPull={readOnly ? null : openPull} />
+            <StrategyTimelineView threads={threads} readOnly={readOnly} onOpenPull={readOnly ? null : openPull}
+              onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
           )}
         </>
       )}

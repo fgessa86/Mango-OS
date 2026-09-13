@@ -2320,29 +2320,67 @@ body.exec-presenting-body { overflow: hidden; }
 
 .route-track { margin-top: 8px; }
 .route-track-dead { opacity: .62; }
-.route-track-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 0; }
+.route-track-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
 .route-track-empty { font-size: 12px; color: var(--muted); }
-.route-track-end { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 50%; font-size: 13px; font-weight: 800; flex-shrink: 0; }
-.route-track-end-active { background: #2A6FDB22; color: #2A6FDB; }
-.route-track-end-paused { background: #9A8F7C22; color: #9A8F7C; }
-.route-track-end-succeeded { background: #1F8A5B22; color: #1F8A5B; }
-.route-track-end-dead_end { background: #D9483A22; color: #D9483A; border: 1.5px solid #D9483A55; }
-.route-track-actions { display: flex; align-items: center; gap: 12px; margin-top: 6px; flex-wrap: wrap; }
-
-.route-chip { display: flex; align-items: center; gap: 6px; background: var(--card); border: 1px solid var(--border); border-radius: 9px; padding: 5px 8px; font-size: 12px; cursor: pointer; max-width: 260px; }
-.route-chip:hover { border-color: var(--muted); }
-.route-chip-setback { border-color: #D9483A55; background: #D9483A0d; }
-.route-chip-date { color: var(--muted); font-size: 10.5px; flex-shrink: 0; white-space: nowrap; }
-.route-chip-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.route-chip-del { border: none; background: none; cursor: pointer; color: var(--muted); font-size: 11px; padding: 0 2px; opacity: .6; flex-shrink: 0; }
-.route-chip-del:hover { opacity: 1; color: #EF4444; }
-.route-chip-edit { display: flex; flex-direction: column; gap: 6px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px; width: 100%; max-width: 340px; }
-.route-chip-edit-actions { display: flex; align-items: center; gap: 10px; }
-.route-chip-setback-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
 
 .route-outcome { margin-top: 8px; font-size: 12.5px; padding: 6px 10px; border-radius: 8px; }
 .route-outcome-dead { background: #D9483A0d; color: #93312A; border-left: 3px solid #D9483A; }
 .route-outcome-success { background: #1F8A5B0d; color: #17663f; border-left: 3px solid #1F8A5B; }
+
+/* Moment nodes: a labeled, dated, kind-colored chip, not a bare dot, so a
+   track reads left to right as a sentence of progress. Shared by a route's
+   own track, the plain per-entity Progress Track, and the Strategy timeline. */
+.moment-track-line { display: flex; align-items: center; gap: 0; flex-wrap: wrap; row-gap: 8px; padding: 4px 0; overflow-x: auto; }
+.moment-cluster-btn { border: 1px dashed var(--border); background: var(--card); color: var(--muted); font-family: inherit; font-size: 11px; font-weight: 650; border-radius: 999px; padding: 4px 10px; cursor: pointer; margin-right: 6px; flex-shrink: 0; }
+.moment-cluster-btn:hover { color: var(--text-2); border-color: var(--muted); }
+.moment-node {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 5px 9px; max-width: 190px;
+}
+.moment-node-clickable { cursor: pointer; }
+.moment-node-clickable:hover { border-color: var(--muted); }
+.moment-node-icon { font-size: 11px; flex-shrink: 0; line-height: 1; }
+.moment-node-body { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.moment-node-title { font-size: 12px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.moment-node-date { font-size: 10px; color: var(--muted); white-space: nowrap; }
+.moment-node-del { border: none; background: none; cursor: pointer; color: var(--muted); font-size: 10.5px; padding: 0 1px; opacity: .55; flex-shrink: 0; align-self: flex-start; }
+.moment-node-del:hover { opacity: 1; color: #EF4444; }
+/* Kind: stage change (auto, from pipeline movement). */
+.moment-node-stage { border-color: #2A6FDB44; background: #2A6FDB0d; }
+.moment-node-stage .moment-node-icon { color: #2A6FDB; }
+/* Kind: plain manual milestone, the default warm neutral. */
+.moment-node-manual .moment-node-icon { color: #8A6D3B; }
+/* Kind: setback, warning-colored regardless of source. */
+.moment-node-setback { border-color: #D9483A55; background: #D9483A0d; }
+.moment-node-setback .moment-node-icon, .moment-node-setback .moment-node-title { color: #B0392E; }
+/* Kind: planned (future-dated), outlined/dashed rather than filled. */
+.moment-node-planned { background: transparent; border-style: dashed; border-color: var(--muted); }
+.moment-node-planned .moment-node-title { color: var(--text-2); }
+/* This week: a subtle gold highlight ring. */
+.moment-node-thisweek { box-shadow: 0 0 0 2px #F5A62355; border-color: #F5A62388; }
+/* The connecting arrow between two consecutive moments: its width (set
+   inline, scaled by elapsed days) IS the time indicator; a stalled gap
+   (14+ days) renders dashed and muted rather than a solid line. */
+.moment-connector { position: relative; display: inline-flex; align-items: center; height: 20px; flex-shrink: 0; }
+.moment-connector::before { content: ""; position: absolute; left: 0; right: 10px; top: 50%; height: 2px; background: var(--border); transform: translateY(-50%); }
+.moment-connector-stalled::before { background: repeating-linear-gradient(to right, #D9483A66 0 4px, transparent 4px 8px); }
+.moment-connector-arrow { position: relative; margin-left: auto; font-size: 11px; color: var(--muted); }
+.moment-connector-stalled .moment-connector-arrow { color: #B0392E88; }
+/* A route's terminus is a node too, just a distinct shape (pill) so the end
+   of the story reads differently from the moments leading up to it. */
+.moment-terminus { border-radius: 999px; font-weight: 650; max-width: 240px; }
+.moment-terminus-active .moment-node-icon { color: #2A6FDB; }
+.moment-terminus-paused .moment-node-icon { color: #9A8F7C; }
+.moment-terminus-succeeded { border-color: #1F8A5B66; background: #1F8A5B14; }
+.moment-terminus-succeeded .moment-node-icon, .moment-terminus-succeeded .moment-node-title { color: #17663f; }
+.moment-terminus-dead_end { border-color: #D9483A66; background: #D9483A14; }
+.moment-terminus-dead_end .moment-node-icon, .moment-terminus-dead_end .moment-node-title { color: #93312A; }
+
+/* Milestone add/edit forms, unchanged shape from before this redesign. */
+.route-chip-edit { display: flex; flex-direction: column; gap: 6px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px; width: 100%; max-width: 340px; }
+.route-chip-edit-actions { display: flex; align-items: center; gap: 10px; }
+.route-chip-setback-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
 
 .strategy-mini-bars { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .strategy-mini-empty { font-size: 12px; color: var(--muted); }
@@ -2359,25 +2397,26 @@ body.exec-presenting-body { overflow: hidden; }
 .route-mini-end-dead_end { background: #D9483A22; color: #D9483A; }
 
 .strategy-timeline { display: flex; flex-direction: column; gap: 22px; margin-top: 10px; }
-.strategy-timeline-scale { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); padding: 0 4px; }
-.strategy-timeline-today-label { font-weight: 700; color: #B77400; }
+/* A small legend explaining the node icons/colors, since Timeline is the
+   densest view and a first-time reader needs the key once, not per lane. */
+.strategy-timeline-legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 11px; color: var(--muted); padding: 0 2px 4px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.strategy-timeline-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.strategy-timeline-legend-week { display: inline-block; width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 0 2px #F5A62355; border: 1px solid #F5A62388; }
+.moment-node-icon-stage { color: #2A6FDB; }
+.moment-node-icon-manual { color: #8A6D3B; }
+.moment-node-icon-setback { color: #B0392E; }
+.moment-node-icon-planned { color: var(--muted); }
 .strategy-timeline-group { border: 1px solid var(--border); border-radius: 14px; background: var(--surface); padding: 14px 16px; }
 .strategy-timeline-group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
 .strategy-timeline-goal { font-size: 12px; color: var(--muted); }
-.strategy-swimlane { display: flex; align-items: center; gap: 12px; padding: 6px 0; }
-.strategy-swimlane-dead { opacity: .58; }
-.strategy-swimlane-label { width: 180px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; }
+.strategy-timeline-lastmove { font-size: 11px; color: var(--muted); margin-left: auto; }
+.strategy-swimlane { display: flex; align-items: flex-start; gap: 12px; padding: 8px 0; border-top: 1px solid var(--border); }
+.strategy-swimlane:first-of-type { border-top: none; }
+.strategy-swimlane-dead { opacity: .6; }
+.strategy-swimlane-label { width: 190px; flex-shrink: 0; display: flex; flex-direction: column; gap: 3px; padding-top: 4px; }
+.strategy-swimlane-state { font-size: 10.5px; color: var(--muted); }
 .strategy-swimlane-pull { font-size: 10.5px; align-self: flex-start; }
-.strategy-swimlane-track { position: relative; flex: 1; height: 24px; }
-.strategy-swimlane-week { position: absolute; top: 0; bottom: 0; background: #F5A62318; border-radius: 4px; }
-.strategy-swimlane-line { position: absolute; left: 0; top: 50%; height: 4px; transform: translateY(-50%); border-radius: 2px; }
-.strategy-swimlane-dot { position: absolute; top: 50%; width: 9px; height: 9px; border-radius: 50%; transform: translate(-50%, -50%); border: 2px solid var(--surface); cursor: default; }
-.strategy-swimlane-dot-setback { border-color: #D9483A; }
-.strategy-swimlane-end { position: absolute; top: 50%; transform: translate(-50%, -50%); display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; font-size: 11px; font-weight: 800; }
-.strategy-swimlane-end-active { background: #2A6FDB22; color: #2A6FDB; }
-.strategy-swimlane-end-paused { background: #9A8F7C22; color: #9A8F7C; }
-.strategy-swimlane-end-succeeded { background: #1F8A5B22; color: #1F8A5B; }
-.strategy-swimlane-end-dead_end { background: #D9483A22; color: #D9483A; border: 1.5px solid #D9483A55; }
+.strategy-swimlane-track { flex: 1; min-width: 0; }
 
 .pull-moments-modal { max-width: 620px; }
 .pull-moments-tools { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; font-size: 12.5px; }
