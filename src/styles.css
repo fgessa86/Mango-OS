@@ -2396,59 +2396,56 @@ body.exec-presenting-body { overflow: hidden; }
 .route-mini-end-succeeded { background: #1F8A5B22; color: #1F8A5B; }
 .route-mini-end-dead_end { background: #D9483A22; color: #D9483A; }
 
-.strategy-timeline { display: flex; flex-direction: column; gap: 22px; margin-top: 10px; }
-/* A small legend explaining the node icons/colors, since Timeline is the
-   densest view and a first-time reader needs the key once, not per lane. */
-.strategy-timeline-legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 11px; color: var(--muted); padding: 0 2px 4px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+/* A small legend explaining the node icons/colors, since the grid is the
+   densest view and a first-time reader needs the key once, not per cell. */
+.strategy-timeline-legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
 .strategy-timeline-legend-item { display: inline-flex; align-items: center; gap: 5px; }
-.strategy-timeline-legend-week { display: inline-block; width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 0 2px #F5A62355; border: 1px solid #F5A62388; }
 .moment-node-icon-stage { color: #2A6FDB; }
 .moment-node-icon-manual { color: #8A6D3B; }
 .moment-node-icon-setback { color: #B0392E; }
 .moment-node-icon-planned { color: var(--muted); }
-.strategy-timeline-group { border: 1px solid var(--border); border-radius: 14px; background: var(--surface); padding: 14px 16px; }
-.strategy-timeline-group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
-.strategy-timeline-goal { font-size: 12px; color: var(--muted); }
-.strategy-timeline-lastmove { font-size: 11px; color: var(--muted); margin-left: auto; }
-.strategy-swimlane { display: flex; align-items: flex-start; gap: 12px; padding: 8px 0; border-top: 1px solid var(--border); }
-.strategy-swimlane:first-of-type { border-top: none; }
-.strategy-swimlane-dead { opacity: .6; }
-.strategy-swimlane-label { width: 190px; flex-shrink: 0; display: flex; flex-direction: column; gap: 3px; padding-top: 4px; }
-.strategy-swimlane-state { font-size: 10.5px; color: var(--muted); }
-.strategy-swimlane-pull { font-size: 10.5px; align-self: flex-start; }
-.strategy-swimlane-track { flex: 1; min-width: 0; }
 
-/* Vertical Timeline (Structure B): every strategy its own section, weeks
-   stacked down the page, most recent at the top. */
-.strategy-vertical { display: flex; flex-direction: column; gap: 18px; margin-top: 10px; }
-.strategy-vertical-toolbar { display: flex; align-items: center; gap: 10px; }
-.strategy-vsection { border: 2px solid var(--border); border-radius: 16px; overflow: hidden; background: var(--surface); }
-.strategy-vsection-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 16px; border-bottom: 1px solid var(--border); }
-.strategy-vsection-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
-.strategy-vsection-name { font-size: 16px; font-weight: 800; color: var(--text); flex-shrink: 0; }
-.strategy-vsection-goal { flex: 1; min-width: 200px; font-size: 12.5px; }
-.strategy-vsection-toggle { font-size: 12px; flex-shrink: 0; }
-
-.strategy-week-stack { display: flex; flex-direction: column; padding: 4px 16px 12px; }
-.strategy-week-row { display: flex; gap: 16px; padding: 12px 4px; border-top: 1px solid var(--border); }
-.strategy-week-row:first-child { border-top: none; }
-.strategy-week-row-quiet { padding: 6px 4px; opacity: .6; }
-.strategy-week-row-future { border-top-style: dashed; }
-.strategy-week-row-current { background: linear-gradient(90deg, #F5A62314, transparent 60%); border-radius: 10px; padding-left: 10px; padding-right: 10px; margin: 0 -10px; }
-.strategy-week-row-current .strategy-week-row-title { color: #B77400; }
-.strategy-week-row-label { width: 150px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; padding-top: 2px; }
-.strategy-week-row-title { font-size: 12.5px; font-weight: 700; color: var(--text-2); }
-.strategy-week-row-range { font-size: 10.5px; color: var(--muted); }
-.strategy-week-row-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
-.strategy-week-row-empty { font-size: 11.5px; color: var(--muted); font-style: italic; align-self: center; }
-
-.strategy-week-group { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.strategy-week-group-name { border: none; background: none; padding: 0; font-family: inherit; font-size: 12.5px; font-weight: 700; color: #2A6FDB; cursor: pointer; flex-shrink: 0; }
-.strategy-week-group-name:hover { text-decoration: underline; }
-.strategy-week-group-name:disabled { color: var(--text-2); cursor: default; }
-.strategy-week-group-moments { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.strategy-week-moment { display: inline-flex; align-items: center; gap: 5px; }
-.strategy-week-moment-route { font-size: 10px; color: var(--muted); background: var(--card); border-radius: 6px; padding: 2px 6px; flex-shrink: 0; }
+/* Strategy Timeline grid: strategies are rows, weeks are columns. A single
+   CSS grid holds the corner cell, the week-header row, and every strategy
+   row's header + cells as direct children in document order, so the sticky
+   corner/header-row/header-column all line up against the exact same track
+   sizes without any manual width syncing between separate tables. */
+.strategy-grid-outer { margin-top: 10px; }
+.strategy-grid-toolbar { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-bottom: 10px; }
+.strategy-grid-wrap { overflow: auto; max-height: 72vh; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.strategy-grid { display: grid; }
+.strategy-grid-corner { position: sticky; top: 0; left: 0; z-index: 3; background: var(--surface); border-bottom: 1px solid var(--border); border-right: 2px solid var(--border); }
+.strategy-grid-weekhead {
+  position: sticky; top: 0; z-index: 2; background: var(--surface);
+  border-bottom: 1px solid var(--border); border-right: 1px solid var(--border);
+  padding: 8px 10px; font-size: 11.5px; font-weight: 700; color: var(--text-2); text-align: center;
+}
+.strategy-grid-weekhead-current { background: #F5A62322; color: #B77400; }
+.strategy-grid-weekhead-future { color: var(--muted); font-style: italic; }
+.strategy-grid-rowhead {
+  position: sticky; left: 0; z-index: 1; background: var(--surface);
+  border-right: 2px solid var(--border); border-top: 1px solid var(--border);
+  border-left: 4px solid; padding: 10px 12px 10px 10px; display: flex; align-items: flex-start; gap: 8px;
+}
+.strategy-grid-rowhead-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
+.strategy-grid-rowhead-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.strategy-grid-rowhead-name { font-size: 14px; font-weight: 800; color: var(--text); }
+.strategy-grid-rowhead-goal { font-size: 11.5px; }
+.strategy-grid-rowhead-move { font-size: 10.5px; color: var(--muted); }
+.strategy-grid-rowhead-toggle { font-size: 11px; flex-shrink: 0; white-space: nowrap; }
+.strategy-grid-cell {
+  border-right: 1px solid var(--border); border-top: 1px solid var(--border);
+  padding: 8px; display: flex; flex-direction: column; gap: 6px; min-width: 0;
+}
+.strategy-grid-cell-empty { background: transparent; }
+.strategy-grid-summary { border-top: 1px solid var(--border); min-width: 0; }
+.strategy-grid-summary-text { position: sticky; left: 220px; display: inline-block; padding: 10px 14px; font-size: 12px; color: var(--muted); font-style: italic; }
+.strategy-grid-moment { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.strategy-grid-moment-thread { border: none; background: none; padding: 0; font-family: inherit; font-size: 10.5px; font-weight: 700; color: #2A6FDB; cursor: pointer; text-align: left; }
+.strategy-grid-moment-thread:hover { text-decoration: underline; }
+.strategy-grid-moment-thread:disabled { color: var(--muted); cursor: default; }
+.strategy-grid-moment .moment-node { max-width: 100%; width: 100%; box-sizing: border-box; }
+.strategy-grid-more { align-self: flex-start; }
 
 .pull-moments-modal { max-width: 620px; }
 .pull-moments-tools { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; font-size: 12.5px; }
