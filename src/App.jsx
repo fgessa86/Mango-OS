@@ -8622,6 +8622,183 @@ function PullMomentsPanel({ title, candidates, onConfirm, onClose }) {
   );
 }
 
+/* ============================================================
+   Strategy Timeline, vertical layout ("Structure B"): every strategy is its
+   own full-width section stacked down the page; within a section, weeks
+   stack vertically, most recent at the top, going back as you scroll down.
+   Reads like a journal: current week anchored and emphasized, quiet weeks
+   shown as thin rows so a stall is as visible as an active week, planned
+   (future-dated) moments surface in the future week rows above "This Week".
+   ============================================================ */
+const STRATEGY_TIMELINE_RANGES = [
+  { id: "8w", label: "Last 8 weeks", weeks: 8 },
+  { id: "13w", label: "Last quarter", weeks: 13 },
+  { id: "all", label: "All", weeks: null },
+];
+const weeksBetweenDates = (a, b) => Math.max(0, Math.round((new Date(b) - new Date(a)) / (7 * 86400000)));
+
+// Buckets every milestone and route-terminus event across a set of resolved
+// threads into its calendar week (Sunday-based, the same convention as the
+// rest of the app), keyed by that week's start date.
+function bucketThreadsByWeek(threads) {
+  const byWeek = new Map();
+  const push = (weekKey, entry) => { if (!byWeek.has(weekKey)) byWeek.set(weekKey, []); byWeek.get(weekKey).push(entry); };
+  threads.forEach((t) => {
+    t.routes.forEach((r) => {
+      r.milestones.forEach((m) => {
+        const wk = startOfWeek(new Date(m.milestone_date)).toISOString().slice(0, 10);
+        push(wk, { threadId: t.id, name: t.name, onOpen: t.onOpen, route: r, kind: "milestone", milestone: m, date: m.milestone_date });
+      });
+      if (r.ended_at) {
+        const wk = startOfWeek(new Date(r.ended_at)).toISOString().slice(0, 10);
+        push(wk, { threadId: t.id, name: t.name, onOpen: t.onOpen, route: r, kind: "terminus", date: r.ended_at });
+      }
+    });
+  });
+  return byWeek;
+}
+// Groups one week's flat entry list by thread (institution/person), so a busy
+// week reads "Institution: what happened, what happened" rather than a
+// shuffled pile.
+function groupWeekItemsByThread(items) {
+  const map = new Map();
+  items.forEach((it) => {
+    if (!map.has(it.threadId)) map.set(it.threadId, { threadId: it.threadId, name: it.name, onOpen: it.onOpen, items: [] });
+    map.get(it.threadId).items.push(it);
+  });
+  return [...map.values()];
+}
+
+// One moment inside a week row: the same labeled node used everywhere else
+// (title, date, kind icon, planned/setback/stage styling), prefixed with its
+// route's title only when the thread has more than one route in play, so a
+// single-route institution stays uncluttered. Click to edit in place.
+function StrategyWeekMoment({ entry, showRoute, readOnly, onUpdateMilestone, onDeleteMilestone }) {
+  const [editing, setEditing] = useState(false);
+  const todayISO = new Date().toISOString().slice(0, 10);
+  return (
+    <div className="strategy-week-moment">
+      {showRoute && <span className="strategy-week-moment-route">{entry.route.title}</span>}
+      {entry.kind === "terminus" ? (
+        <RouteTerminusNode route={entry.route} />
+      ) : (
+        <MomentNode milestone={entry.milestone} todayISO={todayISO} readOnly={readOnly} editing={editing}
+          onEdit={() => setEditing(true)} onCancel={() => setEditing(false)}
+          onSave={(patch) => { onUpdateMilestone(entry.milestone.id, patch); setEditing(false); }}
+          onDelete={() => onDeleteMilestone(entry.milestone.id)} />
+      )}
+    </div>
+  );
+}
+function StrategyWeekGroup({ group, readOnly, onUpdateMilestone, onDeleteMilestone }) {
+  const showRoute = new Set(group.items.map((it) => it.route.id)).size > 1;
+  const sorted = [...group.items].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  return (
+    <div className="strategy-week-group">
+      <button type="button" className="strategy-week-group-name" onClick={() => group.onOpen && group.onOpen()} disabled={!group.onOpen}>{group.name}</button>
+      <div className="strategy-week-group-moments">
+        {sorted.map((entry) => (
+          <StrategyWeekMoment key={entry.kind === "terminus" ? `term-${entry.route.id}` : entry.milestone.id}
+            entry={entry} showRoute={showRoute} readOnly={readOnly}
+            onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+        ))}
+      </div>
+    </div>
+  );
+}
+// One week row: a label ("This Week" / "Last Week" / "N weeks ago" / "In N
+// weeks"), its date range, and what moved, grouped by institution. A quiet
+// week (nothing moved) renders as a slim, subtly marked row rather than being
+// skipped, so a run of silence is as visible as a run of activity. The
+// current week gets a highlighted band; future weeks (planned moments) get a
+// dashed left edge to match their outlined moment nodes.
+function StrategyWeekRow({ weekStart, offset, groups, readOnly, onUpdateMilestone, onDeleteMilestone }) {
+  const label = offset === 0 ? "This Week" : offset === -1 ? "Last Week" : offset === 1 ? "Next Week"
+    : offset < -1 ? `${-offset} weeks ago` : `In ${offset} weeks`;
+  const rangeEnd = addDaysLocal(weekStart, 6);
+  const quiet = groups.length === 0;
+  return (
+    <div className={`strategy-week-row ${offset === 0 ? "strategy-week-row-current" : ""} ${quiet ? "strategy-week-row-quiet" : ""} ${offset > 0 ? "strategy-week-row-future" : ""}`}>
+      <div className="strategy-week-row-label">
+        <span className="strategy-week-row-title">{label}</span>
+        <span className="strategy-week-row-range">{formatDate(weekStart)} to {formatDate(rangeEnd)}</span>
+      </div>
+      <div className="strategy-week-row-body">
+        {quiet
+          ? <span className="strategy-week-row-empty">No activity</span>
+          : groups.map((g) => <StrategyWeekGroup key={g.threadId} group={g} readOnly={readOnly} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />)}
+      </div>
+    </div>
+  );
+}
+// One strategy's full-width, clearly separated section: name, color, an
+// editable goal, collapse/expand, then its continuous week stack (no gaps),
+// spanning back `rangeWeeks` (or to its earliest moment when "All") and
+// forward to its furthest planned moment, if any.
+function StrategyVerticalSection({ strategy, threads, collapsed, onToggleCollapse, onUpdateGoal, readOnly, rangeWeeks, onUpdateMilestone, onDeleteMilestone }) {
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const byWeek = useMemo(() => bucketThreadsByWeek(threads), [threads]);
+  const allDates = [];
+  threads.forEach((t) => t.routes.forEach((r) => { r.milestones.forEach((m) => allDates.push(m.milestone_date)); if (r.ended_at) allDates.push(r.ended_at); }));
+  const pastDates = allDates.filter((d) => d <= todayISO);
+  const futureDates = allDates.filter((d) => d > todayISO);
+  const earliestPast = pastDates.length ? pastDates.reduce((a, b) => (a < b ? a : b)) : todayISO;
+  const latestFuture = futureDates.length ? futureDates.reduce((a, b) => (a > b ? a : b)) : null;
+  const pastWeeksCount = rangeWeeks == null ? weeksBetweenDates(earliestPast, todayISO) : rangeWeeks;
+  const futureWeeksCount = latestFuture ? weeksBetweenDates(todayISO, latestFuture) : 0;
+  const thisWeekStart = startOfWeek(new Date());
+  const offsets = [];
+  for (let o = futureWeeksCount; o >= -pastWeeksCount; o--) offsets.push(o);
+  return (
+    <div className="strategy-vsection" style={{ borderColor: (strategy.color || "var(--mango)") + "55" }}>
+      <div className="strategy-vsection-head" style={{ background: (strategy.color || "var(--mango)") + "14" }}>
+        <span className="strategy-vsection-dot" style={{ background: strategy.color || "var(--mango)" }} />
+        <span className="strategy-vsection-name">{strategy.name}</span>
+        <span className="strategy-vsection-goal"><StrategyMentionField value={strategy.goal || ""} onSave={(v) => onUpdateGoal(strategy.id, v)} readOnly={readOnly} placeholder="What is this strategy trying to achieve overall?" /></span>
+        <button type="button" className="link-btn strategy-vsection-toggle" onClick={onToggleCollapse}>{collapsed ? "Expand" : "Collapse"}</button>
+      </div>
+      {!collapsed && (
+        <div className="strategy-week-stack">
+          {threads.length === 0 && <div className="strategy-mini-empty">No institutions or people threaded into this strategy yet.</div>}
+          {threads.length > 0 && offsets.map((o) => {
+            const ws = addDaysLocal(thisWeekStart, o * 7);
+            const wsKey = ws.toISOString().slice(0, 10);
+            const groups = groupWeekItemsByThread(byWeek.get(wsKey) || []);
+            return <StrategyWeekRow key={wsKey} weekStart={ws} offset={o} groups={groups} readOnly={readOnly} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />;
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+// The primary Timeline view: every strategy as its own section, one
+// continuous scroll. A range control governs how far back each section's week
+// stack goes; forward (planned) weeks are always shown in full regardless of
+// range, since seeing what is coming is the point.
+function StrategyVerticalTimeline({ strategyThreadsList, onUpdateStrategyGoal, readOnly, onUpdateMilestone, onDeleteMilestone }) {
+  const [rangeId, setRangeId] = useState("8w");
+  const range = STRATEGY_TIMELINE_RANGES.find((r) => r.id === rangeId) || STRATEGY_TIMELINE_RANGES[0];
+  const [collapsedIds, setCollapsedIds] = useState(() => new Set());
+  const toggleCollapse = (id) => setCollapsedIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  return (
+    <div className="strategy-vertical">
+      <div className="strategy-vertical-toolbar">
+        <span className="strategy-goal-label">Range</span>
+        <div className="strategy-view-toggle">
+          {STRATEGY_TIMELINE_RANGES.map((r) => <button key={r.id} type="button" className={rangeId === r.id ? "active" : ""} onClick={() => setRangeId(r.id)}>{r.label}</button>)}
+        </div>
+      </div>
+      {strategyThreadsList.map(({ strategy, threads }) => (
+        <StrategyVerticalSection key={strategy.id} strategy={strategy} threads={threads}
+          collapsed={collapsedIds.has(strategy.id)} onToggleCollapse={() => toggleCollapse(strategy.id)}
+          onUpdateGoal={onUpdateStrategyGoal} readOnly={readOnly} rangeWeeks={range.weeks}
+          onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+      ))}
+      {strategyThreadsList.length === 0 && <div className="empty-small">No strategies yet. Create one to start mapping routes.</div>}
+    </div>
+  );
+}
+
 function StrategyTab({
   strategies, resolveThreadCard, threadsForStrategy,
   onAddStrategy, onUpdateStrategy, onDeleteStrategy,
@@ -8636,6 +8813,10 @@ function StrategyTab({
   const strategy = strategies.find((s) => s.id === activeStrategyId) || strategies[0] || null;
   useEffect(() => { if (!activeStrategyId && strategies.length) setActiveStrategyId(strategies[0].id); }, [activeStrategyId, strategies]);
   const [mode, setMode] = useState("board");
+  // Timeline has two orientations: vertical (the primary view, Structure B,
+  // every strategy stacked, weeks running down the page) and horizontal (the
+  // original per-strategy swimlanes), toggled once inside Timeline mode.
+  const [timelineOrientation, setTimelineOrientation] = useState("vertical");
   const [expandedIds, setExpandedIds] = useState(() => new Set());
   const toggleExpand = (id) => setExpandedIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const [addingStrategy, setAddingStrategy] = useState(false);
@@ -8646,6 +8827,9 @@ function StrategyTab({
 
   const threads = strategy ? threadsForStrategy(strategy.id).map(resolveThreadCard) : [];
   const week = strategyWeekSummary(threads);
+  // The vertical Timeline shows every strategy at once (Structure B), so it
+  // needs every strategy's threads resolved, not just the selected one.
+  const allStrategyThreadsList = strategies.map((s) => ({ strategy: s, threads: threadsForStrategy(s.id).map(resolveThreadCard) }));
 
   const submitStrategy = async () => {
     if (!newStratName.trim()) return;
@@ -8686,46 +8870,61 @@ function StrategyTab({
         <div className="empty-small">No strategies yet. Create one to start mapping routes.</div>
       ) : strategy && (
         <>
-          {strategies.length > 1 && (
-            <div className="strategy-switcher">
-              {strategies.map((s) => (
-                <button key={s.id} type="button" className={`strategy-chip ${s.id === strategy.id ? "active" : ""}`}
-                  style={s.id === strategy.id ? { borderColor: s.color || "var(--mango)", color: s.color || undefined } : undefined}
-                  onClick={() => setActiveStrategyId(s.id)}>{s.name}</button>
-              ))}
-            </div>
-          )}
-
           <div className="strategy-toolbar">
-            <div className="strategy-goal-header">
-              <span className="strategy-goal-label">Strategy goal</span>
-              <StrategyMentionField value={strategy.goal || ""} onSave={(v) => onUpdateStrategy(strategy.id, { goal: v })} readOnly={readOnly} placeholder="What is this strategy trying to achieve overall?" />
-            </div>
             <div className="strategy-view-toggle">
               <button type="button" className={mode === "board" ? "active" : ""} onClick={() => setMode("board")}>Board</button>
               <button type="button" className={mode === "timeline" ? "active" : ""} onClick={() => setMode("timeline")}>Timeline</button>
             </div>
+            {mode === "timeline" && (
+              <div className="strategy-view-toggle">
+                <button type="button" className={timelineOrientation === "vertical" ? "active" : ""} onClick={() => setTimelineOrientation("vertical")}>Vertical</button>
+                <button type="button" className={timelineOrientation === "horizontal" ? "active" : ""} onClick={() => setTimelineOrientation("horizontal")}>Horizontal</button>
+              </div>
+            )}
           </div>
 
-          <div className="strategy-week-summary">
-            <span><b>{week.advanced}</b> route{week.advanced === 1 ? "" : "s"} advanced this week</span>
-            <span className="strategy-week-dead"><b>{week.deadEnded}</b> dead-ended this week</span>
-            {week.succeeded > 0 && <span className="strategy-week-success"><b>{week.succeeded}</b> succeeded this week</span>}
-          </div>
-
-          {!readOnly && (
-            addingThread ? (
-              <StrategyAddThreadForm trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact} onAdd={handleAddThread} onCancel={() => setAddingThread(false)} />
-            ) : <button type="button" className="btn-sec exec-track-addbtn" onClick={() => setAddingThread(true)}>+ Add institution or person to this strategy</button>
-          )}
-
-          {mode === "board" ? (
-            <StrategyBoardView threads={threads} readOnly={readOnly} expandedIds={expandedIds} onToggleExpand={toggleExpand}
-              onUpdateGoal={onUpdateThreadGoal} onDeleteThread={onDeleteThread} onAddRoute={onAddRoute} onUpdateRoute={onUpdateRoute} onDeleteRoute={onDeleteRoute}
-              onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onOpenPull={openPull} />
-          ) : (
-            <StrategyTimelineView threads={threads} readOnly={readOnly} onOpenPull={readOnly ? null : openPull}
+          {mode === "timeline" && timelineOrientation === "vertical" ? (
+            <StrategyVerticalTimeline strategyThreadsList={allStrategyThreadsList}
+              onUpdateStrategyGoal={(id, v) => onUpdateStrategy(id, { goal: v })} readOnly={readOnly}
               onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+          ) : (
+            <>
+              {strategies.length > 1 && (
+                <div className="strategy-switcher">
+                  {strategies.map((s) => (
+                    <button key={s.id} type="button" className={`strategy-chip ${s.id === strategy.id ? "active" : ""}`}
+                      style={s.id === strategy.id ? { borderColor: s.color || "var(--mango)", color: s.color || undefined } : undefined}
+                      onClick={() => setActiveStrategyId(s.id)}>{s.name}</button>
+                  ))}
+                </div>
+              )}
+
+              <div className="strategy-goal-header">
+                <span className="strategy-goal-label">Strategy goal</span>
+                <StrategyMentionField value={strategy.goal || ""} onSave={(v) => onUpdateStrategy(strategy.id, { goal: v })} readOnly={readOnly} placeholder="What is this strategy trying to achieve overall?" />
+              </div>
+
+              <div className="strategy-week-summary">
+                <span><b>{week.advanced}</b> route{week.advanced === 1 ? "" : "s"} advanced this week</span>
+                <span className="strategy-week-dead"><b>{week.deadEnded}</b> dead-ended this week</span>
+                {week.succeeded > 0 && <span className="strategy-week-success"><b>{week.succeeded}</b> succeeded this week</span>}
+              </div>
+
+              {!readOnly && (
+                addingThread ? (
+                  <StrategyAddThreadForm trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact} onAdd={handleAddThread} onCancel={() => setAddingThread(false)} />
+                ) : <button type="button" className="btn-sec exec-track-addbtn" onClick={() => setAddingThread(true)}>+ Add institution or person to this strategy</button>
+              )}
+
+              {mode === "board" ? (
+                <StrategyBoardView threads={threads} readOnly={readOnly} expandedIds={expandedIds} onToggleExpand={toggleExpand}
+                  onUpdateGoal={onUpdateThreadGoal} onDeleteThread={onDeleteThread} onAddRoute={onAddRoute} onUpdateRoute={onUpdateRoute} onDeleteRoute={onDeleteRoute}
+                  onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onOpenPull={openPull} />
+              ) : (
+                <StrategyTimelineView threads={threads} readOnly={readOnly} onOpenPull={readOnly ? null : openPull}
+                  onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+              )}
+            </>
           )}
         </>
       )}
