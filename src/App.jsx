@@ -4354,14 +4354,14 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
      strategy routes (route_id set) and thread-level tracks (thread_id only),
      AND independently by the plain per-institution/person Tracking-section
      tracks (route_id/thread_id both null, keyed on the entity's own FK). ---- */
-  const addProgressMilestone = async (fks, { title, detail, milestone_date, is_setback, source_ref } = {}) => {
+  const addProgressMilestone = async (fks, { title, detail, milestone_date, is_setback, is_planned, source_ref } = {}) => {
     const clean = (title || "").trim();
     if (!clean) return null;
     try {
       const rows = await api("progress_milestones", "POST", {
         ...fks, title: clean, detail: (detail || "").trim() || null,
         milestone_date: milestone_date || new Date().toISOString().slice(0, 10),
-        is_setback: !!is_setback, source_ref: source_ref || null,
+        is_setback: !!is_setback, is_planned: !!is_planned, source_ref: source_ref || null,
       });
       const row = Array.isArray(rows) ? rows[0] : rows;
       if (row) setProgressMilestones((prev) => [...prev, row]);
@@ -7801,7 +7801,7 @@ function EntityProgressTrack({ milestones, fks, readOnly, onAddMilestone, onUpda
           <RouteMilestoneChip key={m.id} milestone={m} readOnly={readOnly} editing={editingId === m.id}
             onEdit={() => setEditingId(m.id)} onCancel={() => setEditingId(null)}
             onSave={(patch) => { onUpdateMilestone(m.id, patch); setEditingId(null); }}
-            onDelete={() => onDeleteMilestone(m.id)} />
+            onDelete={() => onDeleteMilestone(m.id)} onComplete={() => onUpdateMilestone(m.id, { is_planned: false })} />
         ))}
         {milestones.length === 0 && <span className="route-track-empty">No progress logged yet.</span>}
       </div>
@@ -8142,18 +8142,46 @@ const STRATEGY_ROUTE_STATES = [
 ];
 const strategyRouteStateMeta = (id) => STRATEGY_ROUTE_STATES.find((s) => s.id === id) || STRATEGY_ROUTE_STATES[0];
 const strategyEndGlyph = (state) => (state === "dead_end" ? "✕" : state === "succeeded" ? "✓" : state === "paused" ? "❚❚" : "→");
+// The soonest upcoming planned moment in a milestone list, for the Board
+// view's "next planned" indicator (spec item 3, lighter touch than the full
+// timeline treatment).
+const soonestPlanned = (milestones) => {
+  const today = new Date().toISOString().slice(0, 10);
+  return (milestones || []).filter((m) => m.is_planned && m.milestone_date >= today)
+    .sort((a, b) => (a.milestone_date || "").localeCompare(b.milestone_date || ""))[0] || null;
+};
+
+// isThisWeek has no upper bound (anything from Sunday onward reads "this
+// week"), fine for "has it moved yet" but wrong for sorting a future planned
+// date into "this week" vs "coming up", so bound it here explicitly.
+const inCurrentWeek = (d) => {
+  if (!d) return false;
+  const start = startOfWeek(new Date()).toISOString().slice(0, 10);
+  const end = addDaysLocal(startOfWeek(new Date()), 6).toISOString().slice(0, 10);
+  return d >= start && d <= end;
+};
 
 // Counts route-level movement across a set of resolved threads: routes with a
-// milestone dated this week (advanced), and routes that ended this week
-// dead_end/succeeded, so pruning a dead route shows as progress too.
+// completed milestone dated this week (advanced), routes that ended this week
+// dead_end/succeeded (so pruning a dead route shows as progress too), and
+// every PLANNED (future) moment in view, split into this-week vs coming-up.
 function strategyWeekSummary(threads) {
   let advanced = 0, deadEnded = 0, succeeded = 0;
+  const plannedThisWeek = [], plannedUpcoming = [];
+  const today = new Date().toISOString().slice(0, 10);
   threads.forEach((t) => t.routes.forEach((r) => {
-    if (r.milestones.some((m) => isThisWeek(m.milestone_date))) advanced++;
+    if (r.milestones.some((m) => !m.is_planned && isThisWeek(m.milestone_date))) advanced++;
     if (r.state === "dead_end" && r.ended_at && isThisWeek(r.ended_at)) deadEnded++;
     if (r.state === "succeeded" && r.ended_at && isThisWeek(r.ended_at)) succeeded++;
+    r.milestones.filter((m) => m.is_planned).forEach((m) => {
+      const entry = { id: m.id, title: m.title, date: m.milestone_date, threadName: t.name, routeTitle: r.title, onOpen: t.onOpen };
+      if (inCurrentWeek(m.milestone_date)) plannedThisWeek.push(entry);
+      else if (m.milestone_date > today) plannedUpcoming.push(entry);
+    });
   }));
-  return { advanced, deadEnded, succeeded };
+  plannedThisWeek.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  plannedUpcoming.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  return { advanced, deadEnded, succeeded, plannedThisWeek, plannedUpcoming };
 }
 
 // A plain-text @ mention field (goal / outcome note) with the same
@@ -8171,11 +8199,20 @@ function StrategyMentionField({ value, onSave, readOnly, placeholder }) {
 function MilestoneAddForm({ onCancel, onSave }) {
   const [title, setTitle] = useState("");
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const submit = () => { if (!title.trim()) return; onSave({ title: title.trim(), milestone_date: date }); };
+  const [planned, setPlanned] = useState(false);
+  // Guards against a double-fire (fast double click, or Enter-in-editor plus
+  // a click landing in the same tick) submitting the same moment twice.
+  const submittedRef = useRef(false);
+  const submit = () => {
+    if (submittedRef.current || !title.trim()) return;
+    submittedRef.current = true;
+    onSave({ title: title.trim(), milestone_date: date, is_planned: planned });
+  };
   return (
     <div className="route-chip-edit" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}>
-      <MentionEditor value={title} onChange={setTitle} multiline={false} placeholder="What happened" autoFocus onSubmit={submit} />
+      <MentionEditor value={title} onChange={setTitle} multiline={false} placeholder={planned ? "What's planned" : "What happened"} autoFocus onSubmit={submit} />
       <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} />
+      <label className="route-chip-setback-toggle route-chip-planned-toggle"><input type="checkbox" checked={planned} onChange={(e) => setPlanned(e.target.checked)} /> Planned (future)</label>
       <div className="route-chip-edit-actions">
         <button type="button" className="btn-primary" onClick={submit}>Add</button>
         <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
@@ -8189,12 +8226,14 @@ function MilestoneEditForm({ milestone, onCancel, onSave }) {
   const [detail, setDetail] = useState(milestone.detail || "");
   const [date, setDate] = useState(milestone.milestone_date || "");
   const [setback, setSetback] = useState(!!milestone.is_setback);
-  const submit = () => { if (!title.trim()) return; onSave({ title: title.trim(), detail: detail.trim() || null, milestone_date: date, is_setback: setback }); };
+  const [planned, setPlanned] = useState(!!milestone.is_planned);
+  const submit = () => { if (!title.trim()) return; onSave({ title: title.trim(), detail: detail.trim() || null, milestone_date: date, is_setback: setback, is_planned: planned }); };
   return (
     <div className="route-chip-edit" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}>
       <MentionEditor value={title} onChange={setTitle} multiline={false} placeholder="What happened" autoFocus onSubmit={submit} />
       <MentionEditor value={detail} onChange={setDetail} multiline={false} placeholder="Detail (optional)" onSubmit={submit} />
       <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} />
+      <label className="route-chip-setback-toggle route-chip-planned-toggle"><input type="checkbox" checked={planned} onChange={(e) => setPlanned(e.target.checked)} /> Planned (future)</label>
       <label className="route-chip-setback-toggle"><input type="checkbox" checked={setback} onChange={(e) => setSetback(e.target.checked)} /> Setback</label>
       <div className="route-chip-edit-actions">
         <button type="button" className="btn-primary" onClick={submit}>Save</button>
@@ -8205,13 +8244,18 @@ function MilestoneEditForm({ milestone, onCancel, onSave }) {
 }
 
 // One milestone on a track: a dated chip, click to edit in place, an always
-// visible delete x. @ mentions in the title render as blue clickable chips.
-function RouteMilestoneChip({ milestone, readOnly, editing, onEdit, onCancel, onSave, onDelete }) {
+// visible delete x. A planned (future) moment renders dashed/outlined instead
+// of solid, with its own quick "mark complete" check; @ mentions in the title
+// render as blue clickable chips.
+function RouteMilestoneChip({ milestone, readOnly, editing, onEdit, onCancel, onSave, onDelete, onComplete }) {
   if (editing) return <MilestoneEditForm milestone={milestone} onCancel={onCancel} onSave={onSave} />;
+  const planned = !!milestone.is_planned;
   return (
-    <div className={`route-chip ${milestone.is_setback ? "route-chip-setback" : ""}`} onClick={readOnly ? undefined : onEdit} title={milestone.detail ? mentionsToPlainText(milestone.detail) : ""}>
+    <div className={`route-chip ${milestone.is_setback ? "route-chip-setback" : ""} ${planned ? "route-chip-planned" : ""}`} onClick={readOnly ? undefined : onEdit} title={milestone.detail ? mentionsToPlainText(milestone.detail) : ""}>
       <span className="route-chip-date">{formatDate(milestone.milestone_date)}</span>
+      {planned && <span className="route-chip-planned-tag">Planned</span>}
       <span className="route-chip-title"><MentionText text={milestone.title} /></span>
+      {planned && !readOnly && <button type="button" className="route-chip-complete" onClick={(e) => { e.stopPropagation(); onComplete(); }} title="Mark complete">✓</button>}
       {!readOnly && <button type="button" className="route-chip-del" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete milestone">✕</button>}
     </div>
   );
@@ -8230,7 +8274,7 @@ function RouteTrack({ route, readOnly, onAddMilestone, onUpdateMilestone, onDele
           <RouteMilestoneChip key={m.id} milestone={m} readOnly={readOnly} editing={editingId === m.id}
             onEdit={() => setEditingId(m.id)} onCancel={() => setEditingId(null)}
             onSave={(patch) => { onUpdateMilestone(m.id, patch); setEditingId(null); }}
-            onDelete={() => onDeleteMilestone(m.id)} />
+            onDelete={() => onDeleteMilestone(m.id)} onComplete={() => onUpdateMilestone(m.id, { is_planned: false })} />
         ))}
         {route.milestones.length === 0 && <span className="route-track-empty">No milestones yet.</span>}
         <span className={`route-track-end route-track-end-${route.state}`} title={strategyRouteStateMeta(route.state).label}>{strategyEndGlyph(route.state)}</span>
@@ -8312,21 +8356,26 @@ function RouteHeader({ route, readOnly, onUpdate, onDelete }) {
 }
 
 // Compact route bar for the collapsed Board card: a short line with a few
-// evenly-spaced dots and the same terminus glyph, muted when dead-ended.
+// evenly-spaced dots and the same terminus glyph, muted when dead-ended, plus
+// a small "next planned" indicator (soonest upcoming planned moment).
 function RouteMiniBar({ route }) {
   const meta = strategyRouteStateMeta(route.state);
   const dead = route.state === "dead_end";
   const n = Math.min(route.milestones.length, 6);
+  const next = soonestPlanned(route.milestones);
   return (
     <div className={`route-mini ${dead ? "route-mini-dead" : ""}`}>
-      <span className="route-mini-title">{route.title}</span>
-      <div className="route-mini-bar">
-        <span className="route-mini-line" style={{ background: dead ? "var(--border)" : meta.color + "55" }} />
-        {Array.from({ length: n }).map((_, i) => (
-          <span key={i} className="route-mini-dot" style={{ background: dead ? "var(--muted)" : meta.color, left: `${((i + 1) / (n + 1)) * 100}%` }} />
-        ))}
-        <span className={`route-mini-end route-mini-end-${route.state}`}>{strategyEndGlyph(route.state)}</span>
+      <div className="route-mini-row">
+        <span className="route-mini-title">{route.title}</span>
+        <div className="route-mini-bar">
+          <span className="route-mini-line" style={{ background: dead ? "var(--border)" : meta.color + "55" }} />
+          {Array.from({ length: n }).map((_, i) => (
+            <span key={i} className="route-mini-dot" style={{ background: dead ? "var(--muted)" : meta.color, left: `${((i + 1) / (n + 1)) * 100}%` }} />
+          ))}
+          <span className={`route-mini-end route-mini-end-${route.state}`}>{strategyEndGlyph(route.state)}</span>
+        </div>
       </div>
+      {next && <span className="route-mini-next-planned">Next planned: <MentionText text={next.title} /> · {formatDate(next.milestone_date)}</span>}
     </div>
   );
 }
@@ -8339,13 +8388,18 @@ function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpda
   const [addingRoute, setAddingRoute] = useState(false);
   const [routeTitle, setRouteTitle] = useState("");
   const submitRoute = () => { if (!routeTitle.trim()) return; onAddRoute(thread.id, routeTitle.trim()); setRouteTitle(""); setAddingRoute(false); };
-  const movedThisWeek = thread.routes.some((r) => r.milestones.some((m) => isThisWeek(m.milestone_date)) || (r.ended_at && isThisWeek(r.ended_at)));
+  const movedThisWeek = thread.routes.some((r) => r.milestones.some((m) => !m.is_planned && isThisWeek(m.milestone_date)) || (r.ended_at && isThisWeek(r.ended_at)));
+  const nextPlanned = thread.routes.reduce((best, r) => {
+    const n = soonestPlanned(r.milestones);
+    return n && (!best || n.milestone_date < best.milestone_date) ? n : best;
+  }, null);
   return (
     <div className={`strategy-thread ${movedThisWeek ? "strategy-thread-moved" : ""}`}>
       <div className="strategy-thread-head">
         <button type="button" className="exec-track-name" onClick={() => thread.onOpen && thread.onOpen()} disabled={!thread.onOpen}>{thread.name}</button>
         {thread.typeMeta && <span className="badge" style={{ background: thread.typeMeta.color + "22", color: thread.typeMeta.color, border: `1px solid ${thread.typeMeta.color}44` }}>{thread.typeMeta.label}</span>}
         {movedThisWeek && <span className="strategy-moved-badge">Moved this week</span>}
+        {nextPlanned && !expanded && <span className="strategy-next-planned-badge" title={mentionsToPlainText(nextPlanned.title)}>Next planned: {formatDate(nextPlanned.milestone_date)}</span>}
         <span className="strategy-thread-head-right">
           <button type="button" className="link-btn strategy-expand-btn" onClick={onToggleExpand}>{expanded ? "Collapse" : "Expand"}</button>
           {!readOnly && <button type="button" className="exec-track-remove" onClick={() => { if (window.confirm("Remove this thread and all of its routes?")) onDeleteThread(thread.id); }} title="Remove thread">✕</button>}
@@ -8398,56 +8452,139 @@ function StrategyBoardView({ threads, expandedIds, onToggleExpand, ...handlers }
   );
 }
 
-// One swimlane per route, grouped under its thread's header, all sharing one
-// proportional date axis so relative timing across routes is comparable.
-// Dead-end lanes fade and show their red X terminus exactly at ended_at.
-function StrategyTimelineView({ threads, onOpenPull }) {
+// A single condensed lane merging every milestone across several routes (used
+// when a strategy or an institution/thread is collapsed): still plots real
+// moments (completed solid, planned dashed-outline) on the shared axis, just
+// without a lane per route. No single terminus glyph since it spans routes
+// that may be in different states.
+function MergedTimelineLane({ label, routes, pct, weekStartPct, weekEndPct, todayPct, color }) {
+  const moments = routes.flatMap((r) => r.milestones.map((m) => ({ ...m, routeTitle: r.title })));
+  const completed = moments.filter((m) => !m.is_planned).sort((a, b) => (a.milestone_date || "").localeCompare(b.milestone_date || ""));
+  const planned = moments.filter((m) => m.is_planned);
+  const lastCompletedPct = completed.length ? pct(completed[completed.length - 1].milestone_date) : 0;
+  const lastPlannedPct = planned.length ? Math.max(...planned.map((m) => pct(m.milestone_date))) : 0;
+  const solidEndPct = Math.max(todayPct, lastCompletedPct);
+  const dashedEndPct = Math.max(solidEndPct, lastPlannedPct);
+  return (
+    <div className="strategy-swimlane strategy-swimlane-merged">
+      <div className="strategy-swimlane-label">
+        <span className="strategy-swimlane-merged-label">{label}</span>
+      </div>
+      <div className="strategy-swimlane-track">
+        <div className="strategy-swimlane-week" style={{ left: `${weekStartPct}%`, width: `${Math.max(0.6, weekEndPct - weekStartPct)}%` }} />
+        <div className="strategy-swimlane-line" style={{ width: `${solidEndPct}%`, background: color + "66" }} />
+        {dashedEndPct > solidEndPct && <div className="strategy-swimlane-line-planned" style={{ left: `${solidEndPct}%`, width: `${dashedEndPct - solidEndPct}%`, borderColor: color + "88" }} />}
+        <div className="strategy-swimlane-today" style={{ left: `${todayPct}%` }} />
+        {moments.map((m) => (
+          <span key={m.id} className={`strategy-swimlane-dot ${m.is_setback ? "strategy-swimlane-dot-setback" : ""} ${m.is_planned ? "strategy-swimlane-dot-planned" : ""}`}
+            style={m.is_planned ? { left: `${pct(m.milestone_date)}%`, borderColor: color } : { left: `${pct(m.milestone_date)}%`, background: color }}
+            title={`${m.routeTitle}: ${formatDate(m.milestone_date)}${m.is_planned ? " (planned)" : ""}: ${mentionsToPlainText(m.title)}`} />
+        ))}
+        {moments.length === 0 && <span className="strategy-swimlane-empty">No moments yet.</span>}
+      </div>
+    </div>
+  );
+}
+
+// One swimlane per route, all sharing one proportional date axis (across
+// every strategy shown) so relative timing is comparable everywhere. Both
+// Strategy and Institution (thread) levels collapse to a single merged lane
+// via MergedTimelineLane; a vertical "today" line divides completed moments
+// (left, solid) from planned ones (right, dashed-outline). Dead-end lanes
+// fade and show their red X terminus exactly at ended_at.
+function StrategyTimelineView({ strategies, onOpenPull, collapsedStrategyIds, collapsedThreadIds, onToggleStrategy, onToggleThread, onCollapseAll, onExpandAll }) {
   const today = new Date().toISOString().slice(0, 10);
   const allDates = [today];
-  threads.forEach((t) => t.routes.forEach((r) => { r.milestones.forEach((m) => allDates.push(m.milestone_date)); if (r.ended_at) allDates.push(r.ended_at); }));
+  strategies.forEach((s) => s.threads.forEach((t) => t.routes.forEach((r) => { r.milestones.forEach((m) => allDates.push(m.milestone_date)); if (r.ended_at) allDates.push(r.ended_at); })));
   const minD = allDates.reduce((a, b) => (a < b ? a : b));
   const maxD = allDates.reduce((a, b) => (a > b ? a : b));
   const span = Math.max(1, (new Date(maxD) - new Date(minD)) / 86400000);
   const pct = (d) => Math.min(100, Math.max(0, ((new Date(d) - new Date(minD)) / 86400000 / span) * 100));
   const weekStartPct = pct(startOfWeek(new Date()).toISOString().slice(0, 10));
   const weekEndPct = pct(addDaysLocal(startOfWeek(new Date()), 6).toISOString().slice(0, 10));
+  const todayPct = pct(today);
   return (
     <div className="strategy-timeline">
-      <div className="strategy-timeline-scale"><span>{formatDate(minD)}</span><span className="strategy-timeline-today-label">This week</span><span>{formatDate(maxD)}</span></div>
-      {threads.map((t) => (
-        <div key={t.id} className="strategy-timeline-group">
-          <div className="strategy-timeline-group-head">
-            <button type="button" className="exec-track-name" onClick={() => t.onOpen && t.onOpen()} disabled={!t.onOpen}>{t.name}</button>
-            <span className="strategy-timeline-goal">{t.goal ? <MentionText text={t.goal} /> : "No goal set"}</span>
+      <div className="strategy-timeline-toolbar">
+        <button type="button" className="link-btn" onClick={onExpandAll}>Expand all</button>
+        <button type="button" className="link-btn" onClick={onCollapseAll}>Collapse all</button>
+        {strategies.length > 1 && <span className="strategy-timeline-toolbar-hint">Showing every strategy</span>}
+      </div>
+      <div className="strategy-timeline-scale"><span>{formatDate(minD)}</span><span className="strategy-timeline-today-label">Today: {formatDate(today)}</span><span>{formatDate(maxD)}</span></div>
+      {strategies.map((s) => {
+        const collapsedStrategy = collapsedStrategyIds.has(s.id);
+        const allRoutes = s.threads.flatMap((t) => t.routes);
+        return (
+          <div key={s.id} className="strategy-timeline-strategy-group">
+            <div className="strategy-timeline-strategy-head">
+              <button type="button" className="strategy-timeline-chevron-btn" onClick={() => onToggleStrategy(s.id)} aria-expanded={!collapsedStrategy} title={collapsedStrategy ? "Expand strategy" : "Collapse strategy"}>
+                <span className={`exec-chevron ${collapsedStrategy ? "" : "open"}`}>›</span>
+              </button>
+              <span className="strategy-timeline-strategy-name" style={{ color: s.color || undefined }}>{s.name}</span>
+              {s.goal && <span className="strategy-timeline-goal"><MentionText text={s.goal} /></span>}
+            </div>
+            {collapsedStrategy ? (
+              <MergedTimelineLane
+                label={`${allRoutes.length} route${allRoutes.length === 1 ? "" : "s"} across ${s.threads.length} institution${s.threads.length === 1 ? "" : "s"}`}
+                routes={allRoutes} pct={pct} weekStartPct={weekStartPct} weekEndPct={weekEndPct} todayPct={todayPct} color={s.color || "var(--mango)"} />
+            ) : (
+              <>
+                {s.threads.map((t) => {
+                  const collapsedThread = collapsedThreadIds.has(t.id);
+                  return (
+                    <div key={t.id} className="strategy-timeline-group">
+                      <div className="strategy-timeline-group-head">
+                        <button type="button" className="strategy-timeline-chevron-btn" onClick={() => onToggleThread(t.id)} aria-expanded={!collapsedThread} title={collapsedThread ? "Expand institution" : "Collapse institution"}>
+                          <span className={`exec-chevron ${collapsedThread ? "" : "open"}`}>›</span>
+                        </button>
+                        <button type="button" className="exec-track-name" onClick={() => t.onOpen && t.onOpen()} disabled={!t.onOpen}>{t.name}</button>
+                        <span className="strategy-timeline-goal">{t.goal ? <MentionText text={t.goal} /> : "No goal set"}</span>
+                      </div>
+                      {collapsedThread ? (
+                        <MergedTimelineLane label="All routes" routes={t.routes} pct={pct} weekStartPct={weekStartPct} weekEndPct={weekEndPct} todayPct={todayPct} color={s.color || "var(--mango)"} />
+                      ) : (
+                        t.routes.map((route) => {
+                          const meta = strategyRouteStateMeta(route.state);
+                          const dead = route.state === "dead_end";
+                          const completed = route.milestones.filter((m) => !m.is_planned);
+                          const planned = route.milestones.filter((m) => m.is_planned);
+                          const lastCompletedPct = completed.length ? pct(completed[completed.length - 1].milestone_date) : 0;
+                          const lastPlannedPct = planned.length ? Math.max(...planned.map((m) => pct(m.milestone_date))) : 0;
+                          const solidEndPct = route.ended_at ? pct(route.ended_at) : Math.max(todayPct, lastCompletedPct);
+                          const dashedEndPct = route.ended_at ? solidEndPct : Math.max(solidEndPct, lastPlannedPct);
+                          return (
+                            <div key={route.id} className={`strategy-swimlane ${dead ? "strategy-swimlane-dead" : ""}`}>
+                              <div className="strategy-swimlane-label">
+                                <span className="badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{route.title}</span>
+                                {onOpenPull && <button type="button" className="link-btn strategy-swimlane-pull" onClick={() => onOpenPull({ thread_id: t.id, route_id: route.id }, { deal_id: t.deal_id, enabler_id: t.enabler_id, organization_id: t.organization_id, contact_id: t.contact_id }, route.title)}>Pull moments</button>}
+                              </div>
+                              <div className="strategy-swimlane-track">
+                                <div className="strategy-swimlane-week" style={{ left: `${weekStartPct}%`, width: `${Math.max(0.6, weekEndPct - weekStartPct)}%` }} />
+                                <div className="strategy-swimlane-line" style={{ width: `${solidEndPct}%`, background: dead ? "var(--border)" : meta.color + "66" }} />
+                                {dashedEndPct > solidEndPct && <div className="strategy-swimlane-line-planned" style={{ left: `${solidEndPct}%`, width: `${dashedEndPct - solidEndPct}%`, borderColor: dead ? "var(--border)" : meta.color + "88" }} />}
+                                <div className="strategy-swimlane-today" style={{ left: `${todayPct}%` }} />
+                                {route.milestones.map((m) => (
+                                  <span key={m.id} className={`strategy-swimlane-dot ${m.is_setback ? "strategy-swimlane-dot-setback" : ""} ${m.is_planned ? "strategy-swimlane-dot-planned" : ""}`}
+                                    style={m.is_planned ? { left: `${pct(m.milestone_date)}%`, borderColor: dead ? "var(--muted)" : meta.color } : { left: `${pct(m.milestone_date)}%`, background: dead ? "var(--muted)" : meta.color }}
+                                    title={`${formatDate(m.milestone_date)}${m.is_planned ? " (planned)" : ""}: ${mentionsToPlainText(m.title)}`} />
+                                ))}
+                                <span className={`strategy-swimlane-end strategy-swimlane-end-${route.state}`} style={{ left: `${solidEndPct}%` }} title={meta.label}>{strategyEndGlyph(route.state)}</span>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                      {t.routes.length === 0 && <div className="strategy-mini-empty">No routes yet.</div>}
+                    </div>
+                  );
+                })}
+                {s.threads.length === 0 && <div className="strategy-mini-empty">No institutions or people threaded into this strategy yet.</div>}
+              </>
+            )}
           </div>
-          {t.routes.map((route) => {
-            const meta = strategyRouteStateMeta(route.state);
-            const dead = route.state === "dead_end";
-            const lastMilestonePct = route.milestones.length ? pct(route.milestones[route.milestones.length - 1].milestone_date) : 0;
-            const endPct = route.ended_at ? pct(route.ended_at) : Math.max(pct(today), lastMilestonePct);
-            return (
-              <div key={route.id} className={`strategy-swimlane ${dead ? "strategy-swimlane-dead" : ""}`}>
-                <div className="strategy-swimlane-label">
-                  <span className="badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{route.title}</span>
-                  {onOpenPull && <button type="button" className="link-btn strategy-swimlane-pull" onClick={() => onOpenPull({ thread_id: t.id, route_id: route.id }, { deal_id: t.deal_id, enabler_id: t.enabler_id, organization_id: t.organization_id, contact_id: t.contact_id }, route.title)}>Pull moments</button>}
-                </div>
-                <div className="strategy-swimlane-track">
-                  <div className="strategy-swimlane-week" style={{ left: `${weekStartPct}%`, width: `${Math.max(0.6, weekEndPct - weekStartPct)}%` }} />
-                  <div className="strategy-swimlane-line" style={{ width: `${endPct}%`, background: dead ? "var(--border)" : meta.color + "66" }} />
-                  {route.milestones.map((m) => (
-                    <span key={m.id} className={`strategy-swimlane-dot ${m.is_setback ? "strategy-swimlane-dot-setback" : ""}`}
-                      style={{ left: `${pct(m.milestone_date)}%`, background: dead ? "var(--muted)" : meta.color }}
-                      title={`${formatDate(m.milestone_date)}: ${mentionsToPlainText(m.title)}`} />
-                  ))}
-                  <span className={`strategy-swimlane-end strategy-swimlane-end-${route.state}`} style={{ left: `${endPct}%` }} title={meta.label}>{strategyEndGlyph(route.state)}</span>
-                </div>
-              </div>
-            );
-          })}
-          {t.routes.length === 0 && <div className="strategy-mini-empty">No routes yet.</div>}
-        </div>
-      ))}
-      {threads.length === 0 && <div className="empty-small">No institutions or people threaded into this strategy yet.</div>}
+        );
+      })}
+      {strategies.length === 0 && <div className="empty-small">No strategies yet.</div>}
     </div>
   );
 }
@@ -8547,8 +8684,26 @@ function StrategyTab({
   const [addingThread, setAddingThread] = useState(false);
   const [pullTarget, setPullTarget] = useState(null);
 
+  // Timeline collapse state, remembered per level (Strategy, Institution)
+  // across sessions. The Timeline itself shows every strategy at once (the
+  // whole point of a "zoom out to strategy lanes" overview), independent of
+  // which strategy is picked above for editing its goal/threads.
+  const [collapsedStrategyIds, setCollapsedStrategyIds] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("mango-strategy-timeline-collapsed-strategies") || "[]")); } catch { return new Set(); }
+  });
+  const [collapsedThreadIds, setCollapsedThreadIds] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("mango-strategy-timeline-collapsed-threads") || "[]")); } catch { return new Set(); }
+  });
+  useEffect(() => { try { localStorage.setItem("mango-strategy-timeline-collapsed-strategies", JSON.stringify([...collapsedStrategyIds])); } catch {} }, [collapsedStrategyIds]);
+  useEffect(() => { try { localStorage.setItem("mango-strategy-timeline-collapsed-threads", JSON.stringify([...collapsedThreadIds])); } catch {} }, [collapsedThreadIds]);
+  const toggleStrategyCollapsed = (id) => setCollapsedStrategyIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const toggleThreadCollapsed = (id) => setCollapsedThreadIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const collapseAllTimeline = () => setCollapsedStrategyIds(new Set(strategies.map((s) => s.id)));
+  const expandAllTimeline = () => { setCollapsedStrategyIds(new Set()); setCollapsedThreadIds(new Set()); };
+
   const threads = strategy ? threadsForStrategy(strategy.id).map(resolveThreadCard) : [];
   const week = strategyWeekSummary(threads);
+  const allStrategiesResolved = mode === "timeline" ? strategies.map((s) => ({ ...s, threads: threadsForStrategy(s.id).map(resolveThreadCard) })) : [];
 
   const submitStrategy = async () => {
     if (!newStratName.trim()) return;
@@ -8611,9 +8766,43 @@ function StrategyTab({
           </div>
 
           <div className="strategy-week-summary">
-            <span><b>{week.advanced}</b> route{week.advanced === 1 ? "" : "s"} advanced this week</span>
-            <span className="strategy-week-dead"><b>{week.deadEnded}</b> dead-ended this week</span>
-            {week.succeeded > 0 && <span className="strategy-week-success"><b>{week.succeeded}</b> succeeded this week</span>}
+            <div className="strategy-week-summary-row">
+              <span><b>{week.advanced}</b> route{week.advanced === 1 ? "" : "s"} advanced this week</span>
+              <span className="strategy-week-dead"><b>{week.deadEnded}</b> dead-ended this week</span>
+              {week.succeeded > 0 && <span className="strategy-week-success"><b>{week.succeeded}</b> succeeded this week</span>}
+            </div>
+            {(week.plannedThisWeek.length > 0 || week.plannedUpcoming.length > 0) && (
+              <div className="strategy-week-planned">
+                {week.plannedThisWeek.length > 0 && (
+                  <div className="strategy-planned-group">
+                    <span className="strategy-planned-group-label">Planned this week ({week.plannedThisWeek.length})</span>
+                    <ul className="strategy-planned-list">
+                      {week.plannedThisWeek.map((p) => (
+                        <li key={p.id} className="strategy-planned-item">
+                          <span className="strategy-planned-date">{formatDate(p.date)}</span>
+                          <MentionText text={p.title} />
+                          <button type="button" className="link-btn strategy-planned-thread" onClick={() => p.onOpen && p.onOpen()} disabled={!p.onOpen}>{p.threadName} · {p.routeTitle}</button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {week.plannedUpcoming.length > 0 && (
+                  <div className="strategy-planned-group">
+                    <span className="strategy-planned-group-label">Coming up ({week.plannedUpcoming.length})</span>
+                    <ul className="strategy-planned-list">
+                      {week.plannedUpcoming.map((p) => (
+                        <li key={p.id} className="strategy-planned-item">
+                          <span className="strategy-planned-date">{formatDate(p.date)}</span>
+                          <MentionText text={p.title} />
+                          <button type="button" className="link-btn strategy-planned-thread" onClick={() => p.onOpen && p.onOpen()} disabled={!p.onOpen}>{p.threadName} · {p.routeTitle}</button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {!readOnly && (
@@ -8627,7 +8816,10 @@ function StrategyTab({
               onUpdateGoal={onUpdateThreadGoal} onDeleteThread={onDeleteThread} onAddRoute={onAddRoute} onUpdateRoute={onUpdateRoute} onDeleteRoute={onDeleteRoute}
               onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onOpenPull={openPull} />
           ) : (
-            <StrategyTimelineView threads={threads} onOpenPull={readOnly ? null : openPull} />
+            <StrategyTimelineView strategies={allStrategiesResolved} onOpenPull={readOnly ? null : openPull}
+              collapsedStrategyIds={collapsedStrategyIds} collapsedThreadIds={collapsedThreadIds}
+              onToggleStrategy={toggleStrategyCollapsed} onToggleThread={toggleThreadCollapsed}
+              onCollapseAll={collapseAllTimeline} onExpandAll={expandAllTimeline} />
           )}
         </>
       )}
