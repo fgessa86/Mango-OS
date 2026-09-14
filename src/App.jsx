@@ -4359,14 +4359,18 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
      strategy routes (route_id set) and thread-level tracks (thread_id only),
      AND independently by the plain per-institution/person Tracking-section
      tracks (route_id/thread_id both null, keyed on the entity's own FK). ---- */
-  const addProgressMilestone = async (fks, { title, detail, milestone_date, is_setback, source_ref } = {}) => {
+  // A backlog item (is_backlog true) is an undated future plan: it never
+  // gets the "default to today" fallback other milestones get, since having
+  // no date at all is the point until it is scheduled or completed.
+  const addProgressMilestone = async (fks, { title, detail, milestone_date, is_setback, source_ref, is_planned, is_backlog } = {}) => {
     const clean = (title || "").trim();
     if (!clean) return null;
     try {
       const rows = await api("progress_milestones", "POST", {
         ...fks, title: clean, detail: (detail || "").trim() || null,
-        milestone_date: milestone_date || new Date().toISOString().slice(0, 10),
+        milestone_date: is_backlog ? null : (milestone_date || new Date().toISOString().slice(0, 10)),
         is_setback: !!is_setback, source_ref: source_ref || null,
+        is_planned: !!is_planned, is_backlog: !!is_backlog,
       });
       const row = Array.isArray(rows) ? rows[0] : rows;
       if (row) setProgressMilestones((prev) => [...prev, row]);
@@ -4386,6 +4390,14 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       await api("progress_milestones", "DELETE", null, `?id=eq.${id}`);
       setProgressMilestones((prev) => prev.filter((m) => m.id !== id));
     } catch { showToast("Could not delete milestone"); }
+  };
+  // Backlog chips within one route are reorderable (priority order), backed
+  // by progress_milestones.sort_order, the same dense-index pattern as every
+  // other reorder in Strategy.
+  const reorderProgressMilestones = async (orderedIds) => {
+    setProgressMilestones((prev) => prev.map((m) => { const i = orderedIds.indexOf(m.id); return i === -1 ? m : { ...m, sort_order: i }; }));
+    try { await Promise.all(orderedIds.map((id, i) => api("progress_milestones", "PATCH", { sort_order: i }, `?id=eq.${id}`))); }
+    catch { showToast("Could not save the new order"); }
   };
   // Bulk-insert from the "Pull existing moments" panel. Every row must share
   // the same keys (PGRST102), so every payload carries the full fk set.
@@ -5933,6 +5945,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onAddMilestone={addProgressMilestone}
           onUpdateMilestone={updateProgressMilestone}
           onDeleteMilestone={deleteProgressMilestone}
+          onReorderMilestones={reorderProgressMilestones}
           momentCandidatesFor={momentCandidatesFor}
           pulledSourceRefs={pulledSourceRefs}
           onBulkAddMilestones={bulkAddProgressMilestones}
@@ -8167,14 +8180,23 @@ function StrategyMentionField({ value, onSave, readOnly, placeholder }) {
   );
 }
 
+// "Planned (no date yet)" creates a backlog item (is_planned/is_backlog true,
+// no milestone_date): an intended next move with nothing scheduled, which
+// lands in the route's Planned zone rather than on the week axis until it is
+// given a date.
 function MilestoneAddForm({ onCancel, onSave }) {
   const [title, setTitle] = useState("");
+  const [noDate, setNoDate] = useState(false);
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const submit = () => { if (!title.trim()) return; onSave({ title: title.trim(), milestone_date: date }); };
+  const submit = () => {
+    if (!title.trim()) return;
+    onSave(noDate ? { title: title.trim(), is_planned: true, is_backlog: true, milestone_date: null } : { title: title.trim(), milestone_date: date });
+  };
   return (
     <div className="route-chip-edit" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}>
-      <MentionEditor value={title} onChange={setTitle} multiline={false} placeholder="What happened" autoFocus onSubmit={submit} />
-      <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} />
+      <MentionEditor value={title} onChange={setTitle} multiline={false} placeholder="What happened, or what's the plan" autoFocus onSubmit={submit} />
+      <label className="route-chip-setback-toggle"><input type="checkbox" checked={noDate} onChange={(e) => setNoDate(e.target.checked)} /> Planned (no date yet)</label>
+      {!noDate && <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} />}
       <div className="route-chip-edit-actions">
         <button type="button" className="btn-primary" onClick={submit}>Add</button>
         <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
@@ -8589,15 +8611,18 @@ const STRATEGY_GRID_RANGES = [
 const STRATEGY_CARD_CELL_LIMIT = 3;
 const weeksBetweenDates = (a, b) => Math.max(0, Math.round((new Date(b) - new Date(a)) / (7 * 86400000)));
 
-// Buckets every milestone and route-terminus event across a set of resolved
-// threads into its calendar week (Sunday-based, the same convention as the
-// rest of the app), keyed by that week's start date.
+// Buckets every DATED milestone and route-terminus event across a set of
+// resolved threads into its calendar week (Sunday-based, the same convention
+// as the rest of the app), keyed by that week's start date. A backlog
+// moment (is_backlog, no milestone_date) never has a week to sit in, so it
+// is skipped here entirely; it lives in the route's Planned zone instead.
 function bucketThreadsByWeek(threads) {
   const byWeek = new Map();
   const push = (weekKey, entry) => { if (!byWeek.has(weekKey)) byWeek.set(weekKey, []); byWeek.get(weekKey).push(entry); };
   threads.forEach((t) => {
     t.routes.forEach((r) => {
       r.milestones.forEach((m) => {
+        if (!m.milestone_date) return;
         const wk = startOfWeek(new Date(m.milestone_date)).toISOString().slice(0, 10);
         push(wk, { threadId: t.id, name: t.name, onOpen: t.onOpen, route: r, kind: "milestone", milestone: m, date: m.milestone_date });
       });
@@ -8631,7 +8656,7 @@ function computeStrategyGridWeeks(strategyThreadsList, rangeWeeks) {
   const todayISO = new Date().toISOString().slice(0, 10);
   const allDates = [];
   strategyThreadsList.forEach(({ threads }) => threads.forEach((t) => t.routes.forEach((r) => {
-    r.milestones.forEach((m) => allDates.push(m.milestone_date));
+    r.milestones.forEach((m) => { if (m.milestone_date) allDates.push(m.milestone_date); });
     if (r.ended_at) allDates.push(r.ended_at);
   })));
   const pastDates = allDates.filter((d) => d <= todayISO);
@@ -8715,15 +8740,24 @@ function StrategyBandSlotContent({ items, labelThread, readOnly, onUpdateMilesto
 // the nodes to read as one progression rather than isolated marks. A
 // dead-ended route's slots past its end date mute further, since nothing
 // more will ever land there.
-function StrategyWeekBand({ weeks, byWeek, labelThread, readOnly, onUpdateMilestone, onDeleteMilestone, connectorLine, mutedFrom }) {
+// `onDropWeek`, when given, turns every current/future slot into a drop
+// target for a dragged backlog chip (see StrategyRouteBand): dropping there
+// schedules the plan onto that week, snapping it out of the Planned zone and
+// onto the axis.
+function StrategyWeekBand({ weeks, byWeek, labelThread, readOnly, onUpdateMilestone, onDeleteMilestone, connectorLine, mutedFrom, onDropWeek }) {
   return (
     <div className={`strategy-weekband ${connectorLine ? "strategy-weekband-line" : ""}`} style={{ gridTemplateColumns: `repeat(${weeks.length}, 1fr)` }}>
-      {weeks.map((w, i) => (
-        <div key={w.key} className={`strategy-weekband-slot ${i % 2 ? "strategy-weekband-slot-alt" : ""} ${w.offset === 0 ? "strategy-weekband-slot-current" : ""} ${w.offset > 0 ? "strategy-weekband-slot-future" : ""} ${mutedFrom && w.key > mutedFrom ? "strategy-weekband-slot-muted" : ""}`}>
-          <StrategyBandSlotContent items={byWeek.get(w.key) || []} labelThread={labelThread} readOnly={readOnly}
-            onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
-        </div>
-      ))}
+      {weeks.map((w, i) => {
+        const droppable = !!onDropWeek && w.offset >= 0;
+        return (
+          <div key={w.key} className={`strategy-weekband-slot ${i % 2 ? "strategy-weekband-slot-alt" : ""} ${w.offset === 0 ? "strategy-weekband-slot-current" : ""} ${w.offset > 0 ? "strategy-weekband-slot-future" : ""} ${mutedFrom && w.key > mutedFrom ? "strategy-weekband-slot-muted" : ""} ${droppable ? "strategy-weekband-slot-droppable" : ""}`}
+            onDragOver={droppable ? (e) => e.preventDefault() : undefined}
+            onDrop={droppable ? (e) => { e.preventDefault(); onDropWeek(w); } : undefined}>
+            <StrategyBandSlotContent items={byWeek.get(w.key) || []} labelThread={labelThread} readOnly={readOnly}
+              onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -8740,13 +8774,124 @@ function StrategyWeekLabels({ weeks }) {
     </div>
   );
 }
+// Undated future plans, at every level: a route's own backlog, an
+// institution's (across its routes), a strategy's (across all its
+// institutions), so a collapsed level can still show how much intended work
+// is waiting behind it.
+const routeBacklog = (route) => route.milestones.filter((m) => m.is_backlog);
+const threadBacklogCount = (thread) => thread.routes.reduce((a, r) => a + routeBacklog(r).length, 0);
+const strategyBacklogCount = (threads) => threads.reduce((a, t) => a + threadBacklogCount(t), 0);
+
+// One backlog chip: an undated intended next move. Click its text to edit in
+// place (mentions stay blue and clickable in read mode); "Schedule" gives it
+// a date and moves it onto the week axis as a dashed planned node; "Done"
+// marks it complete, defaulting to today (editable) since it needs SOME date
+// once it is no longer just an intention.
+function StrategyBacklogItem({ item, readOnly, onUpdate, onDelete, onSchedule, onComplete, isDragging, onDragStart, onDragEnd }) {
+  const [scheduling, setScheduling] = useState(false);
+  const [completing, setCompleting] = useState(false);
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  return (
+    <div className={`strategy-backlog-chip ${isDragging ? "strategy-dragging" : ""}`}>
+      <div className="strategy-backlog-row">
+        {!readOnly && <span className="strategy-drag-handle" title="Drag to reorder, or onto a week to schedule" draggable onDragStart={onDragStart} onDragEnd={onDragEnd}>⠿</span>}
+        <span className="strategy-backlog-text"><StrategyMentionField value={item.title} onSave={(v) => onUpdate(item.id, { title: v })} readOnly={readOnly} placeholder="What's the plan" /></span>
+        {!readOnly && (
+          <span className="strategy-backlog-actions">
+            <button type="button" className="strategy-backlog-action" title="Schedule a date" onClick={() => { setCompleting(false); setScheduling((s) => !s); }}>📅</button>
+            <button type="button" className="strategy-backlog-action" title="Mark done" onClick={() => { setScheduling(false); setCompleting((c) => !c); }}>✓</button>
+            <button type="button" className="strategy-backlog-action strategy-backlog-del" title="Delete" onClick={() => onDelete(item.id)}>✕</button>
+          </span>
+        )}
+      </div>
+      {scheduling && (
+        <div className="strategy-backlog-inline-date">
+          <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} />
+          <button type="button" className="btn-primary" onClick={() => { onSchedule(item.id, date); setScheduling(false); }}>Set date</button>
+          <button type="button" className="link-btn" onClick={() => setScheduling(false)}>Cancel</button>
+        </div>
+      )}
+      {completing && (
+        <div className="strategy-backlog-inline-date">
+          <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} />
+          <button type="button" className="btn-primary" onClick={() => { onComplete(item.id, date); setCompleting(false); }}>Mark done</button>
+          <button type="button" className="link-btn" onClick={() => setCompleting(false)}>Cancel</button>
+        </div>
+      )}
+    </div>
+  );
+}
+// Inline "+ Plan" composer: a mention-aware single line plus voice capture,
+// since a backlog plan is jotted down as quickly as a moment on the track.
+function StrategyBacklogAddForm({ onAdd, onCancel, showToast }) {
+  const [title, setTitle] = useState("");
+  const submit = () => { if (!title.trim()) return; onAdd(title.trim()); setTitle(""); };
+  return (
+    <div className="strategy-backlog-add">
+      <MentionEditor value={title} onChange={setTitle} multiline={false} placeholder="e.g. Get intro to CEO" autoFocus onSubmit={submit} />
+      <VoiceRecorder mode="plain" compact showToast={showToast} onPlainText={(t) => setTitle((prev) => (prev ? `${prev} ${t}` : t))} />
+      <div className="strategy-backlog-add-actions">
+        <button type="button" className="btn-primary" onClick={submit}>Add</button>
+        <button type="button" className="link-btn" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+// The Planned zone: a route's undated future plans, visually a distinct
+// panel off to the side of the time axis (not a week, since it has no date),
+// stacked in priority order and reorderable. Each chip is also a drag SOURCE
+// the week band listens for (see StrategyRouteBand), so dragging one onto a
+// future week schedules it directly.
+function StrategyBacklogZone({ items, readOnly, onAdd, onUpdate, onDelete, onSchedule, onComplete, onReorder, draggingId, onDragStart, onDragEnd, showToast }) {
+  const [adding, setAdding] = useState(false);
+  const dropReorder = (targetId) => {
+    if (!draggingId || draggingId === targetId) return;
+    const ids = items.map((m) => m.id);
+    const from = ids.indexOf(draggingId), to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) return;
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    onReorder(ids);
+  };
+  return (
+    <div className="strategy-backlog-zone">
+      <div className="strategy-backlog-head">
+        <span className="strategy-backlog-title">Planned</span>
+        {items.length > 0 && <span className="strategy-backlog-count">{items.length}</span>}
+      </div>
+      <div className="strategy-backlog-list">
+        {items.map((item) => (
+          <div key={item.id} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); dropReorder(item.id); }}>
+            <StrategyBacklogItem item={item} readOnly={readOnly} onUpdate={onUpdate} onDelete={onDelete}
+              onSchedule={onSchedule} onComplete={onComplete}
+              isDragging={draggingId === item.id} onDragStart={() => onDragStart(item.id)} onDragEnd={onDragEnd} />
+          </div>
+        ))}
+        {items.length === 0 && !adding && <div className="strategy-backlog-empty">No plans yet.</div>}
+      </div>
+      {!readOnly && (
+        adding
+          ? <StrategyBacklogAddForm showToast={showToast} onAdd={(title) => { onAdd(title); setAdding(false); }} onCancel={() => setAdding(false)} />
+          : <button type="button" className="link-btn strategy-backlog-addbtn" onClick={() => setAdding(true)}>+ Plan</button>
+      )}
+    </div>
+  );
+}
 // The ROUTE band (leaf level): a small label line (state glyph, title, state
-// badge, drag handle) then its own shaded week band with its moments placed
-// along the axis.
-function StrategyRouteBand({ thread, route, weeks, readOnly, onUpdateMilestone, onDeleteMilestone, isDragging, onDragStart, onDragOver, onDrop }) {
-  const byWeek = useMemo(() => bucketThreadsByWeek([{ ...thread, routes: [route] }]), [thread, route]);
+// badge, drag handle), then a row pairing its shaded week band (moments
+// placed along the axis) with its Planned zone (undated plans, off the
+// axis) side by side, clearly separated.
+function StrategyRouteBand({
+  thread, route, weeks, readOnly, onUpdateMilestone, onDeleteMilestone, onAddMilestone, onReorderMilestones, showToast,
+  isDragging, onDragStart, onDragOver, onDrop,
+}) {
+  const dated = route.milestones.filter((m) => !m.is_backlog);
+  const backlog = useMemo(() => routeBacklog(route).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)), [route]);
+  const byWeek = useMemo(() => bucketThreadsByWeek([{ ...thread, routes: [{ ...route, milestones: dated }] }]), [thread, route, dated]);
   const meta = strategyRouteStateMeta(route.state);
   const dead = route.state === "dead_end";
+  const [draggingBacklogId, setDraggingBacklogId] = useState(null);
+  const scheduleBacklog = (id, dateStr) => onUpdateMilestone(id, { milestone_date: dateStr, is_backlog: false });
+  const completeBacklog = (id, dateStr) => onUpdateMilestone(id, { milestone_date: dateStr, is_backlog: false, is_planned: false });
   return (
     <div className={`strategy-route-band ${dead ? "strategy-route-band-dead" : ""} ${isDragging ? "strategy-dragging" : ""}`} onDragOver={onDragOver} onDrop={onDrop}>
       <div className="strategy-route-head">
@@ -8755,9 +8900,20 @@ function StrategyRouteBand({ thread, route, weeks, readOnly, onUpdateMilestone, 
         <span className="strategy-route-title">{route.title}</span>
         <span className="badge strategy-route-badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{meta.label}</span>
       </div>
-      <StrategyWeekBand weeks={weeks} byWeek={byWeek} labelThread={false} readOnly={readOnly}
-        onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
-        connectorLine mutedFrom={dead && route.ended_at ? route.ended_at : null} />
+      <div className="strategy-route-timeline-row">
+        <StrategyWeekBand weeks={weeks} byWeek={byWeek} labelThread={false} readOnly={readOnly}
+          onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+          connectorLine mutedFrom={dead && route.ended_at ? route.ended_at : null}
+          onDropWeek={draggingBacklogId ? (w) => { scheduleBacklog(draggingBacklogId, w.key); setDraggingBacklogId(null); } : undefined} />
+        <div className="strategy-route-sep" />
+        <StrategyBacklogZone items={backlog} readOnly={readOnly}
+          onAdd={(title) => onAddMilestone({ thread_id: thread.id, route_id: route.id }, { title, is_planned: true, is_backlog: true, milestone_date: null })}
+          onUpdate={onUpdateMilestone} onDelete={onDeleteMilestone}
+          onSchedule={scheduleBacklog} onComplete={completeBacklog}
+          onReorder={onReorderMilestones}
+          draggingId={draggingBacklogId} onDragStart={setDraggingBacklogId} onDragEnd={() => setDraggingBacklogId(null)}
+          showToast={showToast} />
+      </div>
     </div>
   );
 }
@@ -8767,7 +8923,7 @@ function StrategyRouteBand({ thread, route, weeks, readOnly, onUpdateMilestone, 
 // (collapsed) or its own stack of ROUTE bands (expanded), plus an inline
 // "+ Add route" control.
 function StrategyInstitutionBand({
-  thread, weeks, collapsed, onToggleCollapse, onUpdateGoal, readOnly, onUpdateMilestone, onDeleteMilestone,
+  thread, weeks, collapsed, onToggleCollapse, onUpdateGoal, readOnly, onUpdateMilestone, onDeleteMilestone, onAddMilestone, onReorderMilestones, showToast,
   addingRoute, onStartAddRoute, onCancelAddRoute, onAddRoute, onReorderRoutes,
   isDragging, onDragStart, onDragOver, onDrop,
 }) {
@@ -8784,6 +8940,7 @@ function StrategyInstitutionBand({
     onReorderRoutes(ids);
     setRouteDragId(null);
   };
+  const pending = threadBacklogCount(thread);
   return (
     <div className={`strategy-inst-band ${isDragging ? "strategy-dragging" : ""}`} onDragOver={onDragOver} onDrop={onDrop}>
       <div className="strategy-inst-head">
@@ -8792,6 +8949,7 @@ function StrategyInstitutionBand({
         <button type="button" className="strategy-inst-name" onClick={() => thread.onOpen && thread.onOpen()} disabled={!thread.onOpen}>{thread.name}</button>
         {thread.typeMeta && <span className="badge" style={{ background: thread.typeMeta.color + "22", color: thread.typeMeta.color, border: `1px solid ${thread.typeMeta.color}44` }}>{thread.typeMeta.label}</span>}
         <span className="strategy-inst-goal"><StrategyMentionField value={thread.goal || ""} onSave={(v) => onUpdateGoal(thread.id, v)} readOnly={readOnly} placeholder="Goal" /></span>
+        {collapsed && pending > 0 && <span className="strategy-planned-badge">{pending} planned</span>}
       </div>
       {collapsed ? (
         <StrategyWeekBand weeks={weeks} byWeek={byWeek} labelThread={false} readOnly={readOnly}
@@ -8801,6 +8959,7 @@ function StrategyInstitutionBand({
           {thread.routes.map((route) => (
             <StrategyRouteBand key={route.id} thread={thread} route={route} weeks={weeks} readOnly={readOnly}
               onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+              onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
               isDragging={routeDragId === route.id} onDragStart={() => setRouteDragId(route.id)}
               onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); dropRoute(route.id); }} />
           ))}
@@ -8828,12 +8987,14 @@ function StrategyInstitutionBand({
 // each owns its own week axis (passed in, computed from its own data).
 function StrategyCard({
   strategy, threads, weeks, collapsed, onToggleCollapse, onUpdateGoal, onUpdateThreadGoal, readOnly,
-  onUpdateMilestone, onDeleteMilestone, collapsedInstitutionIds, onToggleInstitutionCollapse,
+  onUpdateMilestone, onDeleteMilestone, onAddMilestone, onReorderMilestones, showToast,
+  collapsedInstitutionIds, onToggleInstitutionCollapse,
   addingRouteFor, onStartAddRoute, onCancelAddRoute, onAddRoute, onReorderThreads, onReorderRoutes,
   addingThread, onStartAddThread, onCancelAddThread, onAddThread, trackOptions, contactOptions, onCreateContact,
   isDragging, onDragStart, onDragOverSelf, onDropSelf,
 }) {
   const byWeek = useMemo(() => bucketThreadsByWeek(threads), [threads]);
+  const pending = strategyBacklogCount(threads);
   const lastMoveDate = threads.reduce((acc, t) => t.routes.reduce((acc2, r) => {
     const d = r.ended_at || r.milestones[r.milestones.length - 1]?.milestone_date;
     return d && d > acc2 ? d : acc2;
@@ -8857,6 +9018,7 @@ function StrategyCard({
         <span className="strategy-card-dot" style={{ background: strategy.color || "var(--mango)" }} />
         <span className="strategy-card-name">{strategy.name}</span>
         <span className="strategy-card-goal"><StrategyMentionField value={strategy.goal || ""} onSave={(v) => onUpdateGoal(strategy.id, v)} readOnly={readOnly} placeholder="Overall goal" /></span>
+        {collapsed && pending > 0 && <span className="strategy-planned-badge">{pending} planned</span>}
         {lastMoveDate && <span className="strategy-card-move">Last movement {formatDate(lastMoveDate)}</span>}
       </div>
       <div className="strategy-card-body">
@@ -8870,6 +9032,7 @@ function StrategyCard({
               <StrategyInstitutionBand key={thread.id} thread={thread} weeks={weeks}
                 collapsed={collapsedInstitutionIds.has(thread.id)} onToggleCollapse={() => onToggleInstitutionCollapse(thread.id)}
                 onUpdateGoal={onUpdateThreadGoal} readOnly={readOnly} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+                onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
                 addingRoute={addingRouteFor === thread.id} onStartAddRoute={() => onStartAddRoute(thread.id)} onCancelAddRoute={onCancelAddRoute}
                 onAddRoute={onAddRoute} onReorderRoutes={onReorderRoutes}
                 isDragging={threadDragId === thread.id} onDragStart={() => setThreadDragId(thread.id)}
@@ -8902,6 +9065,7 @@ function StrategyCard({
 // drag-reorderable via their grip handle, persisted to sort_order.
 function StrategyCardsTimeline({
   strategyThreadsList, onUpdateStrategyGoal, onUpdateThreadGoal, readOnly, onUpdateMilestone, onDeleteMilestone,
+  onAddMilestone, onReorderMilestones, showToast,
   onAddThread, onAddRoute, trackOptions, contactOptions, onCreateContact,
   onReorderStrategies, onReorderThreads, onReorderRoutes,
 }) {
@@ -8954,6 +9118,7 @@ function StrategyCardsTimeline({
                 collapsed={collapsedStrategyIds.has(strategy.id)} onToggleCollapse={() => toggleStrategyCollapse(strategy.id)}
                 onUpdateGoal={onUpdateStrategyGoal} onUpdateThreadGoal={onUpdateThreadGoal} readOnly={readOnly}
                 onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+                onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
                 collapsedInstitutionIds={collapsedInstitutionIds} onToggleInstitutionCollapse={toggleInstitutionCollapse}
                 addingRouteFor={addingRouteFor}
                 onStartAddRoute={(threadId) => setAddingRouteFor(threadId)}
@@ -8981,7 +9146,7 @@ function StrategyTab({
   onAddStrategy, onUpdateStrategy, onDeleteStrategy, onReorderStrategies,
   onAddThread, onUpdateThreadGoal, onDeleteThread, onReorderThreads,
   onAddRoute, onUpdateRoute, onDeleteRoute, onReorderRoutes,
-  onAddMilestone, onUpdateMilestone, onDeleteMilestone,
+  onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones,
   momentCandidatesFor, pulledSourceRefs, onBulkAddMilestones,
   trackOptions, contactOptions, onCreateContact, showToast,
 }) {
@@ -9056,6 +9221,7 @@ function StrategyTab({
             <StrategyCardsTimeline strategyThreadsList={allStrategyThreadsList}
               onUpdateStrategyGoal={(id, v) => onUpdateStrategy(id, { goal: v })} onUpdateThreadGoal={onUpdateThreadGoal} readOnly={readOnly}
               onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+              onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
               onAddThread={onAddThread} onAddRoute={onAddRoute}
               trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
               onReorderStrategies={onReorderStrategies} onReorderThreads={onReorderThreads} onReorderRoutes={onReorderRoutes} />
