@@ -2407,22 +2407,32 @@ body.exec-presenting-body { overflow: hidden; }
 
 /* Strategy Timeline, card layout: each strategy is its own separate,
    self-contained card stacked down the page with real space between them,
-   not one connected spreadsheet-like grid. Weeks are a soft shaded time
-   axis inside a card (alternating bands, no hard borders/gridlines); the
-   strategy and institution headers are full-width merged bands, and only a
-   route's own band places moment chips along the week axis. */
+   not one connected spreadsheet-like table. EVERY card is one CSS Grid
+   (`.strategy-card-body`, `grid-template-columns: repeat(weeks.length, 1fr)
+   + one fixed Planned column`), shared verbatim by the week-label row and
+   every institution/route row beneath it, so a node's anchor position, the
+   week's shaded band, and that week's header label all reference the exact
+   same column boundaries; every card is handed the same global `weeks`
+   list (computed once in StrategyCardsTimeline), so cards line up on the
+   same weeks vertically too. Weeks read as a soft shaded time axis
+   (alternating bands, no hard gridlines); strategy and institution headers
+   are full-width merged rows, and only a route's own lane places moment
+   nodes along the week axis. */
 .strategy-cards-outer { margin-top: 10px; }
 .strategy-grid-toolbar { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-bottom: 14px; }
 .strategy-cards-stack { display: flex; flex-direction: column; gap: 22px; }
 
-.strategy-card { border: 2px solid var(--border); border-radius: 18px; background: var(--surface); overflow: hidden; box-shadow: 0 1px 3px rgba(60,45,20,0.05); }
+.strategy-card { border: 2px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: 0 1px 3px rgba(60,45,20,0.05); }
 .strategy-card.strategy-dragging { opacity: .5; }
-.strategy-card-head { display: flex; align-items: flex-start; gap: 8px; padding: 14px 18px; }
+.strategy-card-head { display: flex; align-items: flex-start; gap: 8px; padding: 14px 18px; border-radius: 16px 16px 0 0; }
 .strategy-card-dot { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
 .strategy-card-name { font-size: 16px; font-weight: 800; color: var(--text); flex-shrink: 0; margin-top: 1px; }
 .strategy-card-goal { flex: 1; min-width: 160px; font-size: 12.5px; margin-top: 1px; }
 .strategy-card-move { font-size: 10.5px; color: var(--muted); flex-shrink: 0; margin-top: 3px; white-space: nowrap; }
-.strategy-card-body { padding: 6px 18px 16px; }
+/* The one grid every row in this card is a member of. Zero gap, always:
+   any gap here would desync the label row's column boundaries from a
+   lane's internally-computed percentage positions (see StrategyRouteLane). */
+.strategy-card-body { display: grid; gap: 0; padding: 6px 18px 16px; }
 
 /* A drag handle, never the row/band itself, so surrounding text stays
    selectable (same convention as the exec block / initiative drag grips). */
@@ -2430,58 +2440,69 @@ body.exec-presenting-body { overflow: hidden; }
 .strategy-drag-handle:active { cursor: grabbing; }
 .strategy-tree-toggle { font-size: 11px; flex-shrink: 0; padding: 2px 4px; margin-top: 1px; }
 
-/* Week-range label strip, and every week band beneath it in the same card,
-   share the identical column template (repeat(weeks.length, 1fr)) so they
-   line up top to bottom without needing a shared table. */
-.strategy-weeklabels { display: grid; gap: 0; margin: 6px 0 4px; }
-.strategy-weeklabel { font-size: 10.5px; font-weight: 700; color: var(--muted); text-align: center; padding: 2px 4px; }
+/* The week-range label row: one grid item per week, plus a trailing label
+   over the reserved Planned column, all direct children of the shared
+   card-body grid so they occupy the exact same column tracks as every
+   band and lane beneath them. */
+.strategy-weeklabel { font-size: 10.5px; font-weight: 700; color: var(--muted); text-align: center; padding: 4px 4px 6px; }
 .strategy-weeklabel-current { color: #B77400; font-weight: 800; }
 .strategy-weeklabel-future { font-style: italic; }
+.strategy-weeklabel-plannedcol { text-align: left; text-transform: uppercase; letter-spacing: .03em; font-size: 9.5px; padding-left: 10px; }
 
-/* The shaded time axis: soft alternating bands instead of gridlines, the
-   current week gently tinted, future (planned) weeks read muted/dashed. */
-.strategy-weekband { display: grid; gap: 0; position: relative; border-radius: 10px; overflow: hidden; }
+/* One shaded week slot (used by a collapsed institution/strategy's merged
+   row, direct grid children): soft alternating bands instead of gridlines,
+   the current week gently tinted, future weeks read hatched, muted past a
+   dead-ended route's end. */
 .strategy-weekband-slot { background: transparent; padding: 4px 5px; min-height: 30px; display: flex; flex-direction: column; gap: 5px; justify-content: center; }
 .strategy-weekband-slot-alt { background: var(--card); }
 .strategy-weekband-slot-current { background: #F5A62322; }
 .strategy-weekband-slot-future { background: repeating-linear-gradient(135deg, transparent 0 8px, #00000006 8px 9px); }
 .strategy-weekband-slot-muted { opacity: .35; }
-/* A route's own band gets a light connecting line running behind its
-   chips, so consecutive moments read as one progression, not stray marks. */
-.strategy-weekband-line::before { content: ""; position: absolute; left: 12px; right: 12px; top: 50%; height: 2px; background: var(--border); transform: translateY(-50%); z-index: 0; }
 .strategy-band-slot-content { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 4px; }
 .strategy-band-more { align-self: flex-start; }
 
-/* Institution: a full-width merged header band, indented under its
-   strategy, then either its own merged week band or its route bands. */
-.strategy-inst-band { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
-.strategy-inst-band.strategy-dragging { opacity: .5; }
-.strategy-inst-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-left: 4px; }
+/* Institution: a full-width merged header row, indented under its
+   strategy, then either its own merged week slots or its route rows. */
+.strategy-inst-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 12px 4px 6px 4px; margin-top: 4px; border-top: 1px solid var(--border); }
+.strategy-inst-head.strategy-dragging { opacity: .5; }
 .strategy-inst-name { border: none; background: none; padding: 0; font-family: inherit; font-size: 13px; font-weight: 700; color: var(--text); cursor: pointer; text-align: left; }
 .strategy-inst-name:hover { text-decoration: underline; }
 .strategy-inst-name:disabled { color: var(--muted); cursor: default; }
 .strategy-inst-goal { flex: 1; min-width: 160px; font-size: 11.5px; }
 
-/* Route: a small label line, indented further under its institution, then
-   its own shaded band with moment chips floating along the weeks. */
-.strategy-route-band { margin-top: 10px; padding-left: 22px; }
-.strategy-route-band.strategy-dragging { opacity: .5; }
-.strategy-route-band-dead { opacity: .62; }
-.strategy-route-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+/* Route: a small full-width label row, indented further under its
+   institution, then its lane (below) with moment nodes floating along the
+   weeks, anchored to their true week. */
+.strategy-route-head { display: flex; align-items: center; gap: 6px; padding: 6px 4px 4px 22px; }
+.strategy-route-head.strategy-dragging { opacity: .5; }
+.strategy-route-head-dead { opacity: .62; }
 .strategy-route-glyph { font-size: 12px; font-weight: 800; flex-shrink: 0; }
 .strategy-route-title { font-size: 12px; font-weight: 650; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .strategy-route-badge { flex-shrink: 0; font-size: 10px; margin-left: auto; }
 
-/* A route's time axis and its Planned zone sit side by side, clearly
-   separated: the axis is dated, the zone is deliberately off it. */
-.strategy-route-timeline-row { display: flex; align-items: stretch; gap: 0; }
-.strategy-route-timeline-row .strategy-weekband { flex: 1; min-width: 0; }
-.strategy-route-sep { width: 1px; flex-shrink: 0; margin: 0 12px; background: var(--border); background-image: repeating-linear-gradient(to bottom, var(--border) 0 4px, transparent 4px 9px); }
-.strategy-weekband-slot-droppable { outline: 1px dashed #F5A62388; outline-offset: -1px; }
+/* A route's lane: spans exactly the week columns (never the Planned
+   column), a positioned canvas for the shaded bands, the connecting line,
+   and the anchored, freely-widening moment nodes. Height grows with
+   `laneHeight` (set inline, from row-packing) so taller/staggered content
+   is never clipped or overlaps the next route. */
+.strategy-lane { position: relative; min-width: 0; }
+.strategy-lane-bg { position: absolute; inset: 0; display: grid; gap: 0; border-radius: 10px; overflow: hidden; }
+.strategy-lane-svg { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+.strategy-lane-line { stroke: var(--border); stroke-width: 2; }
+.strategy-lane-line-stalled { stroke-dasharray: 3 4; stroke: #D9483A66; }
+.strategy-lane-droppable { outline: 1px dashed #F5A62388; outline-offset: -2px; border-radius: 10px; }
+/* A node's box floats over the lane, anchored at its true week by a small
+   dot at its left edge; the card itself is free to extend rightward, wide
+   enough for comfortable 1-2 line text instead of a squeezed single column. */
+.strategy-lane-node { position: absolute; z-index: 1; }
+.strategy-lane-anchor { position: absolute; left: -4px; top: 14px; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); border: 2px solid var(--surface); z-index: 2; }
+.strategy-lane-node .moment-node { min-width: 150px; max-width: 230px; width: auto; align-items: flex-start; white-space: normal; box-shadow: 0 1px 2px rgba(60,45,20,0.08); }
+.strategy-lane-node .moment-node-title { white-space: normal; overflow: visible; text-overflow: clip; }
 
 /* The Planned zone: undated future plans, a distinct panel off the time
-   axis, not a week itself. */
-.strategy-backlog-zone { width: 190px; flex-shrink: 0; background: var(--card); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+   axis, not a week itself, its own background clearly separating it from
+   the dated lane beside it. */
+.strategy-backlog-zone { min-width: 0; background: var(--card); border-radius: 10px; padding: 8px 10px; margin-top: 4px; display: flex; flex-direction: column; gap: 6px; }
 .strategy-backlog-head { display: flex; align-items: center; gap: 6px; }
 .strategy-backlog-title { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
 .strategy-backlog-count { font-size: 10px; font-weight: 700; color: #B77400; background: #F5A62322; border-radius: 999px; padding: 1px 7px; }

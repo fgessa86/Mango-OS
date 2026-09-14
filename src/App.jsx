@@ -8599,9 +8599,13 @@ function PullMomentsPanel({ title, candidates, onConfirm, onClose }) {
    card stacked down the page, not one shared spreadsheet-like table. Weeks
    are a soft shaded time axis within a card (alternating bands, no hard
    gridlines), strategy and institution headers are full-width merged bands,
-   and only a route's own band places moment nodes along the week axis. Each
-   card computes its OWN week range from its own data (same range setting,
-   independent extent), since cards no longer share one continuous grid.
+   and only a route's own lane places moment nodes along the week axis.
+   The week axis is computed ONCE, shared by every card (not per strategy),
+   and every card's own CSS Grid uses the identical column template (same
+   week columns plus one fixed Planned column), so the week-label header,
+   the shaded bands, and a node's anchor position all reference the exact
+   same column boundaries: a node in "Aug 2 to Aug 8" sits directly under
+   that week's label, in every card, at every nesting depth.
    ============================================================ */
 const STRATEGY_GRID_RANGES = [
   { id: "8w", label: "Last 8 weeks", weeks: 8 },
@@ -8609,6 +8613,9 @@ const STRATEGY_GRID_RANGES = [
   { id: "all", label: "All", weeks: null },
 ];
 const STRATEGY_CARD_CELL_LIMIT = 3;
+// The fixed width of the trailing "Planned" column every card's grid
+// reserves, whether or not that particular row (a route) actually uses it.
+const STRATEGY_PLANNED_COL_PX = 210;
 const weeksBetweenDates = (a, b) => Math.max(0, Math.round((new Date(b) - new Date(a)) / (7 * 86400000)));
 
 // Buckets every DATED milestone and route-terminus event across a set of
@@ -8703,16 +8710,16 @@ function StrategyMomentChip({ entry, showThread, showRoute, readOnly, onUpdateMi
     </div>
   );
 }
-// What one week slot holds: the moments that advanced in that week at
-// whatever level this band represents (a single route, a collapsed
-// institution's routes merged, or a collapsed strategy's institutions
-// merged), grouped by thread so several hits on the same institution still
-// read as one thread doing several things. `labelThread` names the thread in
-// the node only when the slot can mix more than one (merged levels); a plain
-// route band never needs it, since the row itself already says who and what.
-// An empty slot renders nothing (just the shaded band shows through). A
-// crowded slot shows a few plus a "+N more" expander rather than growing
-// without bound.
+// What one MERGED week slot holds (a collapsed institution's routes, or a
+// collapsed strategy's institutions): the moments that advanced that week,
+// grouped by thread so several hits on the same institution still read as
+// one thread doing several things. `labelThread` names the thread in the
+// node only when the slot can mix more than one (a collapsed strategy). An
+// empty slot renders nothing (just the shaded band shows through). A crowded
+// slot shows a few plus a "+N more" expander rather than growing without
+// bound. A single ROUTE's own moments never go through this: see
+// `StrategyRouteLane` for the wider, anchored, non-cramped rendering used
+// there.
 function StrategyBandSlotContent({ items, labelThread, readOnly, onUpdateMilestone, onDeleteMilestone }) {
   const [showAll, setShowAll] = useState(false);
   if (items.length === 0) return null;
@@ -8734,46 +8741,11 @@ function StrategyBandSlotContent({ items, labelThread, readOnly, onUpdateMilesto
     </div>
   );
 }
-// The shaded week axis itself: soft alternating bands (no hard gridlines),
-// the current week gently tinted, future (planned) weeks read dashed/muted,
-// and (for a single route's own band) a light connecting line running behind
-// the nodes to read as one progression rather than isolated marks. A
-// dead-ended route's slots past its end date mute further, since nothing
-// more will ever land there.
-// `onDropWeek`, when given, turns every current/future slot into a drop
-// target for a dragged backlog chip (see StrategyRouteBand): dropping there
-// schedules the plan onto that week, snapping it out of the Planned zone and
-// onto the axis.
-function StrategyWeekBand({ weeks, byWeek, labelThread, readOnly, onUpdateMilestone, onDeleteMilestone, connectorLine, mutedFrom, onDropWeek }) {
-  return (
-    <div className={`strategy-weekband ${connectorLine ? "strategy-weekband-line" : ""}`} style={{ gridTemplateColumns: `repeat(${weeks.length}, 1fr)` }}>
-      {weeks.map((w, i) => {
-        const droppable = !!onDropWeek && w.offset >= 0;
-        return (
-          <div key={w.key} className={`strategy-weekband-slot ${i % 2 ? "strategy-weekband-slot-alt" : ""} ${w.offset === 0 ? "strategy-weekband-slot-current" : ""} ${w.offset > 0 ? "strategy-weekband-slot-future" : ""} ${mutedFrom && w.key > mutedFrom ? "strategy-weekband-slot-muted" : ""} ${droppable ? "strategy-weekband-slot-droppable" : ""}`}
-            onDragOver={droppable ? (e) => e.preventDefault() : undefined}
-            onDrop={droppable ? (e) => { e.preventDefault(); onDropWeek(w); } : undefined}>
-            <StrategyBandSlotContent items={byWeek.get(w.key) || []} labelThread={labelThread} readOnly={readOnly}
-              onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-// The light strip of week-range labels across the top of a card, aligned to
-// the exact same column template as every band beneath it in that card.
-function StrategyWeekLabels({ weeks }) {
-  return (
-    <div className="strategy-weeklabels" style={{ gridTemplateColumns: `repeat(${weeks.length}, 1fr)` }}>
-      {weeks.map((w) => (
-        <div key={w.key} className={`strategy-weeklabel ${w.offset === 0 ? "strategy-weeklabel-current" : ""} ${w.offset > 0 ? "strategy-weeklabel-future" : ""}`}>
-          {w.offset === 0 ? "This Week" : `${formatDate(w.start)} to ${formatDate(addDaysLocal(w.start, 6))}`}
-        </div>
-      ))}
-    </div>
-  );
-}
+// The classes for one shaded week slot: soft alternating bands (no hard
+// gridlines), the current week gently tinted, future weeks read hatched, a
+// muted slot past a dead-ended route's end (nothing will ever land there).
+const weekSlotClass = (i, w, mutedFrom) =>
+  `strategy-weekband-slot ${i % 2 ? "strategy-weekband-slot-alt" : ""} ${w.offset === 0 ? "strategy-weekband-slot-current" : ""} ${w.offset > 0 ? "strategy-weekband-slot-future" : ""} ${mutedFrom && w.key > mutedFrom ? "strategy-weekband-slot-muted" : ""}`;
 // Undated future plans, at every level: a route's own backlog, an
 // institution's (across its routes), a strategy's (across all its
 // institutions), so a collapsed level can still show how much intended work
@@ -8840,8 +8812,8 @@ function StrategyBacklogAddForm({ onAdd, onCancel, showToast }) {
 // The Planned zone: a route's undated future plans, visually a distinct
 // panel off to the side of the time axis (not a week, since it has no date),
 // stacked in priority order and reorderable. Each chip is also a drag SOURCE
-// the week band listens for (see StrategyRouteBand), so dragging one onto a
-// future week schedules it directly.
+// its route's lane listens for (see StrategyRouteRows/StrategyRouteLane), so
+// dragging one onto a future week schedules it directly.
 function StrategyBacklogZone({ items, readOnly, onAdd, onUpdate, onDelete, onSchedule, onComplete, onReorder, draggingId, onDragStart, onDragEnd, showToast }) {
   const [adding, setAdding] = useState(false);
   const dropReorder = (targetId) => {
@@ -8876,53 +8848,163 @@ function StrategyBacklogZone({ items, readOnly, onAdd, onUpdate, onDelete, onSch
     </div>
   );
 }
-// The ROUTE band (leaf level): a small label line (state glyph, title, state
-// badge, drag handle), then a row pairing its shaded week band (moments
-// placed along the axis) with its Planned zone (undated plans, off the
-// axis) side by side, clearly separated.
-function StrategyRouteBand({
+// A route's own lane: the shaded week axis with its moments floating at
+// their true week. Each node's LEFT edge (a small anchor dot) marks the real
+// week it belongs to; the card body itself can be wider than one week
+// column so text wraps onto 1-2 comfortable lines instead of being squeezed
+// into a narrow column. Two nodes anchored close in time are staggered onto
+// separate rows (measured against the lane's actual rendered width, so it
+// adapts to however many weeks are visible) rather than overlapping, and a
+// light connecting line runs from anchor to anchor in chronological order.
+const LANE_ROW_H = 54;
+const LANE_CARD_MAX_W = 230;
+function StrategyRouteLane({ thread, route, weeks, readOnly, onUpdateMilestone, onDeleteMilestone, onDropWeek }) {
+  const laneRef = useRef(null);
+  const [laneWidth, setLaneWidth] = useState(0);
+  useEffect(() => {
+    const el = laneRef.current;
+    if (!el) return undefined;
+    const measure = () => setLaneWidth(el.clientWidth);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const dead = route.state === "dead_end";
+  const mutedFrom = dead && route.ended_at ? route.ended_at : null;
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const weekIndexByKey = useMemo(() => { const m = new Map(); weeks.forEach((w, i) => m.set(w.key, i)); return m; }, [weeks]);
+  const dateToIndex = (d) => weekIndexByKey.get(startOfWeek(new Date(d)).toISOString().slice(0, 10));
+
+  // Chronological anchor points: every dated (non-backlog) milestone, plus
+  // the route's own terminus if it has ended.
+  const points = useMemo(() => {
+    const pts = route.milestones.filter((m) => !m.is_backlog && m.milestone_date)
+      .map((m) => ({ kind: "milestone", milestone: m, date: m.milestone_date, weekIdx: dateToIndex(m.milestone_date) }))
+      .filter((p) => p.weekIdx != null);
+    if (route.ended_at) {
+      const idx = dateToIndex(route.ended_at);
+      if (idx != null) pts.push({ kind: "terminus", date: route.ended_at, weekIdx: idx });
+    }
+    pts.sort((a, b) => (a.date || "").localeCompare(b.date || "") || a.weekIdx - b.weekIdx);
+    return pts;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route, weekIndexByKey]);
+
+  // Greedy row packing: an assumed card footprint (in week-equivalent
+  // units, derived from the lane's measured pixel width) keeps two
+  // close-in-time anchors from overlapping, staggering the later one onto
+  // the next free row instead.
+  const colWidth = weeks.length ? laneWidth / weeks.length : 0;
+  const cardSpanWeeks = colWidth > 0 ? Math.max(1, (LANE_CARD_MAX_W + 16) / colWidth) : 1.5;
+  const rowEnds = [];
+  const placed = points.map((p) => {
+    let row = 0;
+    while (rowEnds[row] !== undefined && p.weekIdx < rowEnds[row]) row++;
+    rowEnds[row] = p.weekIdx + cardSpanWeeks;
+    return { ...p, row };
+  });
+  const rowCount = placed.length ? Math.max(...placed.map((p) => p.row)) + 1 : 1;
+  const laneHeight = rowCount * LANE_ROW_H + 14;
+  const leftPct = (idx) => (weeks.length ? (idx / weeks.length) * 100 : 0);
+
+  const droppable = !!onDropWeek;
+  const onLaneDrop = (e) => {
+    if (!droppable || !laneRef.current) return;
+    e.preventDefault();
+    const rect = laneRef.current.getBoundingClientRect();
+    const relX = e.clientX - rect.left;
+    const idx = Math.min(weeks.length - 1, Math.max(0, Math.floor((relX / rect.width) * weeks.length)));
+    const w = weeks[idx];
+    if (w && w.offset >= 0) onDropWeek(w);
+  };
+
+  return (
+    <div ref={laneRef} className={`strategy-lane ${droppable ? "strategy-lane-droppable" : ""}`} style={{ gridColumn: `1 / span ${weeks.length}`, height: laneHeight }}
+      onDragOver={droppable ? (e) => e.preventDefault() : undefined} onDrop={droppable ? onLaneDrop : undefined}>
+      <div className="strategy-lane-bg" style={{ gridTemplateColumns: `repeat(${weeks.length}, 1fr)` }}>
+        {weeks.map((w, i) => <div key={w.key} className={weekSlotClass(i, w, mutedFrom)} />)}
+      </div>
+      {laneWidth > 0 && placed.length > 1 && (
+        <svg className="strategy-lane-svg" width={laneWidth} height={laneHeight}>
+          {placed.slice(1).map((b, i) => {
+            const a = placed[i];
+            const x1 = (leftPct(a.weekIdx) / 100) * laneWidth, x2 = (leftPct(b.weekIdx) / 100) * laneWidth;
+            const y1 = a.row * LANE_ROW_H + LANE_ROW_H / 2, y2 = b.row * LANE_ROW_H + LANE_ROW_H / 2;
+            const days = Math.max(0, Math.round((new Date(b.date) - new Date(a.date)) / 86400000));
+            return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} className={`strategy-lane-line ${days >= CONNECTOR_STALL_DAYS ? "strategy-lane-line-stalled" : ""}`} />;
+          })}
+        </svg>
+      )}
+      {placed.map((p) => (
+        <StrategyLaneNode key={p.kind === "terminus" ? "terminus" : p.milestone.id} point={p} route={route} todayISO={todayISO}
+          leftPct={leftPct(p.weekIdx)} top={p.row * LANE_ROW_H}
+          readOnly={readOnly} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+      ))}
+    </div>
+  );
+}
+// One anchored node inside a lane: a small dot marks the true week (the
+// node's left edge), with the card itself free to extend rightward as wide
+// as it needs for readable text.
+function StrategyLaneNode({ point, route, todayISO, leftPct, top, readOnly, onUpdateMilestone, onDeleteMilestone }) {
+  const [editing, setEditing] = useState(false);
+  return (
+    <div className="strategy-lane-node" style={{ left: `${leftPct}%`, top }}>
+      <span className="strategy-lane-anchor" />
+      {point.kind === "terminus" ? (
+        <RouteTerminusNode route={route} />
+      ) : (
+        <MomentNode milestone={point.milestone} todayISO={todayISO} readOnly={readOnly} editing={editing}
+          onEdit={() => setEditing(true)} onCancel={() => setEditing(false)}
+          onSave={(patch) => { onUpdateMilestone(point.milestone.id, patch); setEditing(false); }}
+          onDelete={() => onDeleteMilestone(point.milestone.id)} />
+      )}
+    </div>
+  );
+}
+// One ROUTE's grid rows: a full-width label line (state glyph, title, state
+// badge, drag handle), then its lane (moments floating on the week axis)
+// paired with its Planned zone (undated plans, off the axis) in the same
+// row, clearly separated by the zone's own distinct panel styling.
+function StrategyRouteRows({
   thread, route, weeks, readOnly, onUpdateMilestone, onDeleteMilestone, onAddMilestone, onReorderMilestones, showToast,
   isDragging, onDragStart, onDragOver, onDrop,
 }) {
-  const dated = route.milestones.filter((m) => !m.is_backlog);
   const backlog = useMemo(() => routeBacklog(route).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)), [route]);
-  const byWeek = useMemo(() => bucketThreadsByWeek([{ ...thread, routes: [{ ...route, milestones: dated }] }]), [thread, route, dated]);
   const meta = strategyRouteStateMeta(route.state);
   const dead = route.state === "dead_end";
   const [draggingBacklogId, setDraggingBacklogId] = useState(null);
   const scheduleBacklog = (id, dateStr) => onUpdateMilestone(id, { milestone_date: dateStr, is_backlog: false });
   const completeBacklog = (id, dateStr) => onUpdateMilestone(id, { milestone_date: dateStr, is_backlog: false, is_planned: false });
   return (
-    <div className={`strategy-route-band ${dead ? "strategy-route-band-dead" : ""} ${isDragging ? "strategy-dragging" : ""}`} onDragOver={onDragOver} onDrop={onDrop}>
-      <div className="strategy-route-head">
+    <>
+      <div className={`strategy-route-head ${dead ? "strategy-route-head-dead" : ""} ${isDragging ? "strategy-dragging" : ""}`} style={{ gridColumn: "1 / -1" }} onDragOver={onDragOver} onDrop={onDrop}>
         {!readOnly && <span className="strategy-drag-handle" title="Drag to reorder" draggable onDragStart={onDragStart}>⠿</span>}
         <span className="strategy-route-glyph" style={{ color: meta.color }}>{strategyEndGlyph(route.state)}</span>
         <span className="strategy-route-title">{route.title}</span>
         <span className="badge strategy-route-badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{meta.label}</span>
       </div>
-      <div className="strategy-route-timeline-row">
-        <StrategyWeekBand weeks={weeks} byWeek={byWeek} labelThread={false} readOnly={readOnly}
-          onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
-          connectorLine mutedFrom={dead && route.ended_at ? route.ended_at : null}
-          onDropWeek={draggingBacklogId ? (w) => { scheduleBacklog(draggingBacklogId, w.key); setDraggingBacklogId(null); } : undefined} />
-        <div className="strategy-route-sep" />
-        <StrategyBacklogZone items={backlog} readOnly={readOnly}
-          onAdd={(title) => onAddMilestone({ thread_id: thread.id, route_id: route.id }, { title, is_planned: true, is_backlog: true, milestone_date: null })}
-          onUpdate={onUpdateMilestone} onDelete={onDeleteMilestone}
-          onSchedule={scheduleBacklog} onComplete={completeBacklog}
-          onReorder={onReorderMilestones}
-          draggingId={draggingBacklogId} onDragStart={setDraggingBacklogId} onDragEnd={() => setDraggingBacklogId(null)}
-          showToast={showToast} />
-      </div>
-    </div>
+      <StrategyRouteLane thread={thread} route={route} weeks={weeks} readOnly={readOnly}
+        onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+        onDropWeek={draggingBacklogId ? (w) => { scheduleBacklog(draggingBacklogId, w.key); setDraggingBacklogId(null); } : undefined} />
+      <StrategyBacklogZone items={backlog} readOnly={readOnly}
+        onAdd={(title) => onAddMilestone({ thread_id: thread.id, route_id: route.id }, { title, is_planned: true, is_backlog: true, milestone_date: null })}
+        onUpdate={onUpdateMilestone} onDelete={onDeleteMilestone}
+        onSchedule={scheduleBacklog} onComplete={completeBacklog}
+        onReorder={onReorderMilestones}
+        draggingId={draggingBacklogId} onDragStart={setDraggingBacklogId} onDragEnd={() => setDraggingBacklogId(null)}
+        showToast={showToast} />
+    </>
   );
 }
-// The INSTITUTION band (person or institution "threaded" into the
+// One INSTITUTION's grid rows (person or institution "threaded" into the
 // strategy): a full-width merged header line (name, type, editable goal,
-// drag handle, collapse toggle), then either its merged week band
-// (collapsed) or its own stack of ROUTE bands (expanded), plus an inline
+// drag handle, collapse toggle), then either its merged week slots
+// (collapsed) or its own stack of ROUTE rows (expanded), plus an inline
 // "+ Add route" control.
-function StrategyInstitutionBand({
+function StrategyInstitutionRows({
   thread, weeks, collapsed, onToggleCollapse, onUpdateGoal, readOnly, onUpdateMilestone, onDeleteMilestone, onAddMilestone, onReorderMilestones, showToast,
   addingRoute, onStartAddRoute, onCancelAddRoute, onAddRoute, onReorderRoutes,
   isDragging, onDragStart, onDragOver, onDrop,
@@ -8942,8 +9024,8 @@ function StrategyInstitutionBand({
   };
   const pending = threadBacklogCount(thread);
   return (
-    <div className={`strategy-inst-band ${isDragging ? "strategy-dragging" : ""}`} onDragOver={onDragOver} onDrop={onDrop}>
-      <div className="strategy-inst-head">
+    <>
+      <div className={`strategy-inst-head ${isDragging ? "strategy-dragging" : ""}`} style={{ gridColumn: "1 / -1" }} onDragOver={onDragOver} onDrop={onDrop}>
         {!readOnly && <span className="strategy-drag-handle" title="Drag to reorder" draggable onDragStart={onDragStart}>⠿</span>}
         <button type="button" className="link-btn strategy-tree-toggle" onClick={onToggleCollapse}>{collapsed ? "▸" : "▾"}</button>
         <button type="button" className="strategy-inst-name" onClick={() => thread.onOpen && thread.onOpen()} disabled={!thread.onOpen}>{thread.name}</button>
@@ -8952,19 +9034,23 @@ function StrategyInstitutionBand({
         {collapsed && pending > 0 && <span className="strategy-planned-badge">{pending} planned</span>}
       </div>
       {collapsed ? (
-        <StrategyWeekBand weeks={weeks} byWeek={byWeek} labelThread={false} readOnly={readOnly}
-          onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+        weeks.map((w, i) => (
+          <div key={w.key} className={weekSlotClass(i, w, null)}>
+            <StrategyBandSlotContent items={byWeek.get(w.key) || []} labelThread={false} readOnly={readOnly}
+              onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+          </div>
+        ))
       ) : (
         <>
           {thread.routes.map((route) => (
-            <StrategyRouteBand key={route.id} thread={thread} route={route} weeks={weeks} readOnly={readOnly}
+            <StrategyRouteRows key={route.id} thread={thread} route={route} weeks={weeks} readOnly={readOnly}
               onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
               onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
               isDragging={routeDragId === route.id} onDragStart={() => setRouteDragId(route.id)}
               onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); dropRoute(route.id); }} />
           ))}
           {!readOnly && (
-            <div className="strategy-inline-add-row">
+            <div className="strategy-inline-add-row" style={{ gridColumn: "1 / -1" }}>
               {addingRoute ? (
                 <div className="exec-track-add strategy-inline-add">
                   <input className="input" autoFocus value={routeTitle} onChange={(e) => setRouteTitle(e.target.value)}
@@ -8977,14 +9063,17 @@ function StrategyInstitutionBand({
           )}
         </>
       )}
-    </div>
+    </>
   );
 }
-// One STRATEGY's self-contained card: a colored header spanning the full
-// width, then either its merged week band (collapsed) or its own stack of
-// INSTITUTION bands (expanded), plus an inline "+ Add institution" control.
-// Cards are separate, clearly spaced blocks, not rows of one shared table;
-// each owns its own week axis (passed in, computed from its own data).
+// One STRATEGY's self-contained card: a colored header sitting above the
+// grid, then a single CSS Grid (`repeat(weeks.length, 1fr) + one fixed
+// Planned column`) shared by the week-label row and every institution/route
+// row beneath it, so a node's anchor position, its week's shaded band, and
+// that week's header label all reference the exact same column boundaries.
+// Cards are separate, clearly spaced blocks, not rows of one shared table,
+// but every card is handed the SAME global `weeks` (see StrategyCardsTimeline),
+// so they still line up vertically with each other on the same weeks.
 function StrategyCard({
   strategy, threads, weeks, collapsed, onToggleCollapse, onUpdateGoal, onUpdateThreadGoal, readOnly,
   onUpdateMilestone, onDeleteMilestone, onAddMilestone, onReorderMilestones, showToast,
@@ -9021,15 +9110,25 @@ function StrategyCard({
         {collapsed && pending > 0 && <span className="strategy-planned-badge">{pending} planned</span>}
         {lastMoveDate && <span className="strategy-card-move">Last movement {formatDate(lastMoveDate)}</span>}
       </div>
-      <div className="strategy-card-body">
-        <StrategyWeekLabels weeks={weeks} />
+      <div className="strategy-card-body" style={{ gridTemplateColumns: `repeat(${weeks.length}, 1fr) ${STRATEGY_PLANNED_COL_PX}px` }}>
+        {weeks.map((w) => (
+          <div key={w.key} className={`strategy-weeklabel ${w.offset === 0 ? "strategy-weeklabel-current" : ""} ${w.offset > 0 ? "strategy-weeklabel-future" : ""}`}>
+            {w.offset === 0 ? "This Week" : `${formatDate(w.start)} to ${formatDate(addDaysLocal(w.start, 6))}`}
+          </div>
+        ))}
+        <div className="strategy-weeklabel strategy-weeklabel-plannedcol">Planned</div>
+
         {collapsed ? (
-          <StrategyWeekBand weeks={weeks} byWeek={byWeek} labelThread readOnly={readOnly}
-            onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+          weeks.map((w, i) => (
+            <div key={w.key} className={weekSlotClass(i, w, null)}>
+              <StrategyBandSlotContent items={byWeek.get(w.key) || []} labelThread readOnly={readOnly}
+                onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+            </div>
+          ))
         ) : (
           <>
             {threads.map((thread) => (
-              <StrategyInstitutionBand key={thread.id} thread={thread} weeks={weeks}
+              <StrategyInstitutionRows key={thread.id} thread={thread} weeks={weeks}
                 collapsed={collapsedInstitutionIds.has(thread.id)} onToggleCollapse={() => onToggleInstitutionCollapse(thread.id)}
                 onUpdateGoal={onUpdateThreadGoal} readOnly={readOnly} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
                 onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
@@ -9039,7 +9138,7 @@ function StrategyCard({
                 onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); dropThread(thread.id); }} />
             ))}
             {!readOnly && (
-              <div className="strategy-inline-add-row">
+              <div className="strategy-inline-add-row" style={{ gridColumn: "1 / -1" }}>
                 {addingThread ? (
                   <StrategyAddThreadForm trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
                     onAdd={(fks, title) => onAddThread(strategy.id, { title, fks })} onCancel={onCancelAddThread} />
@@ -9054,14 +9153,14 @@ function StrategyCard({
 }
 // The primary Timeline view: a stack of clean, separate strategy cards, each
 // showing its own Strategy > Institution > Route tree advancing over softly
-// shaded weeks. Each level (strategy, institution) is independently
-// collapsible, remembered per node; a collapsed level shows a merged week
-// band instead of hiding its children outright, so the timeline zooms
-// between a single route's own progression and a whole strategy's without
-// leaving the same visual language. A shared range control bounds how far
-// back each card's own week axis goes (every card still computes its axis
-// from its own data, so one strategy's history never widens another's).
-// Whole strategy cards, institution bands, and route bands are all
+// shaded weeks. The week axis is computed ONCE here, shared by every card
+// (a unified timeline across cards, not each card picking its own range),
+// so cards line up vertically with each other on the same weeks. Each level
+// (strategy, institution) is independently collapsible, remembered per
+// node; a collapsed level shows merged week slots instead of hiding its
+// children outright, so the timeline zooms between a single route's own
+// progression and a whole strategy's without leaving the same visual
+// language. Whole strategy cards, institution rows, and route rows are all
 // drag-reorderable via their grip handle, persisted to sort_order.
 function StrategyCardsTimeline({
   strategyThreadsList, onUpdateStrategyGoal, onUpdateThreadGoal, readOnly, onUpdateMilestone, onDeleteMilestone,
@@ -9089,6 +9188,10 @@ function StrategyCardsTimeline({
     onReorderStrategies(ids);
     setStrategyDragId(null);
   };
+  // A single shared week axis for every card (unified timeline), rather than
+  // each strategy computing its own: this is what lets a node line up under
+  // the same week's header/shading regardless of which card it is in.
+  const weeks = useMemo(() => computeStrategyGridWeeks(strategyThreadsList, range.weeks), [strategyThreadsList, range.weeks]);
 
   return (
     <div className="strategy-cards-outer">
@@ -9111,30 +9214,27 @@ function StrategyCardsTimeline({
         <div className="empty-small">No strategies yet. Create one to start mapping routes.</div>
       ) : (
         <div className="strategy-cards-stack">
-          {strategyThreadsList.map(({ strategy, threads }) => {
-            const weeks = computeStrategyGridWeeks([{ strategy, threads }], range.weeks);
-            return (
-              <StrategyCard key={strategy.id} strategy={strategy} threads={threads} weeks={weeks}
-                collapsed={collapsedStrategyIds.has(strategy.id)} onToggleCollapse={() => toggleStrategyCollapse(strategy.id)}
-                onUpdateGoal={onUpdateStrategyGoal} onUpdateThreadGoal={onUpdateThreadGoal} readOnly={readOnly}
-                onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
-                onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
-                collapsedInstitutionIds={collapsedInstitutionIds} onToggleInstitutionCollapse={toggleInstitutionCollapse}
-                addingRouteFor={addingRouteFor}
-                onStartAddRoute={(threadId) => setAddingRouteFor(threadId)}
-                onCancelAddRoute={() => setAddingRouteFor(null)}
-                onAddRoute={(threadId, title) => { onAddRoute(threadId, title); setAddingRouteFor(null); }}
-                onReorderThreads={onReorderThreads} onReorderRoutes={onReorderRoutes}
-                addingThread={addingThreadFor === strategy.id}
-                onStartAddThread={() => setAddingThreadFor(strategy.id)}
-                onCancelAddThread={() => setAddingThreadFor(null)}
-                onAddThread={(sid, vals) => { onAddThread(sid, vals); setAddingThreadFor(null); }}
-                trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
-                isDragging={strategyDragId === strategy.id} onDragStart={() => setStrategyDragId(strategy.id)}
-                onDragOverSelf={readOnly ? undefined : (e) => e.preventDefault()}
-                onDropSelf={readOnly ? undefined : (e) => { e.preventDefault(); dropStrategy(strategy.id); }} />
-            );
-          })}
+          {strategyThreadsList.map(({ strategy, threads }) => (
+            <StrategyCard key={strategy.id} strategy={strategy} threads={threads} weeks={weeks}
+              collapsed={collapsedStrategyIds.has(strategy.id)} onToggleCollapse={() => toggleStrategyCollapse(strategy.id)}
+              onUpdateGoal={onUpdateStrategyGoal} onUpdateThreadGoal={onUpdateThreadGoal} readOnly={readOnly}
+              onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+              onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
+              collapsedInstitutionIds={collapsedInstitutionIds} onToggleInstitutionCollapse={toggleInstitutionCollapse}
+              addingRouteFor={addingRouteFor}
+              onStartAddRoute={(threadId) => setAddingRouteFor(threadId)}
+              onCancelAddRoute={() => setAddingRouteFor(null)}
+              onAddRoute={(threadId, title) => { onAddRoute(threadId, title); setAddingRouteFor(null); }}
+              onReorderThreads={onReorderThreads} onReorderRoutes={onReorderRoutes}
+              addingThread={addingThreadFor === strategy.id}
+              onStartAddThread={() => setAddingThreadFor(strategy.id)}
+              onCancelAddThread={() => setAddingThreadFor(null)}
+              onAddThread={(sid, vals) => { onAddThread(sid, vals); setAddingThreadFor(null); }}
+              trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
+              isDragging={strategyDragId === strategy.id} onDragStart={() => setStrategyDragId(strategy.id)}
+              onDragOverSelf={readOnly ? undefined : (e) => e.preventDefault()}
+              onDropSelf={readOnly ? undefined : (e) => { e.preventDefault(); dropStrategy(strategy.id); }} />
+          ))}
         </div>
       )}
     </div>
