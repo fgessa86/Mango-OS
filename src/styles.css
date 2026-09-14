@@ -2405,64 +2405,82 @@ body.exec-presenting-body { overflow: hidden; }
 .moment-node-icon-setback { color: #B0392E; }
 .moment-node-icon-planned { color: var(--muted); }
 
-/* Strategy Timeline grid: Strategy > Institution > Route, nested rows, weeks
-   as shared columns. A single CSS grid holds the corner cell, the
-   week-header row, and every row's header + cells as direct children in
-   document order, so the sticky corner/header-row/header-column all line up
-   against the exact same track sizes without any manual width syncing. */
-.strategy-grid-outer { margin-top: 10px; }
-.strategy-grid-toolbar { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-bottom: 10px; }
-.strategy-grid-wrap { overflow: auto; max-height: 72vh; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
-.strategy-grid { display: grid; }
-.strategy-grid-corner { position: sticky; top: 0; left: 0; z-index: 3; background: var(--surface); border-bottom: 1px solid var(--border); border-right: 2px solid var(--border); }
-.strategy-grid-weekhead {
-  position: sticky; top: 0; z-index: 2; background: var(--surface);
-  border-bottom: 1px solid var(--border); border-right: 1px solid var(--border);
-  padding: 8px 10px; font-size: 11.5px; font-weight: 700; color: var(--text-2); text-align: center;
-}
-.strategy-grid-weekhead-current { background: #F5A62322; color: #B77400; }
-.strategy-grid-weekhead-future { color: var(--muted); font-style: italic; }
-/* Shared row-head shape; each level adds its own indentation and weight. */
-.strategy-grid-rowhead {
-  position: sticky; left: 0; z-index: 1; background: var(--surface);
-  border-right: 2px solid var(--border); border-top: 1px solid var(--border);
-  padding: 8px 12px 8px 8px; display: flex; align-items: flex-start; gap: 6px;
-}
-.strategy-grid-tree-toggle { font-size: 11px; flex-shrink: 0; padding: 2px 4px; margin-top: 1px; }
-.strategy-grid-rowhead-strategy { border-left: 4px solid; padding-left: 8px; }
-.strategy-grid-rowhead-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
-.strategy-grid-rowhead-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
-.strategy-grid-rowhead-name { font-size: 14px; font-weight: 800; color: var(--text); }
-.strategy-grid-rowhead-goal { font-size: 11.5px; }
-.strategy-grid-rowhead-move { font-size: 10.5px; color: var(--muted); }
-/* Institution: indented one level under its strategy. */
-.strategy-grid-rowhead-institution { padding-left: 24px; background: var(--card); }
-.strategy-grid-rowhead-name-btn { border: none; background: none; padding: 0; font-family: inherit; font-size: 12.5px; font-weight: 700; color: var(--text); cursor: pointer; text-align: left; }
-.strategy-grid-rowhead-name-btn:hover { text-decoration: underline; }
-.strategy-grid-rowhead-name-btn:disabled { color: var(--muted); cursor: default; }
-/* Route: indented two levels under its institution, no toggle (a leaf). */
-.strategy-grid-rowhead-route { padding-left: 44px; align-items: center; gap: 6px; }
-.strategy-grid-route-glyph { font-size: 12px; font-weight: 800; flex-shrink: 0; }
-.strategy-grid-route-title { font-size: 12px; font-weight: 650; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.strategy-grid-route-badge { flex-shrink: 0; font-size: 10px; margin-left: auto; }
-.strategy-grid-rowhead-route-dead { opacity: .62; }
-/* Inline "+ Add institution" / "+ Add route" rows. */
-.strategy-grid-rowhead-addinst { padding-left: 24px; }
-.strategy-grid-rowhead-addroute { padding-left: 44px; }
-.strategy-grid-add-form { flex-wrap: wrap; gap: 6px; }
-.strategy-grid-cell {
-  border-right: 1px solid var(--border); border-top: 1px solid var(--border);
-  padding: 8px; display: flex; flex-direction: column; gap: 6px; min-width: 0;
-}
-.strategy-grid-cell-empty { background: transparent; }
-.strategy-grid-cell-muted { opacity: .4; }
-.strategy-grid-moment { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
-.strategy-grid-moment-thread { border: none; background: none; padding: 0; font-family: inherit; font-size: 10.5px; font-weight: 700; color: #2A6FDB; cursor: pointer; text-align: left; }
-.strategy-grid-moment-thread:hover { text-decoration: underline; }
-.strategy-grid-moment-thread:disabled { color: var(--muted); cursor: default; }
-.strategy-grid-moment-route { font-size: 10px; color: var(--muted); background: var(--card); border-radius: 6px; padding: 1px 6px; align-self: flex-start; }
-.strategy-grid-moment .moment-node { max-width: 100%; width: 100%; box-sizing: border-box; }
-.strategy-grid-more { align-self: flex-start; }
+/* Strategy Timeline, card layout: each strategy is its own separate,
+   self-contained card stacked down the page with real space between them,
+   not one connected spreadsheet-like grid. Weeks are a soft shaded time
+   axis inside a card (alternating bands, no hard borders/gridlines); the
+   strategy and institution headers are full-width merged bands, and only a
+   route's own band places moment chips along the week axis. */
+.strategy-cards-outer { margin-top: 10px; }
+.strategy-grid-toolbar { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-bottom: 14px; }
+.strategy-cards-stack { display: flex; flex-direction: column; gap: 22px; }
+
+.strategy-card { border: 2px solid var(--border); border-radius: 18px; background: var(--surface); overflow: hidden; box-shadow: 0 1px 3px rgba(60,45,20,0.05); }
+.strategy-card.strategy-dragging { opacity: .5; }
+.strategy-card-head { display: flex; align-items: flex-start; gap: 8px; padding: 14px 18px; }
+.strategy-card-dot { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
+.strategy-card-name { font-size: 16px; font-weight: 800; color: var(--text); flex-shrink: 0; margin-top: 1px; }
+.strategy-card-goal { flex: 1; min-width: 160px; font-size: 12.5px; margin-top: 1px; }
+.strategy-card-move { font-size: 10.5px; color: var(--muted); flex-shrink: 0; margin-top: 3px; white-space: nowrap; }
+.strategy-card-body { padding: 6px 18px 16px; }
+
+/* A drag handle, never the row/band itself, so surrounding text stays
+   selectable (same convention as the exec block / initiative drag grips). */
+.strategy-drag-handle { cursor: grab; color: var(--muted); font-size: 13px; line-height: 1; flex-shrink: 0; margin-top: 2px; user-select: none; }
+.strategy-drag-handle:active { cursor: grabbing; }
+.strategy-tree-toggle { font-size: 11px; flex-shrink: 0; padding: 2px 4px; margin-top: 1px; }
+
+/* Week-range label strip, and every week band beneath it in the same card,
+   share the identical column template (repeat(weeks.length, 1fr)) so they
+   line up top to bottom without needing a shared table. */
+.strategy-weeklabels { display: grid; gap: 0; margin: 6px 0 4px; }
+.strategy-weeklabel { font-size: 10.5px; font-weight: 700; color: var(--muted); text-align: center; padding: 2px 4px; }
+.strategy-weeklabel-current { color: #B77400; font-weight: 800; }
+.strategy-weeklabel-future { font-style: italic; }
+
+/* The shaded time axis: soft alternating bands instead of gridlines, the
+   current week gently tinted, future (planned) weeks read muted/dashed. */
+.strategy-weekband { display: grid; gap: 0; position: relative; border-radius: 10px; overflow: hidden; }
+.strategy-weekband-slot { background: transparent; padding: 4px 5px; min-height: 30px; display: flex; flex-direction: column; gap: 5px; justify-content: center; }
+.strategy-weekband-slot-alt { background: var(--card); }
+.strategy-weekband-slot-current { background: #F5A62322; }
+.strategy-weekband-slot-future { background: repeating-linear-gradient(135deg, transparent 0 8px, #00000006 8px 9px); }
+.strategy-weekband-slot-muted { opacity: .35; }
+/* A route's own band gets a light connecting line running behind its
+   chips, so consecutive moments read as one progression, not stray marks. */
+.strategy-weekband-line::before { content: ""; position: absolute; left: 12px; right: 12px; top: 50%; height: 2px; background: var(--border); transform: translateY(-50%); z-index: 0; }
+.strategy-band-slot-content { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 4px; }
+.strategy-band-more { align-self: flex-start; }
+
+/* Institution: a full-width merged header band, indented under its
+   strategy, then either its own merged week band or its route bands. */
+.strategy-inst-band { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+.strategy-inst-band.strategy-dragging { opacity: .5; }
+.strategy-inst-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-left: 4px; }
+.strategy-inst-name { border: none; background: none; padding: 0; font-family: inherit; font-size: 13px; font-weight: 700; color: var(--text); cursor: pointer; text-align: left; }
+.strategy-inst-name:hover { text-decoration: underline; }
+.strategy-inst-name:disabled { color: var(--muted); cursor: default; }
+.strategy-inst-goal { flex: 1; min-width: 160px; font-size: 11.5px; }
+
+/* Route: a small label line, indented further under its institution, then
+   its own shaded band with moment chips floating along the weeks. */
+.strategy-route-band { margin-top: 10px; padding-left: 22px; }
+.strategy-route-band.strategy-dragging { opacity: .5; }
+.strategy-route-band-dead { opacity: .62; }
+.strategy-route-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.strategy-route-glyph { font-size: 12px; font-weight: 800; flex-shrink: 0; }
+.strategy-route-title { font-size: 12px; font-weight: 650; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.strategy-route-badge { flex-shrink: 0; font-size: 10px; margin-left: auto; }
+
+.strategy-inline-add-row { margin-top: 10px; padding-left: 4px; }
+.strategy-inline-add { flex-wrap: wrap; gap: 6px; }
+
+.strategy-chip { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.strategy-chip-thread { border: none; background: none; padding: 0; font-family: inherit; font-size: 10.5px; font-weight: 700; color: #2A6FDB; cursor: pointer; text-align: left; }
+.strategy-chip-thread:hover { text-decoration: underline; }
+.strategy-chip-thread:disabled { color: var(--muted); cursor: default; }
+.strategy-chip-route { font-size: 10px; color: var(--muted); background: var(--card); border-radius: 6px; padding: 1px 6px; align-self: flex-start; }
+.strategy-chip .moment-node { max-width: 100%; box-sizing: border-box; background: var(--surface); }
 
 .pull-moments-modal { max-width: 620px; }
 .pull-moments-tools { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; font-size: 12.5px; }
