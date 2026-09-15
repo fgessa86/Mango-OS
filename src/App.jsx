@@ -1423,6 +1423,7 @@ export default function App() {
   const [strategyThreads, setStrategyThreads] = useState([]);
   const [strategyRoutes, setStrategyRoutes] = useState([]);
   const [progressMilestones, setProgressMilestones] = useState([]);
+  const [routeBlockers, setRouteBlockers] = useState([]);
   const [stageHistory, setStageHistory] = useState([]);
   const [execQuestions, setExecQuestions] = useState([]);
   const [execOpenId, setExecOpenId] = useState(null);
@@ -1493,7 +1494,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp, strat, sthr, sroutes, pms, sh] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp, strat, sthr, sroutes, pms, rb, sh] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1531,6 +1532,7 @@ export default function App() {
         api("strategy_threads", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("strategy_routes", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("progress_milestones", "GET", null, "?select=*&order=milestone_date.asc,created_at.asc").catch(() => []),
+        api("route_blockers", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("stage_history", "GET", null, "?select=*&order=changed_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
@@ -1543,7 +1545,7 @@ export default function App() {
       setDiscussionPoints(dp || []); setTopOfMind(tom || []);
       setExecInitiatives(xi || []); setExecTracked(xti || []); setExecQuestions(xq || []); setExecTrackedPeople(xtp || []);
       setStrategies(strat || []); setStrategyThreads(sthr || []); setStrategyRoutes(sroutes || []);
-      setProgressMilestones(pms || []); setStageHistory(sh || []);
+      setProgressMilestones(pms || []); setRouteBlockers(rb || []); setStageHistory(sh || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -4267,17 +4269,23 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     try {
       const threadIds = strategyThreads.filter((t) => t.strategy_id === id).map((t) => t.id);
       const routeIds = strategyRoutes.filter((r) => threadIds.includes(r.thread_id)).map((r) => r.id);
-      if (routeIds.length) await api("progress_milestones", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+      if (routeIds.length) {
+        await api("progress_milestones", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+        await api("route_blockers", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+      }
       if (threadIds.length) {
         await api("progress_milestones", "DELETE", null, `?thread_id=in.(${threadIds.join(",")})`);
+        await api("route_blockers", "DELETE", null, `?thread_id=in.(${threadIds.join(",")})`);
         await api("strategy_routes", "DELETE", null, `?thread_id=in.(${threadIds.join(",")})`);
         await api("strategy_threads", "DELETE", null, `?strategy_id=eq.${id}`);
       }
+      await api("route_blockers", "DELETE", null, `?strategy_id=eq.${id}`);
       await api("strategies", "DELETE", null, `?id=eq.${id}`);
       setStrategies((prev) => prev.filter((s) => s.id !== id));
       setStrategyThreads((prev) => prev.filter((t) => t.strategy_id !== id));
       setStrategyRoutes((prev) => prev.filter((r) => !threadIds.includes(r.thread_id)));
       setProgressMilestones((prev) => prev.filter((m) => !threadIds.includes(m.thread_id) && !routeIds.includes(m.route_id)));
+      setRouteBlockers((prev) => prev.filter((b) => !threadIds.includes(b.thread_id) && !routeIds.includes(b.route_id) && b.strategy_id !== id));
     } catch { showToast("Could not delete strategy"); }
   };
 
@@ -4303,13 +4311,18 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const deleteStrategyThread = async (id) => {
     try {
       const routeIds = strategyRoutes.filter((r) => r.thread_id === id).map((r) => r.id);
-      if (routeIds.length) await api("progress_milestones", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+      if (routeIds.length) {
+        await api("progress_milestones", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+        await api("route_blockers", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+      }
       await api("progress_milestones", "DELETE", null, `?thread_id=eq.${id}`);
+      await api("route_blockers", "DELETE", null, `?thread_id=eq.${id}`);
       await api("strategy_routes", "DELETE", null, `?thread_id=eq.${id}`);
       await api("strategy_threads", "DELETE", null, `?id=eq.${id}`);
       setStrategyThreads((prev) => prev.filter((t) => t.id !== id));
       setStrategyRoutes((prev) => prev.filter((r) => r.thread_id !== id));
       setProgressMilestones((prev) => prev.filter((m) => m.thread_id !== id && !routeIds.includes(m.route_id)));
+      setRouteBlockers((prev) => prev.filter((b) => b.thread_id !== id && !routeIds.includes(b.route_id)));
     } catch { showToast("Could not delete thread"); }
   };
   const reorderStrategies = async (orderedIds) => {
@@ -4345,9 +4358,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const deleteStrategyRoute = async (id) => {
     try {
       await api("progress_milestones", "DELETE", null, `?route_id=eq.${id}`);
+      await api("route_blockers", "DELETE", null, `?route_id=eq.${id}`);
       await api("strategy_routes", "DELETE", null, `?id=eq.${id}`);
       setStrategyRoutes((prev) => prev.filter((r) => r.id !== id));
       setProgressMilestones((prev) => prev.filter((m) => m.route_id !== id));
+      setRouteBlockers((prev) => prev.filter((b) => b.route_id !== id));
     } catch { showToast("Could not delete route"); }
   };
   const reorderStrategyRoutes = async (orderedIds) => {
@@ -4417,6 +4432,57 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     } catch { showToast("Could not pull moments"); }
   };
 
+  /* ---- Blockers: an OPEN obstacle currently standing in the way of a route,
+     thread (institution/person), or strategy, distinct from a milestone
+     (progress) or a setback (a past event). A blocker stays open until
+     resolved; resolving it can optionally spawn an "Unblocked: ..." milestone
+     on the route so the timeline shows the obstacle was cleared. ---- */
+  const addRouteBlocker = async (fks, content) => {
+    const clean = (content || "").trim();
+    if (!clean) return null;
+    try {
+      const siblings = routeBlockers.filter((b) => (fks.route_id ? b.route_id === fks.route_id : fks.thread_id ? b.thread_id === fks.thread_id && !b.route_id : b.strategy_id === fks.strategy_id && !b.thread_id && !b.route_id));
+      const sort_order = siblings.length ? Math.max(...siblings.map((b) => b.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("route_blockers", "POST", {
+        route_id: fks.route_id || null, thread_id: fks.thread_id || null, strategy_id: fks.strategy_id || null,
+        content: upgradeTokenMentions(clean), raised_at: new Date().toISOString().slice(0, 10), sort_order,
+      });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setRouteBlockers((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not add blocker"); return null; }
+  };
+  const updateRouteBlocker = async (id, patch) => {
+    if ("content" in patch) patch = { ...patch, content: upgradeTokenMentions(patch.content || "") };
+    if ("resolution_note" in patch) patch = { ...patch, resolution_note: upgradeTokenMentions(patch.resolution_note || "") };
+    try {
+      await api("route_blockers", "PATCH", patch, `?id=eq.${id}`);
+      setRouteBlockers((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+    } catch { showToast("Could not save blocker"); }
+  };
+  const deleteRouteBlocker = async (id) => {
+    try {
+      await api("route_blockers", "DELETE", null, `?id=eq.${id}`);
+      setRouteBlockers((prev) => prev.filter((b) => b.id !== id));
+    } catch { showToast("Could not delete blocker"); }
+  };
+  const reorderRouteBlockers = async (orderedIds) => {
+    setRouteBlockers((prev) => prev.map((b) => { const i = orderedIds.indexOf(b.id); return i === -1 ? b : { ...b, sort_order: i }; }));
+    try { await Promise.all(orderedIds.map((id, i) => api("route_blockers", "PATCH", { sort_order: i }, `?id=eq.${id}`))); }
+    catch { showToast("Could not save the new order"); }
+  };
+  // Resolving a blocker records when and, optionally, why; the caller (a
+  // route-level blocker only, since a thread/strategy blocker has no route to
+  // put a milestone on) may also spawn an "Unblocked: ..." milestone.
+  const resolveRouteBlocker = async (id, { resolution_note, addMilestone, route_id } = {}) => {
+    const patch = { is_resolved: true, resolved_at: new Date().toISOString().slice(0, 10), resolution_note: (resolution_note || "").trim() || null };
+    await updateRouteBlocker(id, patch);
+    if (addMilestone && route_id) {
+      const b = routeBlockers.find((x) => x.id === id);
+      await addProgressMilestone({ route_id }, { title: `Unblocked: ${b?.content || ""}`.slice(0, 200) });
+    }
+  };
+
   // Candidate moments for "Pull existing moments": activities, notes, stage
   // history, and any already-created plain-entity progress milestone for the
   // given entity, each tagged with a stable source_ref for dedup. Rough
@@ -4484,9 +4550,22 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       onOpen = inst ? () => openInstitution(inst.name) : null;
     }
     const routes = strategyRoutes.filter((r) => r.thread_id === t.id).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
-      .map((r) => ({ ...r, milestones: progressMilestones.filter((m) => m.route_id === r.id).sort((a, b) => (a.milestone_date || "").localeCompare(b.milestone_date || "")) }));
-    return { ...t, isPerson, name, entityKey, typeMeta, onOpen, routes };
+      .map((r) => ({
+        ...r,
+        milestones: progressMilestones.filter((m) => m.route_id === r.id).sort((a, b) => (a.milestone_date || "").localeCompare(b.milestone_date || "")),
+        blockers: routeBlockersFor({ route_id: r.id }),
+      }));
+    return { ...t, isPerson, name, entityKey, typeMeta, onOpen, routes, blockers: routeBlockersFor({ thread_id: t.id }) };
   };
+  // Blockers for a route (route_id set), a thread/institution (thread_id set,
+  // route_id null), or a whole strategy (strategy_id set, thread_id and
+  // route_id both null), sorted by priority (sort_order) then raised date.
+  const routeBlockersFor = (fks) => routeBlockers.filter((b) => {
+    if (fks.route_id) return b.route_id === fks.route_id;
+    if (fks.thread_id) return b.thread_id === fks.thread_id && !b.route_id;
+    return b.strategy_id === fks.strategy_id && !b.thread_id && !b.route_id;
+  }).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || (a.raised_at || "").localeCompare(b.raised_at || ""));
+  const openBlockersCount = (fks) => routeBlockersFor(fks).filter((b) => !b.is_resolved).length;
 
   /* ---- Exec Questions for the team, per-presentation. ---- */
   const execQuestionsFor = (pid) => execQuestions.filter((x) => x.presentation_id === pid).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
@@ -5950,6 +6029,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           momentCandidatesFor={momentCandidatesFor}
           pulledSourceRefs={pulledSourceRefs}
           onBulkAddMilestones={bulkAddProgressMilestones}
+          routeBlockersFor={routeBlockersFor}
+          openBlockersCount={openBlockersCount}
+          onAddBlocker={addRouteBlocker}
+          onUpdateBlocker={updateRouteBlocker}
+          onDeleteBlocker={deleteRouteBlocker}
+          onResolveBlocker={resolveRouteBlocker}
           trackOptions={execTrackOptions}
           contactOptions={contacts}
           onCreateContact={createContactForMention}
@@ -8414,7 +8499,126 @@ function RoutePlannedStrip({ route, readOnly, onUpdateMilestone, onDeleteMilesto
     </div>
   );
 }
-function RouteTrack({ route, readOnly, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull }) {
+// A BLOCKER is an ACTIVE obstacle currently standing in the way, distinct
+// from a milestone (progress) and a setback (something that already
+// happened). It stays open, flagged for attention, until resolved.
+function RouteBlockerChip({ blocker, readOnly, onUpdate, onDelete, onResolve }) {
+  const [editing, setEditing] = useState(false);
+  const [resolving, setResolving] = useState(false);
+  const [content, setContent] = useState(blocker.content);
+  const saveEdit = () => { if (content.trim()) { onUpdate(blocker.id, { content: content.trim() }); setEditing(false); } };
+  if (blocker.is_resolved) {
+    return (
+      <div className="route-blocker-chip route-blocker-chip-resolved">
+        <span className="route-blocker-flag route-blocker-flag-resolved" title="Resolved blocker">✓</span>
+        <span className="route-blocker-text"><MentionText text={blocker.content} /></span>
+        <span className="route-blocker-date">Resolved {formatDate(blocker.resolved_at)}</span>
+        {blocker.resolution_note && <div className="route-blocker-resolution"><MentionText text={blocker.resolution_note} /></div>}
+        {!readOnly && <button type="button" className="moment-node-del route-blocker-del" onClick={() => onDelete(blocker.id)} title="Delete">✕</button>}
+      </div>
+    );
+  }
+  if (editing && !readOnly) {
+    return (
+      <div className="route-chip-edit" onKeyDown={(e) => { if (e.key === "Escape") setEditing(false); }}>
+        <MentionEditor value={content} onChange={setContent} multiline={false} autoFocus onSubmit={saveEdit} />
+        <div className="route-chip-edit-actions">
+          <button type="button" className="btn-primary" onClick={saveEdit}>Save</button>
+          <button type="button" className="btn-ghost" onClick={() => { setContent(blocker.content); setEditing(false); }}>Cancel</button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="route-blocker-chip">
+      <span className="route-blocker-flag" title="Open blocker">⚑</span>
+      <span className="route-blocker-text" onClick={() => !readOnly && setEditing(true)}><MentionText text={blocker.content} /></span>
+      <span className="route-blocker-date">Since {formatDate(blocker.raised_at)}</span>
+      {!readOnly && (
+        <span className="route-blocker-actions">
+          <button type="button" className="link-btn" onClick={() => setResolving(true)}>Resolve</button>
+          <button type="button" className="moment-node-del route-blocker-del" onClick={() => onDelete(blocker.id)} title="Delete">✕</button>
+        </span>
+      )}
+      {resolving && (
+        <RouteBlockerResolvePrompt blocker={blocker} onCancel={() => setResolving(false)}
+          onConfirm={(vals) => { onResolve(blocker.id, vals); setResolving(false); }} />
+      )}
+    </div>
+  );
+}
+function RouteBlockerResolvePrompt({ blocker, onCancel, onConfirm }) {
+  const [note, setNote] = useState("");
+  const [addMilestone, setAddMilestone] = useState(!!blocker.route_id);
+  return (
+    <div className="route-state-prompt" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}>
+      <div className="route-state-prompt-label">How was this resolved?</div>
+      <MentionEditor value={note} onChange={setNote} multiline={false} placeholder="Resolution note (optional)" />
+      {blocker.route_id && (
+        <label className="route-chip-setback-toggle">
+          <input type="checkbox" checked={addMilestone} onChange={(e) => setAddMilestone(e.target.checked)} /> Add an "Unblocked" milestone to the route
+        </label>
+      )}
+      <div className="route-chip-edit-actions">
+        <button type="button" className="btn-primary" onClick={() => onConfirm({ resolution_note: note.trim() || null, addMilestone, route_id: blocker.route_id })}>Resolve</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+function RouteBlockerAddForm({ onAdd, onCancel, showToast }) {
+  const [content, setContent] = useState("");
+  const submit = () => { if (content.trim()) onAdd(content.trim()); };
+  return (
+    <div className="route-chip-edit" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}>
+      <MentionEditor value={content} onChange={setContent} multiline={false} placeholder="What's blocking this, e.g. Awaiting bank account approval" autoFocus onSubmit={submit} />
+      <VoiceRecorder mode="plain" compact showToast={showToast} onPlainText={(t) => setContent((p) => (p ? `${p} ${t}` : t))} />
+      <div className="route-chip-edit-actions">
+        <button type="button" className="btn-primary" onClick={submit}>Add</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+// A blockers zone at any level (route / thread / strategy): open blockers
+// shown prominently since they need attention, "+ Add blocker" inline, and a
+// collapsed "Resolved blockers" history so old ones are kept but out of the way.
+function StrategyBlockerZone({ blockers, readOnly, onAdd, onUpdate, onDelete, onResolve, showToast }) {
+  const [adding, setAdding] = useState(false);
+  const [showResolved, setShowResolved] = useState(false);
+  const open = blockers.filter((b) => !b.is_resolved);
+  const resolved = blockers.filter((b) => b.is_resolved);
+  if (readOnly && !open.length && !resolved.length) return null;
+  return (
+    <div className="strategy-blocker-zone">
+      {open.map((b) => (
+        <RouteBlockerChip key={b.id} blocker={b} readOnly={readOnly} onUpdate={onUpdate} onDelete={onDelete} onResolve={onResolve} />
+      ))}
+      {!readOnly && (
+        adding ? <RouteBlockerAddForm showToast={showToast} onAdd={(c) => { onAdd(c); setAdding(false); }} onCancel={() => setAdding(false)} />
+          : <button type="button" className="link-btn strategy-add-blocker-btn" onClick={() => setAdding(true)}>+ Add blocker</button>
+      )}
+      {resolved.length > 0 && (
+        <div className="strategy-blocker-resolved-section">
+          <button type="button" className="dp-discussed-toggle" onClick={() => setShowResolved((v) => !v)}>
+            <span className={`exec-chevron ${showResolved ? "open" : ""}`}>›</span> Resolved blockers ({resolved.length})
+          </button>
+          {showResolved && resolved.map((b) => (
+            <RouteBlockerChip key={b.id} blocker={b} readOnly={readOnly} onUpdate={onUpdate} onDelete={onDelete} onResolve={onResolve} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+// A small red "N blocked" pill for a collapsed route/institution/strategy,
+// the direct sibling of the gold strategy-planned-badge used for backlog counts.
+function StrategyBlockedBadge({ count }) {
+  if (!count) return null;
+  return <span className="strategy-blocked-badge">⚑ {count} blocked</span>;
+}
+
+function RouteTrack({ route, readOnly, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker }) {
   const [adding, setAdding] = useState(false);
   const dead = route.state === "dead_end";
   const terminusDate = route.ended_at || new Date().toISOString().slice(0, 10);
@@ -8422,6 +8626,8 @@ function RouteTrack({ route, readOnly, onAddMilestone, onUpdateMilestone, onDele
   const historical = route.milestones.filter((m) => !m.is_backlog && m.milestone_date && m.milestone_date <= todayISO);
   return (
     <div className={`route-track ${dead ? "route-track-dead" : ""}`}>
+      <StrategyBlockerZone blockers={route.blockers || []} readOnly={readOnly}
+        onAdd={onAddBlocker} onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
       <RoutePlannedStrip route={route} readOnly={readOnly} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
         onReorderMilestones={onReorderMilestones} showToast={showToast} />
       <MomentTrackLine milestones={historical} readOnly={readOnly}
@@ -8471,6 +8677,7 @@ function RouteHeader({ route, readOnly, onUpdate, onDelete }) {
   const [title, setTitle] = useState(route.title);
   const [statePrompt, setStatePrompt] = useState(null);
   const meta = strategyRouteStateMeta(route.state);
+  const blockedCount = (route.blockers || []).filter((b) => !b.is_resolved).length;
   const pickState = (next) => {
     if (next === route.state) return;
     if (next === "dead_end" || next === "succeeded") { setStatePrompt(next); return; }
@@ -8485,6 +8692,7 @@ function RouteHeader({ route, readOnly, onUpdate, onDelete }) {
       ) : (
         <span className={`route-title ${readOnly ? "" : "route-title-edit"}`} onClick={() => !readOnly && setEditingTitle(true)}>{route.title}</span>
       )}
+      {blockedCount > 0 && <span className="route-blocked-marker" title={`${blockedCount} open blocker${blockedCount === 1 ? "" : "s"}`}>⚑</span>}
       <span className="badge route-state-badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{meta.label}</span>
       {route.ended_at && <span className="route-ended-date">Ended {formatDate(route.ended_at)}</span>}
       {!readOnly && (
@@ -8509,9 +8717,11 @@ function RouteMiniBar({ route }) {
   const meta = strategyRouteStateMeta(route.state);
   const dead = route.state === "dead_end";
   const n = Math.min(route.milestones.length, 6);
+  const blockedCount = (route.blockers || []).filter((b) => !b.is_resolved).length;
   return (
     <div className={`route-mini ${dead ? "route-mini-dead" : ""}`}>
       <span className="route-mini-title">{route.title}</span>
+      {blockedCount > 0 && <span className="route-blocked-marker" title={`${blockedCount} open blocker${blockedCount === 1 ? "" : "s"}`}>⚑</span>}
       <div className="route-mini-bar">
         <span className="route-mini-line" style={{ background: dead ? "var(--border)" : meta.color + "55" }} />
         {Array.from({ length: n }).map((_, i) => (
@@ -8527,17 +8737,20 @@ function RouteMiniBar({ route }) {
 // and its parallel routes, either full tracks (expanded) or mini bars (Board
 // default, per spec 5: "institution card shows goal and routes as mini
 // progress bars").
-function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpdateGoal, onDeleteThread, onAddRoute, onUpdateRoute, onDeleteRoute, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull }) {
+function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpdateGoal, onDeleteThread, onAddRoute, onUpdateRoute, onDeleteRoute, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker }) {
   const [addingRoute, setAddingRoute] = useState(false);
   const [routeTitle, setRouteTitle] = useState("");
   const submitRoute = () => { if (!routeTitle.trim()) return; onAddRoute(thread.id, routeTitle.trim()); setRouteTitle(""); setAddingRoute(false); };
   const movedThisWeek = thread.routes.some((r) => r.milestones.some((m) => isThisWeek(m.milestone_date)) || (r.ended_at && isThisWeek(r.ended_at)));
+  const threadBlockedCount = (thread.blockers || []).filter((b) => !b.is_resolved).length
+    + thread.routes.reduce((a, r) => a + (r.blockers || []).filter((b) => !b.is_resolved).length, 0);
   return (
     <div className={`strategy-thread ${movedThisWeek ? "strategy-thread-moved" : ""}`}>
       <div className="strategy-thread-head">
         <button type="button" className="exec-track-name" onClick={() => thread.onOpen && thread.onOpen()} disabled={!thread.onOpen}>{thread.name}</button>
         {thread.typeMeta && <span className="badge" style={{ background: thread.typeMeta.color + "22", color: thread.typeMeta.color, border: `1px solid ${thread.typeMeta.color}44` }}>{thread.typeMeta.label}</span>}
         {movedThisWeek && <span className="strategy-moved-badge">Moved this week</span>}
+        <StrategyBlockedBadge count={threadBlockedCount} />
         <span className="strategy-thread-head-right">
           <button type="button" className="link-btn strategy-expand-btn" onClick={onToggleExpand}>{expanded ? "Collapse" : "Expand"}</button>
           {!readOnly && <button type="button" className="exec-track-remove" onClick={() => { if (window.confirm("Remove this thread and all of its routes?")) onDeleteThread(thread.id); }} title="Remove thread">✕</button>}
@@ -8547,6 +8760,8 @@ function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpda
         <span className="strategy-goal-label">Goal</span>
         <StrategyMentionField value={thread.goal || ""} onSave={(v) => onUpdateGoal(thread.id, v)} readOnly={readOnly} placeholder="What are we trying to achieve here?" />
       </div>
+      <StrategyBlockerZone blockers={thread.blockers || []} readOnly={readOnly}
+        onAdd={(c) => onAddBlocker({ thread_id: thread.id }, c)} onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
       {expanded ? (
         <div className="strategy-routes">
           {thread.routes.map((route) => (
@@ -8556,6 +8771,8 @@ function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpda
                 onAddMilestone={(vals) => onAddMilestone({ thread_id: thread.id, route_id: route.id }, vals)}
                 onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
                 onReorderMilestones={onReorderMilestones} showToast={showToast}
+                onAddBlocker={(c) => onAddBlocker({ thread_id: thread.id, route_id: route.id }, c)}
+                onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
                 onOpenPull={readOnly ? null : () => onOpenPull({ thread_id: thread.id, route_id: route.id }, { deal_id: thread.deal_id, enabler_id: thread.enabler_id, organization_id: thread.organization_id, contact_id: thread.contact_id }, route.title)} />
             </div>
           ))}
@@ -9040,11 +9257,12 @@ function StrategyLaneNode({ point, route, todayISO, leftPct, top, readOnly, onUp
 // row, clearly separated by the zone's own distinct panel styling.
 function StrategyRouteRows({
   thread, route, weeks, readOnly, onUpdateMilestone, onDeleteMilestone, onAddMilestone, onReorderMilestones, showToast,
-  isDragging, onDragStart, onDragOver, onDrop,
+  isDragging, onDragStart, onDragOver, onDrop, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
 }) {
   const backlog = useMemo(() => routeBacklog(route).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)), [route]);
   const meta = strategyRouteStateMeta(route.state);
   const dead = route.state === "dead_end";
+  const blockedCount = (route.blockers || []).filter((b) => !b.is_resolved).length;
   const [draggingBacklogId, setDraggingBacklogId] = useState(null);
   const scheduleBacklog = (id, dateStr) => onUpdateMilestone(id, { milestone_date: dateStr, is_backlog: false });
   const completeBacklog = (id, dateStr) => onUpdateMilestone(id, { milestone_date: dateStr, is_backlog: false, is_planned: false });
@@ -9054,8 +9272,16 @@ function StrategyRouteRows({
         {!readOnly && <span className="strategy-drag-handle" title="Drag to reorder" draggable onDragStart={onDragStart}>⠿</span>}
         <span className="strategy-route-glyph" style={{ color: meta.color }}>{strategyEndGlyph(route.state)}</span>
         <span className="strategy-route-title">{route.title}</span>
+        {blockedCount > 0 && <span className="route-blocked-marker" title={`${blockedCount} open blocker${blockedCount === 1 ? "" : "s"}`}>⚑</span>}
         <span className="badge strategy-route-badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{meta.label}</span>
       </div>
+      {((route.blockers || []).length > 0 || !readOnly) && (
+        <div style={{ gridColumn: "1 / -1" }}>
+          <StrategyBlockerZone blockers={route.blockers || []} readOnly={readOnly}
+            onAdd={(c) => onAddBlocker({ thread_id: thread.id, route_id: route.id }, c)}
+            onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
+        </div>
+      )}
       <StrategyRouteLane thread={thread} route={route} weeks={weeks} readOnly={readOnly}
         onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
         onDropWeek={draggingBacklogId ? (w) => { scheduleBacklog(draggingBacklogId, w.key); setDraggingBacklogId(null); } : undefined} />
@@ -9077,7 +9303,7 @@ function StrategyRouteRows({
 function StrategyInstitutionRows({
   thread, weeks, collapsed, onToggleCollapse, onUpdateGoal, readOnly, onUpdateMilestone, onDeleteMilestone, onAddMilestone, onReorderMilestones, showToast,
   addingRoute, onStartAddRoute, onCancelAddRoute, onAddRoute, onReorderRoutes,
-  isDragging, onDragStart, onDragOver, onDrop,
+  isDragging, onDragStart, onDragOver, onDrop, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
 }) {
   const byWeek = useMemo(() => bucketThreadsByWeek([thread]), [thread]);
   const [routeTitle, setRouteTitle] = useState("");
@@ -9093,6 +9319,8 @@ function StrategyInstitutionRows({
     setRouteDragId(null);
   };
   const pending = threadBacklogCount(thread);
+  const threadBlockedCount = (thread.blockers || []).filter((b) => !b.is_resolved).length
+    + thread.routes.reduce((a, r) => a + (r.blockers || []).filter((b) => !b.is_resolved).length, 0);
   return (
     <>
       <div className={`strategy-inst-head ${isDragging ? "strategy-dragging" : ""}`} style={{ gridColumn: "1 / -1" }} onDragOver={onDragOver} onDrop={onDrop}>
@@ -9102,7 +9330,14 @@ function StrategyInstitutionRows({
         {thread.typeMeta && <span className="badge" style={{ background: thread.typeMeta.color + "22", color: thread.typeMeta.color, border: `1px solid ${thread.typeMeta.color}44` }}>{thread.typeMeta.label}</span>}
         <span className="strategy-inst-goal"><StrategyMentionField value={thread.goal || ""} onSave={(v) => onUpdateGoal(thread.id, v)} readOnly={readOnly} placeholder="Goal" /></span>
         {collapsed && pending > 0 && <span className="strategy-planned-badge">{pending} planned</span>}
+        <StrategyBlockedBadge count={threadBlockedCount} />
       </div>
+      {!collapsed && ((thread.blockers || []).length > 0 || !readOnly) && (
+        <div style={{ gridColumn: "1 / -1" }}>
+          <StrategyBlockerZone blockers={thread.blockers || []} readOnly={readOnly}
+            onAdd={(c) => onAddBlocker({ thread_id: thread.id }, c)} onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
+        </div>
+      )}
       {collapsed ? (
         weeks.map((w, i) => (
           <div key={w.key} className={weekSlotClass(i, w, null)}>
@@ -9116,6 +9351,7 @@ function StrategyInstitutionRows({
             <StrategyRouteRows key={route.id} thread={thread} route={route} weeks={weeks} readOnly={readOnly}
               onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
               onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
+              onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
               isDragging={routeDragId === route.id} onDragStart={() => setRouteDragId(route.id)}
               onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); dropRoute(route.id); }} />
           ))}
@@ -9151,6 +9387,7 @@ function StrategyCard({
   addingRouteFor, onStartAddRoute, onCancelAddRoute, onAddRoute, onReorderThreads, onReorderRoutes,
   addingThread, onStartAddThread, onCancelAddThread, onAddThread, trackOptions, contactOptions, onCreateContact,
   isDragging, onDragStart, onDragOverSelf, onDropSelf,
+  strategyBlockers, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
 }) {
   const byWeek = useMemo(() => bucketThreadsByWeek(threads), [threads]);
   const pending = strategyBacklogCount(threads);
@@ -9168,6 +9405,9 @@ function StrategyCard({
     onReorderThreads(ids);
     setThreadDragId(null);
   };
+  const strategyBlockedCount = (strategyBlockers || []).filter((b) => !b.is_resolved).length
+    + threads.reduce((a, t) => a + (t.blockers || []).filter((b) => !b.is_resolved).length
+      + t.routes.reduce((a2, r) => a2 + (r.blockers || []).filter((b) => !b.is_resolved).length, 0), 0);
   return (
     <div className={`strategy-card ${isDragging ? "strategy-dragging" : ""}`} style={{ borderColor: (strategy.color || "var(--mango)") + "55" }}
       onDragOver={onDragOverSelf} onDrop={onDropSelf}>
@@ -9178,8 +9418,15 @@ function StrategyCard({
         <span className="strategy-card-name">{strategy.name}</span>
         <span className="strategy-card-goal"><StrategyMentionField value={strategy.goal || ""} onSave={(v) => onUpdateGoal(strategy.id, v)} readOnly={readOnly} placeholder="Overall goal" /></span>
         {collapsed && pending > 0 && <span className="strategy-planned-badge">{pending} planned</span>}
+        <StrategyBlockedBadge count={strategyBlockedCount} />
         {lastMoveDate && <span className="strategy-card-move">Last movement {formatDate(lastMoveDate)}</span>}
       </div>
+      {!collapsed && ((strategyBlockers || []).length > 0 || !readOnly) && (
+        <div className="strategy-card-blockers">
+          <StrategyBlockerZone blockers={strategyBlockers || []} readOnly={readOnly}
+            onAdd={(c) => onAddBlocker({ strategy_id: strategy.id }, c)} onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
+        </div>
+      )}
       <div className="strategy-card-body" style={{ gridTemplateColumns: `repeat(${weeks.length}, 1fr) ${STRATEGY_PLANNED_COL_PX}px` }}>
         {weeks.map((w) => (
           <div key={w.key} className={`strategy-weeklabel ${w.offset === 0 ? "strategy-weeklabel-current" : ""} ${w.offset > 0 ? "strategy-weeklabel-future" : ""}`}>
@@ -9202,6 +9449,7 @@ function StrategyCard({
                 collapsed={collapsedInstitutionIds.has(thread.id)} onToggleCollapse={() => onToggleInstitutionCollapse(thread.id)}
                 onUpdateGoal={onUpdateThreadGoal} readOnly={readOnly} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
                 onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
+                onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
                 addingRoute={addingRouteFor === thread.id} onStartAddRoute={() => onStartAddRoute(thread.id)} onCancelAddRoute={onCancelAddRoute}
                 onAddRoute={onAddRoute} onReorderRoutes={onReorderRoutes}
                 isDragging={threadDragId === thread.id} onDragStart={() => setThreadDragId(thread.id)}
@@ -9237,6 +9485,7 @@ function StrategyCardsTimeline({
   onAddMilestone, onReorderMilestones, showToast,
   onAddThread, onAddRoute, trackOptions, contactOptions, onCreateContact,
   onReorderStrategies, onReorderThreads, onReorderRoutes,
+  routeBlockersFor, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
 }) {
   const [rangeId, setRangeId] = useState("8w");
   const range = STRATEGY_GRID_RANGES.find((r) => r.id === rangeId) || STRATEGY_GRID_RANGES[0];
@@ -9303,7 +9552,41 @@ function StrategyCardsTimeline({
               trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
               isDragging={strategyDragId === strategy.id} onDragStart={() => setStrategyDragId(strategy.id)}
               onDragOverSelf={readOnly ? undefined : (e) => e.preventDefault()}
-              onDropSelf={readOnly ? undefined : (e) => { e.preventDefault(); dropStrategy(strategy.id); }} />
+              onDropSelf={readOnly ? undefined : (e) => { e.preventDefault(); dropStrategy(strategy.id); }}
+              strategyBlockers={routeBlockersFor({ strategy_id: strategy.id })}
+              onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Top-level view across EVERY strategy: every open blocker in one list, so
+// Fahed (and the boss, read-only) can see what is stuck without hunting
+// through cards. Rows are grouped by strategy, sorted oldest-raised-first.
+function StrategyOpenBlockersSummary({ rows, readOnly, onUpdate, onDelete, onResolve, showToast }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const total = rows.length;
+  if (!total) return null;
+  return (
+    <div className="strategy-open-blockers">
+      <button type="button" className="strategy-open-blockers-head" onClick={() => setCollapsed((v) => !v)}>
+        <span className="strategy-blocked-badge">⚑ {total} open blocker{total === 1 ? "" : "s"}</span>
+        <span className="strategy-open-blockers-title">Open Blockers</span>
+        <span className={`exec-chevron ${collapsed ? "" : "open"}`}>›</span>
+      </button>
+      {!collapsed && (
+        <div className="strategy-open-blockers-list">
+          {rows.map(({ blocker, strategyName, threadName, routeTitle, onOpen }) => (
+            <div key={blocker.id} className="strategy-open-blocker-row">
+              <div className="strategy-open-blocker-context">
+                <span className="strategy-open-blocker-strategy">{strategyName}</span>
+                {threadName && (onOpen ? <button type="button" className="link-btn" onClick={onOpen}>{threadName}</button> : <span>{threadName}</span>)}
+                {routeTitle && <span className="strategy-open-blocker-route">{routeTitle}</span>}
+              </div>
+              <RouteBlockerChip blocker={blocker} readOnly={readOnly} onUpdate={onUpdate} onDelete={onDelete} onResolve={onResolve} />
+            </div>
           ))}
         </div>
       )}
@@ -9318,6 +9601,7 @@ function StrategyTab({
   onAddRoute, onUpdateRoute, onDeleteRoute, onReorderRoutes,
   onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones,
   momentCandidatesFor, pulledSourceRefs, onBulkAddMilestones,
+  routeBlockersFor, openBlockersCount, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
   trackOptions, contactOptions, onCreateContact, showToast,
 }) {
   const readOnly = useReadOnly();
@@ -9346,6 +9630,24 @@ function StrategyTab({
   // sort_order so a drag reorder is reflected immediately.
   const sortedStrategies = [...strategies].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   const allStrategyThreadsList = sortedStrategies.map((s) => ({ strategy: s, threads: threadsForStrategy(s.id).map(resolveThreadCard) }));
+
+  // Every open blocker across every strategy, for the top-level summary:
+  // strategy-level ones plus each thread's and each route's, oldest first.
+  const openBlockerRows = allStrategyThreadsList.flatMap(({ strategy: s, threads: ts }) => {
+    const rows = routeBlockersFor({ strategy_id: s.id }).filter((b) => !b.is_resolved)
+      .map((blocker) => ({ blocker, strategyName: s.name, threadName: null, routeTitle: null, onOpen: null }));
+    ts.forEach((t) => {
+      (t.blockers || []).filter((b) => !b.is_resolved).forEach((blocker) => {
+        rows.push({ blocker, strategyName: s.name, threadName: t.name, routeTitle: null, onOpen: t.onOpen });
+      });
+      t.routes.forEach((r) => {
+        (r.blockers || []).filter((b) => !b.is_resolved).forEach((blocker) => {
+          rows.push({ blocker, strategyName: s.name, threadName: t.name, routeTitle: r.title, onOpen: t.onOpen });
+        });
+      });
+    });
+    return rows;
+  }).sort((a, b) => (a.blocker.raised_at || "").localeCompare(b.blocker.raised_at || ""));
 
   const submitStrategy = async () => {
     if (!newStratName.trim()) return;
@@ -9382,6 +9684,9 @@ function StrategyTab({
         </div>
       )}
 
+      <StrategyOpenBlockersSummary rows={openBlockerRows} readOnly={readOnly}
+        onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
+
       {strategies.length === 0 && !addingStrategy ? (
         <div className="empty-small">No strategies yet. Create one to start mapping routes.</div>
       ) : strategy && (
@@ -9400,7 +9705,9 @@ function StrategyTab({
               onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
               onAddThread={onAddThread} onAddRoute={onAddRoute}
               trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
-              onReorderStrategies={onReorderStrategies} onReorderThreads={onReorderThreads} onReorderRoutes={onReorderRoutes} />
+              onReorderStrategies={onReorderStrategies} onReorderThreads={onReorderThreads} onReorderRoutes={onReorderRoutes}
+              routeBlockersFor={routeBlockersFor} onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker}
+              onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker} />
           ) : (
             <>
               {strategies.length > 1 && (
@@ -9418,6 +9725,9 @@ function StrategyTab({
                 <StrategyMentionField value={strategy.goal || ""} onSave={(v) => onUpdateStrategy(strategy.id, { goal: v })} readOnly={readOnly} placeholder="What is this strategy trying to achieve overall?" />
               </div>
 
+              <StrategyBlockerZone blockers={routeBlockersFor({ strategy_id: strategy.id })} readOnly={readOnly}
+                onAdd={(c) => onAddBlocker({ strategy_id: strategy.id }, c)} onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
+
               <div className="strategy-week-summary">
                 <span><b>{week.advanced}</b> route{week.advanced === 1 ? "" : "s"} advanced this week</span>
                 <span className="strategy-week-dead"><b>{week.deadEnded}</b> dead-ended this week</span>
@@ -9433,7 +9743,8 @@ function StrategyTab({
               <StrategyBoardView threads={threads} readOnly={readOnly} expandedIds={expandedIds} onToggleExpand={toggleExpand}
                 onUpdateGoal={onUpdateThreadGoal} onDeleteThread={onDeleteThread} onAddRoute={onAddRoute} onUpdateRoute={onUpdateRoute} onDeleteRoute={onDeleteRoute}
                 onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onOpenPull={openPull}
-                onReorderMilestones={onReorderMilestones} showToast={showToast} />
+                onReorderMilestones={onReorderMilestones} showToast={showToast}
+                onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker} />
             </>
           )}
         </>
