@@ -2322,6 +2322,13 @@ body.exec-presenting-body { overflow: hidden; }
 .route-track-dead { opacity: .62; }
 .route-track-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
 .route-track-empty { font-size: 12px; color: var(--muted); }
+/* A route's upcoming plans, ahead of its historical track: soonest-dated
+   first, then undated backlog, always leading (far left) so "what's next"
+   reads before "what already happened". */
+.route-planned-strip { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px dashed var(--border); }
+.route-planned-label { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: #B77400; flex-shrink: 0; padding-top: 6px; }
+.route-planned-items { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
+.route-planned-backlog-item .strategy-backlog-chip { width: 200px; }
 
 .route-outcome { margin-top: 8px; font-size: 12.5px; padding: 6px 10px; border-radius: 8px; }
 .route-outcome-dead { background: #D9483A0d; color: #93312A; border-left: 3px solid #D9483A; }
@@ -2381,6 +2388,9 @@ body.exec-presenting-body { overflow: hidden; }
 .route-chip-edit { display: flex; flex-direction: column; gap: 6px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px; width: 100%; max-width: 340px; }
 .route-chip-edit-actions { display: flex; align-items: center; gap: 10px; }
 .route-chip-setback-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+.route-chip-view-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.route-chip-view-detail { font-size: 12px; color: var(--text-2); }
+.route-chip-view-date { font-size: 11px; color: var(--muted); }
 
 .strategy-mini-bars { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .strategy-mini-empty { font-size: 12px; color: var(--muted); }

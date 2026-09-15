@@ -806,6 +806,7 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
     { id: "network", label: "Ecosystem", shape: "circle" },
     { id: "calendar", label: "Calendar", shape: "calendar" },
     { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
+    { id: "strategy", label: "Strategy", shape: "chart" },
   ] : [
     { id: "home", label: "Home", shape: "house" },
     { id: "calendar", label: "Calendar", shape: "calendar" },
@@ -5167,12 +5168,12 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
 
   // Tab-level navigation always starts a fresh sheet context.
   const navigateTab = (v) => { setInstitutionSheetKey(null); setPersonSheetId(null); setEventDetailId(null); setView(v); };
-  // Boss View's sidebar is now just Week in Review / Pipeline / Ecosystem /
-  // Calendar / Tasks; if it ever lands elsewhere (deep link, stale URL) send
-  // it back to the Week in Review, Andy's homepage, rather than a tab that is
-  // no longer in his nav (M4).
+  // Boss View's sidebar is Week in Review / Pipeline / Ecosystem / Calendar /
+  // Tasks / Strategy (read-only); if it ever lands elsewhere (deep link,
+  // stale URL) send it back to the Week in Review, Andy's homepage, rather
+  // than a tab that is not in his nav (M4).
   useEffect(() => {
-    if (bossMode && ["outreach", "notes", "home", "map", "materials", "exec", "strategy"].includes(view)) setView("reports");
+    if (bossMode && ["outreach", "notes", "home", "map", "materials", "exec"].includes(view)) setView("reports");
   }, [bossMode, view]);
 
   const VIEW_BACK_LABELS = { home: "Home", calendar: "Calendar", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports", exec: "Exec Update", strategy: "Strategy" };
@@ -8257,21 +8258,39 @@ const connectorWidth = (days) => Math.max(20, Math.min(96, 20 + days * 3));
 // warning color, a stage-change and a manual milestone each with their own
 // icon; a moment dated in the current week gets a subtle highlight ring.
 function MomentNode({ milestone, todayISO, readOnly, editing, onEdit, onCancel, onSave, onDelete }) {
-  if (editing) return <MilestoneEditForm milestone={milestone} onCancel={onCancel} onSave={onSave} />;
+  if (editing) return readOnly
+    ? <MilestoneViewCard milestone={milestone} onClose={onCancel} />
+    : <MilestoneEditForm milestone={milestone} onCancel={onCancel} onSave={onSave} />;
   const kind = momentKind(milestone, todayISO);
   const meta = MOMENT_KIND_META[kind];
   const plainTitle = mentionsToPlainText(milestone.title);
   const plainDetail = milestone.detail ? mentionsToPlainText(milestone.detail) : "";
   const tip = `${formatDate(milestone.milestone_date)}: ${plainTitle}${plainDetail ? `\n${plainDetail}` : ""}`;
   return (
-    <div className={`moment-node moment-node-${kind} ${isThisWeek(milestone.milestone_date) ? "moment-node-thisweek" : ""} ${readOnly ? "" : "moment-node-clickable"}`}
-      onClick={readOnly ? undefined : onEdit} title={tip}>
+    <div className={`moment-node moment-node-${kind} ${isThisWeek(milestone.milestone_date) ? "moment-node-thisweek" : ""} moment-node-clickable`}
+      onClick={onEdit} title={tip}>
       <span className="moment-node-icon" aria-hidden="true">{meta.icon}</span>
       <span className="moment-node-body">
         <span className="moment-node-title"><MentionText text={milestone.title} /></span>
         <span className="moment-node-date">{formatDate(milestone.milestone_date)}</span>
       </span>
       {!readOnly && <button type="button" className="moment-node-del" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete moment">✕</button>}
+    </div>
+  );
+}
+// Read-only detail view for a moment: title, detail, date, no editing
+// controls, for Boss View and anywhere else a moment renders read-only.
+// Mentions stay blue and clickable even here.
+function MilestoneViewCard({ milestone, onClose }) {
+  const plainDetail = milestone.detail ? milestone.detail : "";
+  return (
+    <div className="route-chip-edit route-chip-view" onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}>
+      <div className="route-chip-view-title"><MentionText text={milestone.title} /></div>
+      {plainDetail && <div className="route-chip-view-detail"><MentionText text={plainDetail} /></div>}
+      <div className="route-chip-view-date">{formatDate(milestone.milestone_date)}{milestone.is_setback ? ", setback" : ""}</div>
+      <div className="route-chip-edit-actions">
+        <button type="button" className="btn-ghost" onClick={onClose}>Close</button>
+      </div>
     </div>
   );
 }
@@ -8349,13 +8368,63 @@ function MomentTrackLine({ milestones, readOnly, onUpdateMilestone, onDeleteMile
 // A route's own horizontal progress track: moments as labeled connected
 // nodes, ending in a terminus node for its state (open arrow / red X / green
 // check / pause).
-function RouteTrack({ route, readOnly, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onOpenPull }) {
+// A route's upcoming plans, ahead of its historical track: dated future
+// moments (soonest first) then undated backlog plans (priority sort_order),
+// so the track reads left to right as "what's next" before "what already
+// happened", the far left always the most immediate. Kept in its own strip
+// rather than folded into the chronological MomentTrackLine below, since a
+// new plan re-sorts into place here instead of being appended wherever
+// chronological order would otherwise put it (the far right); this is the
+// same ordering the Timeline's Planned zone uses, so the two never disagree.
+function RoutePlannedStrip({ route, readOnly, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast }) {
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const [editingId, setEditingId] = useState(null);
+  const datedPlanned = route.milestones.filter((m) => !m.is_backlog && m.milestone_date && m.milestone_date > todayISO)
+    .sort((a, b) => (a.milestone_date || "").localeCompare(b.milestone_date || ""));
+  const backlog = useMemo(() => routeBacklog(route).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)), [route]);
+  const [draggingBacklogId, setDraggingBacklogId] = useState(null);
+  const dropReorder = (targetId) => {
+    if (!draggingBacklogId || draggingBacklogId === targetId) return;
+    const ids = backlog.map((m) => m.id);
+    const from = ids.indexOf(draggingBacklogId), to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) return;
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    onReorderMilestones(ids);
+  };
+  if (!datedPlanned.length && !backlog.length) return null;
+  return (
+    <div className="route-planned-strip">
+      <span className="route-planned-label">Planned</span>
+      <div className="route-planned-items">
+        {datedPlanned.map((m) => (
+          <MomentNode key={m.id} milestone={m} todayISO={todayISO} readOnly={readOnly} editing={editingId === m.id}
+            onEdit={() => setEditingId(m.id)} onCancel={() => setEditingId(null)}
+            onSave={(patch) => { onUpdateMilestone(m.id, patch); setEditingId(null); }}
+            onDelete={() => onDeleteMilestone(m.id)} />
+        ))}
+        {backlog.map((item) => (
+          <div key={item.id} className="route-planned-backlog-item" onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); dropReorder(item.id); }}>
+            <StrategyBacklogItem item={item} readOnly={readOnly} onUpdate={onUpdateMilestone} onDelete={onDeleteMilestone}
+              onSchedule={(id, d) => onUpdateMilestone(id, { milestone_date: d, is_backlog: false })}
+              onComplete={(id, d) => onUpdateMilestone(id, { milestone_date: d, is_backlog: false, is_planned: false })}
+              isDragging={draggingBacklogId === item.id} onDragStart={() => setDraggingBacklogId(item.id)} onDragEnd={() => setDraggingBacklogId(null)} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+function RouteTrack({ route, readOnly, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull }) {
   const [adding, setAdding] = useState(false);
   const dead = route.state === "dead_end";
   const terminusDate = route.ended_at || new Date().toISOString().slice(0, 10);
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const historical = route.milestones.filter((m) => !m.is_backlog && m.milestone_date && m.milestone_date <= todayISO);
   return (
     <div className={`route-track ${dead ? "route-track-dead" : ""}`}>
-      <MomentTrackLine milestones={route.milestones} readOnly={readOnly}
+      <RoutePlannedStrip route={route} readOnly={readOnly} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+        onReorderMilestones={onReorderMilestones} showToast={showToast} />
+      <MomentTrackLine milestones={historical} readOnly={readOnly}
         onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
         terminusNode={{ date: terminusDate, node: <RouteTerminusNode route={route} /> }} />
       {route.outcome_note && (route.state === "dead_end" || route.state === "succeeded") && (
@@ -8458,7 +8527,7 @@ function RouteMiniBar({ route }) {
 // and its parallel routes, either full tracks (expanded) or mini bars (Board
 // default, per spec 5: "institution card shows goal and routes as mini
 // progress bars").
-function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpdateGoal, onDeleteThread, onAddRoute, onUpdateRoute, onDeleteRoute, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onOpenPull }) {
+function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpdateGoal, onDeleteThread, onAddRoute, onUpdateRoute, onDeleteRoute, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull }) {
   const [addingRoute, setAddingRoute] = useState(false);
   const [routeTitle, setRouteTitle] = useState("");
   const submitRoute = () => { if (!routeTitle.trim()) return; onAddRoute(thread.id, routeTitle.trim()); setRouteTitle(""); setAddingRoute(false); };
@@ -8486,6 +8555,7 @@ function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpda
               <RouteTrack route={route} readOnly={readOnly}
                 onAddMilestone={(vals) => onAddMilestone({ thread_id: thread.id, route_id: route.id }, vals)}
                 onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+                onReorderMilestones={onReorderMilestones} showToast={showToast}
                 onOpenPull={readOnly ? null : () => onOpenPull({ thread_id: thread.id, route_id: route.id }, { deal_id: thread.deal_id, enabler_id: thread.enabler_id, organization_id: thread.organization_id, contact_id: thread.contact_id }, route.title)} />
             </div>
           ))}
@@ -9254,7 +9324,13 @@ function StrategyTab({
   const [activeStrategyId, setActiveStrategyId] = useState(null);
   const strategy = strategies.find((s) => s.id === activeStrategyId) || strategies[0] || null;
   useEffect(() => { if (!activeStrategyId && strategies.length) setActiveStrategyId(strategies[0].id); }, [activeStrategyId, strategies]);
-  const [mode, setMode] = useState("board");
+  // Timeline is the default landing view; once the user switches, their
+  // choice is remembered (per browser, so Andy's Boss View tracks his own
+  // last-used view separately from Fahed's).
+  const [mode, setModeState] = useState(() => {
+    try { return localStorage.getItem("mango-strategy-mode") || "timeline"; } catch { return "timeline"; }
+  });
+  const setMode = (m) => { setModeState(m); try { localStorage.setItem("mango-strategy-mode", m); } catch { /* ignore */ } };
   const [expandedIds, setExpandedIds] = useState(() => new Set());
   const toggleExpand = (id) => setExpandedIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const [addingStrategy, setAddingStrategy] = useState(false);
@@ -9356,7 +9432,8 @@ function StrategyTab({
 
               <StrategyBoardView threads={threads} readOnly={readOnly} expandedIds={expandedIds} onToggleExpand={toggleExpand}
                 onUpdateGoal={onUpdateThreadGoal} onDeleteThread={onDeleteThread} onAddRoute={onAddRoute} onUpdateRoute={onUpdateRoute} onDeleteRoute={onDeleteRoute}
-                onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onOpenPull={openPull} />
+                onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onOpenPull={openPull}
+                onReorderMilestones={onReorderMilestones} showToast={showToast} />
             </>
           )}
         </>
