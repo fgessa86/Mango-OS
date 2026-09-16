@@ -9923,7 +9923,7 @@ function StrategyCardsTimeline({
   onAddThread, onAddRoute, trackOptions, contactOptions, onCreateContact,
   onReorderStrategies, onReorderThreads, onReorderRoutes,
   routeBlockersFor, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
-  incubatorFor, onAddIncubatorItem, onUpdateIncubatorItem, onDeleteIncubatorItem, onReorderIncubatorItems, onDropIncubatorItem, onActivateIncubatorItem,
+  incubatorFor = () => [], onAddIncubatorItem, onUpdateIncubatorItem, onDeleteIncubatorItem, onReorderIncubatorItems, onDropIncubatorItem, onActivateIncubatorItem,
   presenting = false, focusedStrategyId = null, onFocusStrategy,
 }) {
   const [rangeId, setRangeId] = useState("8w");
@@ -10201,7 +10201,8 @@ function StrategyTab({
         trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
         onReorderStrategies={onReorderStrategies} onReorderThreads={onReorderThreads} onReorderRoutes={onReorderRoutes}
         routeBlockersFor={routeBlockersFor} onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker}
-        onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker} />
+        onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+        incubatorFor={incubatorFor} />
     );
   }
 
