@@ -2604,6 +2604,30 @@ body.strategy-presenting-body { overflow: hidden; }
 .strategy-present .strategy-card-head { position: sticky; top: 0; z-index: 6; }
 .strategy-present .strategy-card-body .strategy-weeklabel { position: sticky; top: 52px; z-index: 5; background: var(--surface); }
 
+/* ---------- STRATEGY INCUBATOR ("In Preparation") ---------- */
+/* Strategy-level work in preparation: not yet a route, not yet on the week
+   axis at all, so it gets a visually muted panel clearly separate from the
+   live institutions/routes below it, both in the Timeline card and on the
+   Board. */
+.strategy-card-incubator { padding: 0 14px; }
+.strategy-incubator-zone { background: var(--card); border: 1px dashed var(--border); border-radius: 10px; padding: 10px 12px; margin: 6px 0 10px; display: flex; flex-direction: column; gap: 8px; }
+.strategy-incubator-head { display: flex; align-items: center; gap: 8px; }
+.strategy-incubator-title { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+.strategy-incubator-count { font-size: 10px; font-weight: 700; color: var(--muted-2); background: var(--surface); border-radius: 999px; padding: 1px 7px; }
+.strategy-incubator-list { display: flex; flex-direction: column; gap: 6px; }
+.strategy-incubator-empty { font-size: 11px; color: var(--muted); font-style: italic; }
+.strategy-incubator-item { background: var(--surface); border-radius: 8px; padding: 8px 10px; }
+.strategy-incubator-row { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.strategy-incubator-text { flex: 1; min-width: 160px; display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; }
+.strategy-incubator-status { font-size: 10px; font-weight: 700; border-radius: 999px; padding: 2px 8px; flex-shrink: 0; }
+.strategy-incubator-status-preparing { color: var(--muted-2); background: var(--card); border: 1px solid var(--border); }
+.strategy-incubator-status-ready { color: #1F8A5B; background: #1F8A5B18; border: 1px solid #1F8A5B44; }
+.strategy-incubator-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; }
+.strategy-incubator-activate { color: #2A6FDB; }
+.strategy-incubator-badge { font-size: 10px; font-weight: 700; color: var(--muted-2); background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; flex-shrink: 0; }
+.strategy-activate-modal { max-width: 480px; }
+.strategy-activate-body { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+
 .strategy-inline-add-row { margin-top: 10px; padding-left: 4px; }
 .strategy-inline-add { flex-wrap: wrap; gap: 6px; }
 

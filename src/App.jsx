@@ -1428,6 +1428,7 @@ export default function App() {
   const [strategyRoutes, setStrategyRoutes] = useState([]);
   const [progressMilestones, setProgressMilestones] = useState([]);
   const [routeBlockers, setRouteBlockers] = useState([]);
+  const [strategyIncubator, setStrategyIncubator] = useState([]);
   const [stageHistory, setStageHistory] = useState([]);
   const [execQuestions, setExecQuestions] = useState([]);
   const [execOpenId, setExecOpenId] = useState(null);
@@ -1498,7 +1499,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp, strat, sthr, sroutes, pms, rb, sh] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp, strat, sthr, sroutes, pms, rb, sinc, sh] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1537,6 +1538,7 @@ export default function App() {
         api("strategy_routes", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("progress_milestones", "GET", null, "?select=*&order=milestone_date.asc,created_at.asc").catch(() => []),
         api("route_blockers", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("strategy_incubator", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("stage_history", "GET", null, "?select=*&order=changed_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
@@ -1549,7 +1551,7 @@ export default function App() {
       setDiscussionPoints(dp || []); setTopOfMind(tom || []);
       setExecInitiatives(xi || []); setExecTracked(xti || []); setExecQuestions(xq || []); setExecTrackedPeople(xtp || []);
       setStrategies(strat || []); setStrategyThreads(sthr || []); setStrategyRoutes(sroutes || []);
-      setProgressMilestones(pms || []); setRouteBlockers(rb || []); setStageHistory(sh || []);
+      setProgressMilestones(pms || []); setRouteBlockers(rb || []); setStrategyIncubator(sinc || []); setStageHistory(sh || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -4284,12 +4286,14 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         await api("strategy_threads", "DELETE", null, `?strategy_id=eq.${id}`);
       }
       await api("route_blockers", "DELETE", null, `?strategy_id=eq.${id}`);
+      await api("strategy_incubator", "DELETE", null, `?strategy_id=eq.${id}`);
       await api("strategies", "DELETE", null, `?id=eq.${id}`);
       setStrategies((prev) => prev.filter((s) => s.id !== id));
       setStrategyThreads((prev) => prev.filter((t) => t.strategy_id !== id));
       setStrategyRoutes((prev) => prev.filter((r) => !threadIds.includes(r.thread_id)));
       setProgressMilestones((prev) => prev.filter((m) => !threadIds.includes(m.thread_id) && !routeIds.includes(m.route_id)));
       setRouteBlockers((prev) => prev.filter((b) => !threadIds.includes(b.thread_id) && !routeIds.includes(b.route_id) && b.strategy_id !== id));
+      setStrategyIncubator((prev) => prev.filter((i) => i.strategy_id !== id));
     } catch { showToast("Could not delete strategy"); }
   };
 
@@ -4485,6 +4489,67 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       const b = routeBlockers.find((x) => x.id === id);
       await addProgressMilestone({ route_id }, { title: `Unblocked: ${b?.content || ""}`.slice(0, 200) });
     }
+  };
+
+  /* ---- Strategy Incubator: strategy-level work in preparation, distinct
+     from a route (live, actively pursued) and a planned moment (on a
+     specific route). An angle being set up, groundwork being laid, an
+     initiative not yet launched, until it is "Activated" into a real
+     route (or "Dropped" if it never pans out). ---- */
+  const incubatorFor = (strategyId) => strategyIncubator
+    .filter((i) => i.strategy_id === strategyId && i.status !== "activated" && i.status !== "dropped")
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+  const addIncubatorItem = async (strategyId, { title, detail } = {}) => {
+    const clean = (title || "").trim();
+    if (!clean) return null;
+    try {
+      const siblings = strategyIncubator.filter((i) => i.strategy_id === strategyId);
+      const sort_order = siblings.length ? Math.max(...siblings.map((i) => i.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("strategy_incubator", "POST", {
+        strategy_id: strategyId, title: upgradeTokenMentions(clean), detail: detail ? upgradeTokenMentions(detail.trim()) : null,
+        status: "preparing", sort_order,
+      });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setStrategyIncubator((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not add item"); return null; }
+  };
+  const updateIncubatorItem = async (id, patch) => {
+    if ("title" in patch) patch = { ...patch, title: upgradeTokenMentions(patch.title || "") };
+    if ("detail" in patch) patch = { ...patch, detail: upgradeTokenMentions(patch.detail || "") };
+    try {
+      await api("strategy_incubator", "PATCH", patch, `?id=eq.${id}`);
+      setStrategyIncubator((prev) => prev.map((i) => (i.id === id ? { ...i, ...patch } : i)));
+    } catch { showToast("Could not save"); }
+  };
+  const deleteIncubatorItem = async (id) => {
+    try {
+      await api("strategy_incubator", "DELETE", null, `?id=eq.${id}`);
+      setStrategyIncubator((prev) => prev.filter((i) => i.id !== id));
+    } catch { showToast("Could not delete"); }
+  };
+  const reorderIncubatorItems = async (orderedIds) => {
+    setStrategyIncubator((prev) => prev.map((i) => { const ix = orderedIds.indexOf(i.id); return ix === -1 ? i : { ...i, sort_order: ix }; }));
+    try { await Promise.all(orderedIds.map((id, ix) => api("strategy_incubator", "PATCH", { sort_order: ix }, `?id=eq.${id}`))); }
+    catch { showToast("Could not save the new order"); }
+  };
+  const dropIncubatorItem = (id) => updateIncubatorItem(id, { status: "dropped" });
+  // "Activate": promotes an incubator item into a real route, either on an
+  // existing thread in this strategy or a brand-new institution/person
+  // threaded in on the spot, then marks the item activated so it leaves the
+  // In Preparation area (its row survives for history, just filtered out).
+  const activateIncubatorItem = async (item, { threadId, newThread, routeTitle } = {}) => {
+    let tid = threadId;
+    if (!tid && newThread) {
+      const t = await addStrategyThread(item.strategy_id, { title: newThread.title, fks: newThread.fks, goal: "" });
+      if (!t) return null;
+      tid = t.id;
+    }
+    if (!tid) return null;
+    const route = await addStrategyRoute(tid, (routeTitle || item.title || "New route").trim());
+    if (!route) return null;
+    await updateIncubatorItem(item.id, { status: "activated" });
+    return route;
   };
 
   // Candidate moments for "Pull existing moments": activities, notes, stage
@@ -6155,6 +6220,13 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onDeleteBlocker={deleteRouteBlocker}
           onResolveBlocker={resolveRouteBlocker}
           onBuildStrategyDigest={buildStrategyUpdateDigest}
+          incubatorFor={incubatorFor}
+          onAddIncubatorItem={addIncubatorItem}
+          onUpdateIncubatorItem={updateIncubatorItem}
+          onDeleteIncubatorItem={deleteIncubatorItem}
+          onReorderIncubatorItems={reorderIncubatorItems}
+          onDropIncubatorItem={dropIncubatorItem}
+          onActivateIncubatorItem={activateIncubatorItem}
           trackOptions={execTrackOptions}
           contactOptions={contacts}
           onCreateContact={createContactForMention}
@@ -9567,6 +9639,166 @@ function StrategyInstitutionRows({
     </>
   );
 }
+// Strategy Incubator: strategy-level work in preparation, an angle being set
+// up or groundwork being laid, distinct from a route (live, actively
+// pursued) and a planned moment (a dated or undated future step ON a
+// specific route). Deliberately off the week axis entirely, since it is not
+// yet real enough to have a route to hang a date on.
+function StrategyIncubatorItem({ item, readOnly, onUpdate, onDelete, onDrop, onOpenActivate }) {
+  const ready = item.status === "ready";
+  return (
+    <div className="strategy-incubator-item">
+      <div className="strategy-incubator-row">
+        <div className="strategy-incubator-text">
+          <StrategyMentionField value={item.title} onSave={(v) => onUpdate(item.id, { title: v })} readOnly={readOnly} placeholder="What's being prepared" />
+          {(item.detail || !readOnly) && (
+            <StrategyMentionField value={item.detail || ""} onSave={(v) => onUpdate(item.id, { detail: v })} readOnly={readOnly} placeholder="Detail (optional)" />
+          )}
+        </div>
+        <span className={`badge strategy-incubator-status ${ready ? "strategy-incubator-status-ready" : "strategy-incubator-status-preparing"}`}>{ready ? "Ready" : "Preparing"}</span>
+        {!readOnly && (
+          <span className="strategy-incubator-actions">
+            <button type="button" className="link-btn" onClick={() => onUpdate(item.id, { status: ready ? "preparing" : "ready" })}>{ready ? "Mark Preparing" : "Mark Ready"}</button>
+            <button type="button" className="link-btn strategy-incubator-activate" onClick={() => onOpenActivate(item)}>Activate</button>
+            <button type="button" className="link-btn" onClick={() => { if (window.confirm("Drop this from preparation?")) onDrop(item.id); }}>Drop</button>
+            <button type="button" className="moment-node-del" onClick={() => onDelete(item.id)} title="Delete">✕</button>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+function StrategyIncubatorAddForm({ onAdd, onCancel, showToast }) {
+  const [title, setTitle] = useState("");
+  const [detail, setDetail] = useState("");
+  const submit = () => { if (!title.trim()) return; onAdd({ title: title.trim(), detail: detail.trim() || null }); setTitle(""); setDetail(""); };
+  return (
+    <div className="strategy-backlog-add">
+      <MentionEditor value={title} onChange={setTitle} multiline={false} placeholder="e.g. Preparing publication-support MVP before pitching" autoFocus onSubmit={submit} />
+      <MentionEditor value={detail} onChange={setDetail} multiline={false} placeholder="Detail (optional)" onSubmit={submit} />
+      <VoiceRecorder mode="plain" compact showToast={showToast} onPlainText={(t) => setTitle((prev) => (prev ? `${prev} ${t}` : t))} />
+      <div className="strategy-backlog-add-actions">
+        <button type="button" className="btn-primary" onClick={submit}>Add</button>
+        <button type="button" className="link-btn" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+// "Activate" promotes an incubator item into a real route: pick one of this
+// strategy's existing institutions/people, or thread in a new one on the
+// spot (the same picker as "+ Add institution or person"), then a route
+// title (defaulting to the item's own title).
+function StrategyIncubatorActivateModal({ item, threads, trackOptions, contactOptions, onCreateContact, onConfirm, onClose }) {
+  const [target, setTarget] = useState(threads.length ? "existing" : "new");
+  const [threadId, setThreadId] = useState(threads[0]?.id || "");
+  const [routeTitle, setRouteTitle] = useState(item.title || "");
+  const [kind, setKind] = useState("institution");
+  const [pickedInst, setPickedInst] = useState("");
+  const [pickedPersonId, setPickedPersonId] = useState("");
+  const [customTitle, setCustomTitle] = useState("");
+  const submit = () => {
+    const rt = routeTitle.trim() || item.title;
+    if (target === "existing") {
+      if (!threadId) return;
+      onConfirm({ threadId, routeTitle: rt });
+      return;
+    }
+    if (kind === "institution") {
+      if (!pickedInst) return;
+      const i = pickedInst.indexOf(":"); const type = pickedInst.slice(0, i); const id = pickedInst.slice(i + 1);
+      const label = trackOptions.find((o) => o.value === pickedInst)?.label || "Institution";
+      onConfirm({ newThread: { fks: { [`${type}_id`]: id }, title: customTitle.trim() || label }, routeTitle: rt });
+    } else {
+      if (!pickedPersonId) return;
+      const person = contactOptions.find((c) => c.id === pickedPersonId);
+      onConfirm({ newThread: { fks: { contact_id: pickedPersonId }, title: customTitle.trim() || person?.name || "Person" }, routeTitle: rt });
+    }
+  };
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal strategy-activate-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div className="modal-title">Activate: {item.title}</div>
+          <button type="button" className="close-btn" onClick={onClose}>✕</button>
+        </div>
+        <div className="strategy-activate-body">
+          {threads.length > 0 && (
+            <div className="strategy-add-kind">
+              <button type="button" className={target === "existing" ? "active" : ""} onClick={() => setTarget("existing")}>Existing institution/person</button>
+              <button type="button" className={target === "new" ? "active" : ""} onClick={() => setTarget("new")}>New institution/person</button>
+            </div>
+          )}
+          {target === "existing" ? (
+            <select className="input" value={threadId} onChange={(e) => setThreadId(e.target.value)}>
+              {threads.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          ) : (
+            <>
+              <div className="strategy-add-kind">
+                <button type="button" className={kind === "institution" ? "active" : ""} onClick={() => setKind("institution")}>Institution</button>
+                <button type="button" className={kind === "person" ? "active" : ""} onClick={() => setKind("person")}>Person</button>
+              </div>
+              {kind === "institution"
+                ? <EntityPicker placeholder="Search institutions..." options={trackOptions} value={pickedInst} onChange={setPickedInst} />
+                : <ContactConnectPicker contacts={contactOptions} value={pickedPersonId} onChange={setPickedPersonId} onCreateContact={onCreateContact} placeholder="Search people..." />}
+              <input className="input" value={customTitle} onChange={(e) => setCustomTitle(e.target.value)} placeholder="Thread title (optional)" />
+            </>
+          )}
+          <label className="strategy-goal-label">Route title</label>
+          <input className="input" value={routeTitle} onChange={(e) => setRouteTitle(e.target.value)} placeholder="Route title" />
+        </div>
+        <div className="exec-edit-actions">
+          <button type="button" className="btn-primary" onClick={submit}>Activate</button>
+          <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+// The "In Preparation" panel itself: a strategy's incubator items, visually
+// muted/distinct from the live institutions and routes below it, since
+// these are not yet real enough to be on the timeline at all.
+function StrategyIncubatorZone({ strategyId, items, readOnly, onAdd, onUpdate, onDelete, onDrop, onReorder, onActivate, activateThreads, trackOptions, contactOptions, onCreateContact, showToast }) {
+  const [adding, setAdding] = useState(false);
+  const [draggingId, setDraggingId] = useState(null);
+  const [activating, setActivating] = useState(null);
+  const dropReorder = (targetId) => {
+    if (!draggingId || draggingId === targetId) { setDraggingId(null); return; }
+    const ids = items.map((i) => i.id);
+    const from = ids.indexOf(draggingId), to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) { setDraggingId(null); return; }
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    onReorder(ids);
+    setDraggingId(null);
+  };
+  if (readOnly && items.length === 0) return null;
+  return (
+    <div className="strategy-incubator-zone">
+      <div className="strategy-incubator-head">
+        <span className="strategy-incubator-title">In Preparation</span>
+        {items.length > 0 && <span className="strategy-incubator-count">{items.length}</span>}
+      </div>
+      <div className="strategy-incubator-list">
+        {items.map((item) => (
+          <div key={item.id} draggable={!readOnly} onDragStart={() => setDraggingId(item.id)}
+            onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); dropReorder(item.id); }}>
+            <StrategyIncubatorItem item={item} readOnly={readOnly} onUpdate={onUpdate} onDelete={onDelete} onDrop={onDrop} onOpenActivate={setActivating} />
+          </div>
+        ))}
+        {items.length === 0 && <div className="strategy-incubator-empty">Nothing in preparation.</div>}
+      </div>
+      {!readOnly && (
+        adding ? <StrategyIncubatorAddForm showToast={showToast} onAdd={(vals) => { onAdd(strategyId, vals); setAdding(false); }} onCancel={() => setAdding(false)} />
+          : <button type="button" className="link-btn" onClick={() => setAdding(true)}>+ Add</button>
+      )}
+      {activating && (
+        <StrategyIncubatorActivateModal item={activating} threads={activateThreads} trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
+          onConfirm={(vals) => { onActivate(activating, vals); setActivating(null); }} onClose={() => setActivating(null)} />
+      )}
+    </div>
+  );
+}
+
 // One STRATEGY's self-contained card: a colored header sitting above the
 // grid, then a single CSS Grid (`repeat(weeks.length, 1fr) + one fixed
 // Planned column`) shared by the week-label row and every institution/route
@@ -9583,6 +9815,7 @@ function StrategyCard({
   addingThread, onStartAddThread, onCancelAddThread, onAddThread, trackOptions, contactOptions, onCreateContact,
   isDragging, onDragStart, onDragOverSelf, onDropSelf,
   strategyBlockers, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
+  incubatorItems, onAddIncubatorItem, onUpdateIncubatorItem, onDeleteIncubatorItem, onReorderIncubatorItems, onDropIncubatorItem, onActivateIncubatorItem,
 }) {
   const byWeek = useMemo(() => bucketThreadsByWeek(threads), [threads]);
   const pending = strategyBacklogCount(threads);
@@ -9614,12 +9847,21 @@ function StrategyCard({
         <span className="strategy-card-goal"><StrategyMentionField value={strategy.goal || ""} onSave={(v) => onUpdateGoal(strategy.id, v)} readOnly={readOnly} placeholder="Overall goal" /></span>
         {collapsed && pending > 0 && <span className="strategy-planned-badge">{pending} planned</span>}
         <StrategyBlockedBadge count={strategyBlockedCount} />
+        {collapsed && (incubatorItems || []).length > 0 && <span className="strategy-incubator-badge">{incubatorItems.length} in prep</span>}
         {lastMoveDate && <span className="strategy-card-move">Last movement {formatDate(lastMoveDate)}</span>}
       </div>
       {!collapsed && ((strategyBlockers || []).length > 0 || !readOnly) && (
         <div className="strategy-card-blockers">
           <StrategyBlockerZone blockers={strategyBlockers || []} readOnly={readOnly}
             onAdd={(c) => onAddBlocker({ strategy_id: strategy.id }, c)} onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
+        </div>
+      )}
+      {!collapsed && ((incubatorItems || []).length > 0 || !readOnly) && (
+        <div className="strategy-card-incubator">
+          <StrategyIncubatorZone strategyId={strategy.id} items={incubatorItems || []} readOnly={readOnly}
+            onAdd={onAddIncubatorItem} onUpdate={onUpdateIncubatorItem} onDelete={onDeleteIncubatorItem}
+            onReorder={onReorderIncubatorItems} onDrop={onDropIncubatorItem} onActivate={onActivateIncubatorItem}
+            activateThreads={threads} trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact} showToast={showToast} />
         </div>
       )}
       <div className="strategy-card-body" style={{ gridTemplateColumns: `repeat(${weeks.length}, 1fr) ${STRATEGY_PLANNED_COL_PX}px` }}>
@@ -9681,6 +9923,7 @@ function StrategyCardsTimeline({
   onAddThread, onAddRoute, trackOptions, contactOptions, onCreateContact,
   onReorderStrategies, onReorderThreads, onReorderRoutes,
   routeBlockersFor, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
+  incubatorFor, onAddIncubatorItem, onUpdateIncubatorItem, onDeleteIncubatorItem, onReorderIncubatorItems, onDropIncubatorItem, onActivateIncubatorItem,
   presenting = false, focusedStrategyId = null, onFocusStrategy,
 }) {
   const [rangeId, setRangeId] = useState("8w");
@@ -9760,7 +10003,10 @@ function StrategyCardsTimeline({
               onDragOverSelf={readOnly ? undefined : (e) => e.preventDefault()}
               onDropSelf={readOnly ? undefined : (e) => { e.preventDefault(); dropStrategy(strategy.id); }}
               strategyBlockers={routeBlockersFor({ strategy_id: strategy.id })}
-              onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker} />
+              onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+              incubatorItems={incubatorFor(strategy.id)} onAddIncubatorItem={onAddIncubatorItem} onUpdateIncubatorItem={onUpdateIncubatorItem}
+              onDeleteIncubatorItem={onDeleteIncubatorItem} onReorderIncubatorItems={onReorderIncubatorItems}
+              onDropIncubatorItem={onDropIncubatorItem} onActivateIncubatorItem={onActivateIncubatorItem} />
           ))}
         </div>
       )}
@@ -9816,6 +10062,7 @@ function StrategyPresenterView({
   onAddThread, onAddRoute, trackOptions, contactOptions, onCreateContact,
   onReorderStrategies, onReorderThreads, onReorderRoutes,
   routeBlockersFor, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
+  incubatorFor,
 }) {
   const [focusedStrategyId, setFocusedStrategyId] = useState(null);
   useEffect(() => {
@@ -9843,6 +10090,7 @@ function StrategyPresenterView({
           onReorderStrategies={onReorderStrategies} onReorderThreads={onReorderThreads} onReorderRoutes={onReorderRoutes}
           routeBlockersFor={routeBlockersFor} onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker}
           onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+          incubatorFor={incubatorFor}
           presenting focusedStrategyId={focusedStrategyId} onFocusStrategy={setFocusedStrategyId} />
       </div>
     </div>
@@ -9858,6 +10106,7 @@ function StrategyTab({
   momentCandidatesFor, pulledSourceRefs, onBulkAddMilestones,
   routeBlockersFor, openBlockersCount, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
   onBuildStrategyDigest,
+  incubatorFor, onAddIncubatorItem, onUpdateIncubatorItem, onDeleteIncubatorItem, onReorderIncubatorItems, onDropIncubatorItem, onActivateIncubatorItem,
   trackOptions, contactOptions, onCreateContact, showToast,
 }) {
   const readOnly = useReadOnly();
@@ -10002,7 +10251,10 @@ function StrategyTab({
               trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
               onReorderStrategies={onReorderStrategies} onReorderThreads={onReorderThreads} onReorderRoutes={onReorderRoutes}
               routeBlockersFor={routeBlockersFor} onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker}
-              onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker} />
+              onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+              incubatorFor={incubatorFor} onAddIncubatorItem={onAddIncubatorItem} onUpdateIncubatorItem={onUpdateIncubatorItem}
+              onDeleteIncubatorItem={onDeleteIncubatorItem} onReorderIncubatorItems={onReorderIncubatorItems}
+              onDropIncubatorItem={onDropIncubatorItem} onActivateIncubatorItem={onActivateIncubatorItem} />
           ) : (
             <>
               {strategies.length > 1 && (
@@ -10022,6 +10274,11 @@ function StrategyTab({
 
               <StrategyBlockerZone blockers={routeBlockersFor({ strategy_id: strategy.id })} readOnly={readOnly}
                 onAdd={(c) => onAddBlocker({ strategy_id: strategy.id }, c)} onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
+
+              <StrategyIncubatorZone strategyId={strategy.id} items={incubatorFor(strategy.id)} readOnly={readOnly}
+                onAdd={onAddIncubatorItem} onUpdate={onUpdateIncubatorItem} onDelete={onDeleteIncubatorItem}
+                onReorder={onReorderIncubatorItems} onDrop={onDropIncubatorItem} onActivate={onActivateIncubatorItem}
+                activateThreads={threads} trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact} showToast={showToast} />
 
               <div className="strategy-week-summary">
                 <span><b>{week.advanced}</b> route{week.advanced === 1 ? "" : "s"} advanced this week</span>
