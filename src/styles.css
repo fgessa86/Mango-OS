@@ -890,6 +890,8 @@ button.act-pill { -webkit-appearance: none; appearance: none; }
 .template-list { display: flex; flex-direction: column; gap: 8px; }
 .template-row { display: flex; align-items: center; gap: 12px; background: var(--surface); border-radius: 12px; padding: 13px 16px; box-shadow: var(--shadow-card); cursor: pointer; }
 .template-row:hover { box-shadow: var(--shadow-hover); }
+.template-row-readonly { cursor: default; }
+.template-row-readonly:hover { box-shadow: var(--shadow-card); }
 .template-main { flex: 1; min-width: 0; }
 .template-name-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .template-name { font-size: 14px; font-weight: 700; color: var(--text); }
@@ -2576,6 +2578,14 @@ body.exec-presenting-body { overflow: hidden; }
 .strategy-chip-thread:disabled { color: var(--muted); cursor: default; }
 .strategy-chip-route { font-size: 10px; color: var(--muted); background: var(--card); border-radius: 6px; padding: 1px 6px; align-self: flex-start; }
 .strategy-chip .moment-node { max-width: 100%; box-sizing: border-box; background: var(--surface); }
+
+.strategy-page-head-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.strategy-email-modal { max-width: 620px; }
+.strategy-email-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.strategy-email-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--muted-2); }
+.strategy-email-recents { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.strategy-email-body { font-family: inherit; font-size: 12.5px; line-height: 1.5; resize: vertical; white-space: pre-wrap; }
 
 .pull-moments-modal { max-width: 620px; }
 .pull-moments-tools { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; font-size: 12.5px; }

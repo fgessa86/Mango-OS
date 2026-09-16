@@ -739,10 +739,13 @@ function parseDueHint(hint) {
 function MobileTabBar({ view, setView, tasksCount, sheetOrigin = "network", bossMode = false }) {
   const tabs = bossMode ? [
     // Andy's homepage is the Week in Review, so it replaces Home on his tab bar too.
+    // Network Map is desktop-only for everyone (see the map-mobile-notice
+    // fallback), so it is not offered here; Calendar and Tasks are never on
+    // Andy's mobile bar either.
     { id: "reports", label: "Week in Review", shape: "doc" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Ecosystem", shape: "circle" },
-    { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
+    { id: "strategy", label: "Strategy", shape: "chart" },
   ] : [
     { id: "home", label: "Home", shape: "house" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
@@ -804,9 +807,10 @@ function Sidebar({ view, setView, tasksCount, sheetOrigin = "network", apiCallsT
     { id: "reports", label: "Week in Review", shape: "doc" },
     { id: "pipeline", label: "Pipeline", shape: "square" },
     { id: "network", label: "Ecosystem", shape: "circle" },
-    { id: "calendar", label: "Calendar", shape: "calendar" },
-    { id: "tasks", label: "Tasks", shape: "lines", count: tasksCount },
+    { id: "map", label: "Network Map", shape: "diamond" },
     { id: "strategy", label: "Strategy", shape: "chart" },
+    { id: "notes", label: "Notes", shape: "note" },
+    { id: "outreach", label: "Outreach", shape: "send" },
   ] : [
     { id: "home", label: "Home", shape: "house" },
     { id: "calendar", label: "Calendar", shape: "calendar" },
@@ -4567,6 +4571,121 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   }).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || (a.raised_at || "").localeCompare(b.raised_at || ""));
   const openBlockersCount = (fks) => routeBlockersFor(fks).filter((b) => !b.is_resolved).length;
 
+  // A thread's linked institution/person is internal (Mango Sciences' own
+  // team), so it never belongs in an external-facing strategy update.
+  const strategyThreadIsInternal = (t) => {
+    if (t.contact_id) return !!contacts.find((c) => c.id === t.contact_id)?.is_internal;
+    const inst = t.deal_id ? institutions.find((i) => i.dealId === t.deal_id)
+      : t.enabler_id ? institutions.find((i) => i.enablerId === t.enabler_id)
+      : institutions.find((i) => i.orgId === t.organization_id);
+    return !!inst?.isInternal;
+  };
+  // Clean, plain text for an email body: strips internal markers/mentions
+  // down to the bare name, since a raw token or [[marker]] must never reach
+  // an executive's inbox.
+  const digestText = (s) => mentionsToPlainText(cleanActivityText(s || "")).trim();
+
+  // Builds the "Strategy Update" email body: this week's movement, routes
+  // that ended, what's coming up, and every currently open blocker across
+  // every strategy, synthesized and executive-readable rather than a raw
+  // data dump. `weekStart`/`weekEnd` are Date objects (Sunday-start, the
+  // same convention as the Week in Review).
+  const buildStrategyUpdateDigest = (weekStart, weekEnd) => {
+    const weekStartISO = weekStart.toISOString().slice(0, 10);
+    const weekEndISO = weekEnd.toISOString().slice(0, 10);
+    const todayISO = new Date().toISOString().slice(0, 10);
+    const inWeek = (d) => !!d && d >= weekStartISO && d <= weekEndISO;
+    const activeStrategies = [...strategies].filter((s) => s.is_active !== false).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+    const resolvedFor = (s) => threadsForStrategy(s.id).map(resolveStrategyThreadCard).filter((t) => !strategyThreadIsInternal(t));
+
+    const lines = [];
+    lines.push(`STRATEGY UPDATE: ${formatDate(weekStart)} to ${formatDate(weekEnd)}`, "");
+
+    if (!activeStrategies.length) {
+      lines.push("No strategies set up yet.");
+      return lines.join("\n");
+    }
+
+    lines.push("WHAT MOVED THIS WEEK");
+    activeStrategies.forEach((s) => {
+      const threads = resolvedFor(s);
+      const stratLines = [];
+      threads.forEach((t) => {
+        t.routes.forEach((r) => {
+          r.milestones.filter((m) => !m.is_backlog && inWeek(m.milestone_date)).forEach((m) => {
+            stratLines.push(`  - ${t.name} > ${r.title}: ${digestText(m.title)} (${formatDate(m.milestone_date)})`);
+          });
+        });
+      });
+      lines.push(`${s.name}:`);
+      lines.push(...(stratLines.length ? stratLines : ["  - No movement this week."]));
+    });
+    lines.push("");
+
+    const ended = [];
+    activeStrategies.forEach((s) => {
+      resolvedFor(s).forEach((t) => {
+        t.routes.forEach((r) => {
+          if ((r.state === "dead_end" || r.state === "succeeded") && r.ended_at && inWeek(r.ended_at)) ended.push({ s, t, r });
+        });
+      });
+    });
+    if (ended.length) {
+      lines.push("ROUTES THAT ENDED THIS WEEK");
+      ended.forEach(({ s, t, r }) => {
+        const tag = r.state === "dead_end" ? "DEAD END" : "SUCCEEDED";
+        const note = r.outcome_note ? `: ${digestText(r.outcome_note)}` : "";
+        lines.push(`  - [${tag}] ${s.name} > ${t.name} > ${r.title}${note} (${formatDate(r.ended_at)})`);
+      });
+      lines.push("");
+    }
+
+    lines.push("PLANNED NEXT");
+    let anyPlanned = false;
+    activeStrategies.forEach((s) => {
+      resolvedFor(s).forEach((t) => {
+        t.routes.filter((r) => r.state === "active").forEach((r) => {
+          const future = r.milestones.filter((m) => !m.is_backlog && m.milestone_date && m.milestone_date > todayISO)
+            .sort((a, b) => a.milestone_date.localeCompare(b.milestone_date));
+          const backlog = r.milestones.filter((m) => m.is_backlog).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+          if (future.length) {
+            anyPlanned = true;
+            lines.push(`  - ${s.name} > ${t.name} > ${r.title}: ${digestText(future[0].title)} (${formatDate(future[0].milestone_date)})`);
+          } else if (backlog.length) {
+            anyPlanned = true;
+            lines.push(`  - ${s.name} > ${t.name} > ${r.title}: ${digestText(backlog[0].title)} (not yet scheduled)`);
+          }
+        });
+      });
+    });
+    if (!anyPlanned) lines.push("  - Nothing scheduled yet.");
+    lines.push("");
+
+    lines.push("OPEN BLOCKERS: WHERE WE ARE STUCK");
+    const openBlockers = [];
+    activeStrategies.forEach((s) => {
+      routeBlockersFor({ strategy_id: s.id }).filter((b) => !b.is_resolved).forEach((b) => openBlockers.push({ s, t: null, r: null, b }));
+      resolvedFor(s).forEach((t) => {
+        (t.blockers || []).filter((b) => !b.is_resolved).forEach((b) => openBlockers.push({ s, t, r: null, b }));
+        t.routes.forEach((r) => {
+          (r.blockers || []).filter((b) => !b.is_resolved).forEach((b) => openBlockers.push({ s, t, r, b }));
+        });
+      });
+    });
+    if (openBlockers.length) {
+      openBlockers.sort((a, b) => (a.b.raised_at || "").localeCompare(b.b.raised_at || ""));
+      openBlockers.forEach(({ s, t, r, b }) => {
+        const context = [s.name, t?.name, r?.title].filter(Boolean).join(" > ");
+        const days = daysAgo(b.raised_at);
+        lines.push(`  - ${context}: ${digestText(b.content)} (open ${days} day${days === 1 ? "" : "s"})`);
+      });
+    } else {
+      lines.push("  - None. Nothing currently stuck.");
+    }
+
+    return lines.join("\n");
+  };
+
   /* ---- Exec Questions for the team, per-presentation. ---- */
   const execQuestionsFor = (pid) => execQuestions.filter((x) => x.presentation_id === pid).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   const addExecQuestion = async (presentationId, content) => {
@@ -5252,7 +5371,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // stale URL) send it back to the Week in Review, Andy's homepage, rather
   // than a tab that is not in his nav (M4).
   useEffect(() => {
-    if (bossMode && ["outreach", "notes", "home", "map", "materials", "exec"].includes(view)) setView("reports");
+    if (bossMode && ["calendar", "tasks", "home", "materials", "exec"].includes(view)) setView("reports");
   }, [bossMode, view]);
 
   const VIEW_BACK_LABELS = { home: "Home", calendar: "Calendar", pipeline: "Pipeline", network: "Ecosystem", map: "Network Map", tasks: "Tasks", notes: "Notes", materials: "Materials", outreach: "Outreach", reports: "Reports", exec: "Exec Update", strategy: "Strategy" };
@@ -5910,7 +6029,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       )}
 
       {/* OUTREACH ENGINE */}
-      {view === "outreach" && !bossMode && (
+      {view === "outreach" && (
         <OutreachTab
           contacts={contacts}
           deals={deals}
@@ -6035,6 +6154,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onUpdateBlocker={updateRouteBlocker}
           onDeleteBlocker={deleteRouteBlocker}
           onResolveBlocker={resolveRouteBlocker}
+          onBuildStrategyDigest={buildStrategyUpdateDigest}
           trackOptions={execTrackOptions}
           contactOptions={contacts}
           onCreateContact={createContactForMention}
@@ -8881,6 +9001,81 @@ function PullMomentsPanel({ title, candidates, onConfirm, onClose }) {
   );
 }
 
+// Recently used recipients for the Strategy Update email, remembered across
+// sessions (a lightweight convenience, not a fixed distribution list: the
+// recipients are specified fresh every time per spec).
+const STRATEGY_EMAIL_RECENTS_KEY = "mango-strategy-email-recents";
+const loadStrategyEmailRecents = () => {
+  try { return JSON.parse(localStorage.getItem(STRATEGY_EMAIL_RECENTS_KEY) || "[]"); } catch { return []; }
+};
+const saveStrategyEmailRecents = (emails) => {
+  try { localStorage.setItem(STRATEGY_EMAIL_RECENTS_KEY, JSON.stringify(emails.slice(0, 8))); } catch { /* ignore */ }
+};
+
+// The Strategy Update email compose panel: an auto-built digest of this
+// week's strategy movement (see buildStrategyUpdateDigest), fully editable
+// before it goes anywhere. Never sends on its own, same convention as the
+// Outreach Engine's ComposeModal: "Open in Gmail" or "Copy", Fahed sends.
+function StrategyEmailModal({ digest, weekLabel, onClose, showToast }) {
+  const [to, setTo] = useState("");
+  const [subject, setSubject] = useState(`Strategy Update, ${weekLabel}`);
+  const [body, setBody] = useState(digest);
+  const [recents, setRecents] = useState(() => loadStrategyEmailRecents());
+
+  const rememberRecipients = () => {
+    const emails = to.split(",").map((s) => s.trim()).filter(Boolean);
+    if (!emails.length) return;
+    const merged = [...emails, ...recents.filter((e) => !emails.includes(e))];
+    setRecents(merged.slice(0, 8));
+    saveStrategyEmailRecents(merged);
+  };
+  const addRecent = (email) => setTo((prev) => {
+    const parts = prev.split(",").map((s) => s.trim()).filter(Boolean);
+    return parts.includes(email) ? prev : [...parts, email].join(", ");
+  });
+
+  const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(to)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const openGmail = () => { rememberRecipients(); window.open(gmailUrl, "_blank", "noopener"); };
+  const copyAll = () => {
+    navigator.clipboard.writeText(`Subject: ${subject}\n\n${body}`).then(
+      () => { rememberRecipients(); showToast("Subject and body copied"); },
+      () => showToast("Could not copy to clipboard"));
+  };
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal strategy-email-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div className="modal-title">Strategy Update Email</div>
+          <button type="button" className="close-btn" onClick={onClose}>✕</button>
+        </div>
+        <div className="strategy-email-field">
+          <label className="strategy-email-label">To</label>
+          <input className="input" value={to} onChange={(e) => setTo(e.target.value)} placeholder="name@company.com, name2@company.com" />
+          {recents.length > 0 && (
+            <div className="strategy-email-recents">
+              {recents.map((e) => <button key={e} type="button" className="tag-btn" onClick={() => addRecent(e)}>{e}</button>)}
+            </div>
+          )}
+        </div>
+        <div className="strategy-email-field">
+          <label className="strategy-email-label">Subject</label>
+          <input className="input" value={subject} onChange={(e) => setSubject(e.target.value)} />
+        </div>
+        <div className="strategy-email-field">
+          <label className="strategy-email-label">Body</label>
+          <textarea className="input strategy-email-body" value={body} onChange={(e) => setBody(e.target.value)} rows={16} />
+        </div>
+        <div className="exec-edit-actions">
+          <button type="button" className="btn-primary" onClick={openGmail}>Open in Gmail</button>
+          <button type="button" className="btn-sec" onClick={copyAll}>Copy</button>
+          <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ============================================================
    Strategy Timeline, card layout: each strategy is its own self-contained
    card stacked down the page, not one shared spreadsheet-like table. Weeks
@@ -9602,9 +9797,16 @@ function StrategyTab({
   onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones,
   momentCandidatesFor, pulledSourceRefs, onBulkAddMilestones,
   routeBlockersFor, openBlockersCount, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
+  onBuildStrategyDigest,
   trackOptions, contactOptions, onCreateContact, showToast,
 }) {
   const readOnly = useReadOnly();
+  const [emailModal, setEmailModal] = useState(null);
+  const openStrategyEmail = () => {
+    const weekStart = startOfWeek(new Date());
+    const weekEnd = addDaysLocal(weekStart, 6);
+    setEmailModal({ digest: onBuildStrategyDigest(weekStart, weekEnd), weekLabel: `${formatDate(weekStart)} to ${formatDate(weekEnd)}` });
+  };
   const [activeStrategyId, setActiveStrategyId] = useState(null);
   const strategy = strategies.find((s) => s.id === activeStrategyId) || strategies[0] || null;
   useEffect(() => { if (!activeStrategyId && strategies.length) setActiveStrategyId(strategies[0].id); }, [activeStrategyId, strategies]);
@@ -9672,7 +9874,10 @@ function StrategyTab({
           <h1 className="page-title">Strategy</h1>
           <p className="page-sub">Parallel routes toward each institution's goal, dead ends included.</p>
         </div>
-        {!readOnly && !addingStrategy && <button className="btn-primary" onClick={() => setAddingStrategy(true)}>+ New Strategy</button>}
+        <div className="strategy-page-head-actions">
+          {!readOnly && <button type="button" className="btn-sec" onClick={openStrategyEmail}>✉ Strategy Update Email</button>}
+          {!readOnly && !addingStrategy && <button className="btn-primary" onClick={() => setAddingStrategy(true)}>+ New Strategy</button>}
+        </div>
       </div>
 
       {addingStrategy && (
@@ -9754,6 +9959,10 @@ function StrategyTab({
         <PullMomentsPanel title={pullTarget.title} candidates={candidates}
           onConfirm={(picks) => { onBulkAddMilestones(pullTarget.saveFks, picks); setPullTarget(null); }}
           onClose={() => setPullTarget(null)} />
+      )}
+
+      {emailModal && (
+        <StrategyEmailModal digest={emailModal.digest} weekLabel={emailModal.weekLabel} showToast={showToast} onClose={() => setEmailModal(null)} />
       )}
     </div>
   );
@@ -10975,8 +11184,11 @@ function NewBriefForm({ contacts, institutions, onCancel, onCreate }) {
    Outreach Engine (templates, compose, follow-ups)
    ============================================================ */
 
-function OutreachStatusSelect({ contact, onSetStatus }) {
+function OutreachStatusSelect({ contact, onSetStatus, readOnly }) {
   const m = outreachStatusMeta(contact.outreach_status);
+  if (readOnly) {
+    return <span className="badge outreach-status-select" style={{ color: m.color, borderColor: m.color + "55", background: m.color + "14" }}>{m.label}</span>;
+  }
   return (
     <select
       className="outreach-status-select"
@@ -11000,7 +11212,7 @@ const channelHasTarget = (c, ch) => {
 const channelMissingLabel = (ch) => (ch === "email" ? "No email" : ch === "linkedin" ? "No LinkedIn URL" : "No phone");
 
 // One row on the Follow-ups dashboard.
-function FollowupRow({ contact, channel, institution, daysWaiting, showMarkReplied, onSetStatus, onOpenPerson, onOpenInstitution, action }) {
+function FollowupRow({ contact, channel, institution, daysWaiting, showMarkReplied, onSetStatus, onOpenPerson, onOpenInstitution, action, readOnly }) {
   const cm = outreachChannelMeta(channel);
   return (
     <div className="followup-row">
@@ -11018,14 +11230,15 @@ function FollowupRow({ contact, channel, institution, daysWaiting, showMarkRepli
           {contact.last_outreach_at && <span>Last outreach {formatDate(contact.last_outreach_at)}</span>}
         </div>
       </div>
-      <OutreachStatusSelect contact={contact} onSetStatus={onSetStatus} />
-      {showMarkReplied && <button className="btn-sec followup-action" onClick={(e) => { e.stopPropagation(); onSetStatus(contact.id, "replied"); }}>Mark as replied</button>}
-      {action}
+      <OutreachStatusSelect contact={contact} onSetStatus={onSetStatus} readOnly={readOnly} />
+      {showMarkReplied && !readOnly && <button className="btn-sec followup-action" onClick={(e) => { e.stopPropagation(); onSetStatus(contact.id, "replied"); }}>Mark as replied</button>}
+      {!readOnly && action}
     </div>
   );
 }
 
 function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, enablerContacts, networkEdges, contactRoles, templates, onSaveTemplate, onDeleteTemplate, onSetStatus, onCompose, onOpenPerson, onOpenInstitution }) {
+  const readOnly = useReadOnly();
   const [subtab, setSubtab] = useState("followups");
   const [channelFilter, setChannelFilter] = useState("all");
   const [templateChannelFilter, setTemplateChannelFilter] = useState("all");
@@ -11096,6 +11309,7 @@ function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, e
               onOpenPerson={onOpenPerson}
               onOpenInstitution={onOpenInstitution}
               action={renderAction ? renderAction(c) : null}
+              readOnly={readOnly}
             />
           ))}
         </div>
@@ -11145,7 +11359,7 @@ function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, e
         <>
           <div className="ai-summary-header">
             <div className="section-label">Templates</div>
-            <button className="btn-copy" onClick={() => setEditingTemplate("new")}>+ New Template</button>
+            {!readOnly && <button className="btn-copy" onClick={() => setEditingTemplate("new")}>+ New Template</button>}
           </div>
           <div className="outreach-channel-filter">
             <button className={`tag-btn ${templateChannelFilter === "all" ? "active" : ""}`} onClick={() => setTemplateChannelFilter("all")}>All</button>
@@ -11153,7 +11367,7 @@ function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, e
               <button key={c.id} className={`tag-btn ${templateChannelFilter === c.id ? "active" : ""}`} onClick={() => setTemplateChannelFilter(c.id)}>{c.glyph} {c.label}</button>
             ))}
           </div>
-          {editingTemplate && (
+          {editingTemplate && !readOnly && (
             <TemplateEditor
               template={editingTemplate === "new" ? null : editingTemplate}
               onSave={async (form) => { await onSaveTemplate(form, editingTemplate === "new" ? null : editingTemplate.id); setEditingTemplate(null); }}
@@ -11170,7 +11384,7 @@ function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, e
                   const cat = templateCategoryMeta(t.category);
                   const cm = outreachChannelMeta(t.channel || "email");
                   return (
-                    <div key={t.id} className="template-row" onClick={() => setEditingTemplate(t)}>
+                    <div key={t.id} className={`template-row ${readOnly ? "template-row-readonly" : ""}`} onClick={readOnly ? undefined : () => setEditingTemplate(t)}>
                       <div className="template-main">
                         <div className="template-name-row">
                           <span className="template-name">{t.name}</span>
@@ -11179,7 +11393,7 @@ function OutreachTab({ contacts, deals, enablers, organizations, dealContacts, e
                         </div>
                         {t.subject && <div className="template-subject">{t.subject}</div>}
                       </div>
-                      <button className="person-remove" title="Delete template" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete template "${t.name}"?`)) onDeleteTemplate(t.id); }}>✕</button>
+                      {!readOnly && <button className="person-remove" title="Delete template" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete template "${t.name}"?`)) onDeleteTemplate(t.id); }}>✕</button>}
                     </div>
                   );
                 })}
