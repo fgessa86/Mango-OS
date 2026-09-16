@@ -9681,6 +9681,7 @@ function StrategyCardsTimeline({
   onAddThread, onAddRoute, trackOptions, contactOptions, onCreateContact,
   onReorderStrategies, onReorderThreads, onReorderRoutes,
   routeBlockersFor, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
+  presenting = false, focusedStrategyId = null, onFocusStrategy,
 }) {
   const [rangeId, setRangeId] = useState("8w");
   const range = STRATEGY_GRID_RANGES.find((r) => r.id === rangeId) || STRATEGY_GRID_RANGES[0];
@@ -9689,7 +9690,7 @@ function StrategyCardsTimeline({
   const toggleStrategyCollapse = (id) => setCollapsedStrategyIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const toggleInstitutionCollapse = (id) => setCollapsedInstitutionIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const collapseAll = () => setCollapsedStrategyIds(new Set(strategyThreadsList.map(({ strategy }) => strategy.id)));
-  const expandAll = () => { setCollapsedStrategyIds(new Set()); setCollapsedInstitutionIds(new Set()); };
+  const expandAll = () => { setCollapsedStrategyIds(new Set()); setCollapsedInstitutionIds(new Set()); if (onFocusStrategy) onFocusStrategy(null); };
   const [addingThreadFor, setAddingThreadFor] = useState(null);
   const [addingRouteFor, setAddingRouteFor] = useState(null);
   const [strategyDragId, setStrategyDragId] = useState(null);
@@ -9718,6 +9719,15 @@ function StrategyCardsTimeline({
           <button type="button" onClick={expandAll}>Expand all</button>
           <button type="button" onClick={collapseAll}>Collapse all</button>
         </div>
+        {presenting && onFocusStrategy && strategyThreadsList.length > 1 && (
+          <div className="strategy-view-toggle strategy-focus-strip">
+            <span className="strategy-goal-label">Focus</span>
+            <button type="button" className={!focusedStrategyId ? "active" : ""} onClick={() => onFocusStrategy(null)}>All</button>
+            {strategyThreadsList.map(({ strategy }) => (
+              <button key={strategy.id} type="button" className={focusedStrategyId === strategy.id ? "active" : ""} onClick={() => onFocusStrategy(strategy.id)}>{strategy.name}</button>
+            ))}
+          </div>
+        )}
         <div className="strategy-timeline-legend">
           {Object.entries(MOMENT_KIND_META).map(([k, meta]) => (
             <span key={k} className="strategy-timeline-legend-item"><span className={`moment-node-icon moment-node-icon-${k}`}>{meta.icon}</span>{meta.label}</span>
@@ -9730,7 +9740,8 @@ function StrategyCardsTimeline({
         <div className="strategy-cards-stack">
           {strategyThreadsList.map(({ strategy, threads }) => (
             <StrategyCard key={strategy.id} strategy={strategy} threads={threads} weeks={weeks}
-              collapsed={collapsedStrategyIds.has(strategy.id)} onToggleCollapse={() => toggleStrategyCollapse(strategy.id)}
+              collapsed={focusedStrategyId ? strategy.id !== focusedStrategyId : collapsedStrategyIds.has(strategy.id)}
+              onToggleCollapse={() => toggleStrategyCollapse(strategy.id)}
               onUpdateGoal={onUpdateStrategyGoal} onUpdateThreadGoal={onUpdateThreadGoal} readOnly={readOnly}
               onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
               onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
@@ -9789,6 +9800,55 @@ function StrategyOpenBlockersSummary({ rows, readOnly, onUpdate, onDelete, onRes
   );
 }
 
+// Full-screen Presenter Mode for the Strategy Timeline: everything scaled up
+// for viewing at a distance on a shared screen, every editing affordance
+// force-hidden (readOnly is hardcoded true here regardless of who is
+// looking, per spec: presenting is for showing, not editing), while staying
+// interactive: expand/collapse, moment click-to-view, institution/person
+// links, and the week range control all keep working since none of those
+// were ever gated behind readOnly in the first place. "Focus" narrows the
+// stack to one strategy at a time (collapsing the rest) for walking through
+// them one by one; "All" (or Expand all) restores the full stack.
+function StrategyPresenterView({
+  strategyThreadsList, openBlockerRows, showToast, onExit,
+  onUpdateStrategyGoal, onUpdateThreadGoal, onUpdateMilestone, onDeleteMilestone,
+  onAddMilestone, onReorderMilestones,
+  onAddThread, onAddRoute, trackOptions, contactOptions, onCreateContact,
+  onReorderStrategies, onReorderThreads, onReorderRoutes,
+  routeBlockersFor, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
+}) {
+  const [focusedStrategyId, setFocusedStrategyId] = useState(null);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onExit(); };
+    window.addEventListener("keydown", onKey);
+    document.body.classList.add("strategy-presenting-body");
+    return () => { window.removeEventListener("keydown", onKey); document.body.classList.remove("strategy-presenting-body"); };
+  }, [onExit]);
+
+  return (
+    <div className="strategy-present">
+      <div className="strategy-present-header">
+        <span className="strategy-present-title">Strategy <span className="strategy-present-title-dim">Presenting</span></span>
+        <button type="button" className="strategy-present-exit" onClick={onExit}>Exit Presenting ✕</button>
+      </div>
+      <div className="strategy-present-body">
+        <StrategyOpenBlockersSummary rows={openBlockerRows} readOnly
+          onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
+        <StrategyCardsTimeline strategyThreadsList={strategyThreadsList}
+          onUpdateStrategyGoal={onUpdateStrategyGoal} onUpdateThreadGoal={onUpdateThreadGoal} readOnly
+          onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+          onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
+          onAddThread={onAddThread} onAddRoute={onAddRoute}
+          trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
+          onReorderStrategies={onReorderStrategies} onReorderThreads={onReorderThreads} onReorderRoutes={onReorderRoutes}
+          routeBlockersFor={routeBlockersFor} onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker}
+          onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+          presenting focusedStrategyId={focusedStrategyId} onFocusStrategy={setFocusedStrategyId} />
+      </div>
+    </div>
+  );
+}
+
 function StrategyTab({
   strategies, resolveThreadCard, threadsForStrategy,
   onAddStrategy, onUpdateStrategy, onDeleteStrategy, onReorderStrategies,
@@ -9806,6 +9866,17 @@ function StrategyTab({
     const weekStart = startOfWeek(new Date());
     const weekEnd = addDaysLocal(weekStart, 6);
     setEmailModal({ digest: onBuildStrategyDigest(weekStart, weekEnd), weekLabel: `${formatDate(weekStart)} to ${formatDate(weekEnd)}` });
+  };
+  // Presenter Mode remembers itself across a sheet visit: opening an
+  // institution/person from inside it navigates away (and this tab
+  // unmounts), so the flag is kept in sessionStorage and re-read on mount,
+  // meaning "Back" to Strategy resumes presenting automatically.
+  const [presenting, setPresentingState] = useState(() => {
+    try { return sessionStorage.getItem("mango-strategy-presenting") === "1"; } catch { return false; }
+  });
+  const setPresenting = (v) => {
+    setPresentingState(v);
+    try { if (v) sessionStorage.setItem("mango-strategy-presenting", "1"); else sessionStorage.removeItem("mango-strategy-presenting"); } catch { /* ignore */ }
   };
   const [activeStrategyId, setActiveStrategyId] = useState(null);
   const strategy = strategies.find((s) => s.id === activeStrategyId) || strategies[0] || null;
@@ -9867,6 +9938,24 @@ function StrategyTab({
   const openPull = (saveFks, searchFks, ttl) => setPullTarget({ saveFks, searchFks, title: ttl });
   const candidates = pullTarget ? momentCandidatesFor(pullTarget.searchFks, pullTarget.title).filter((c) => !pulledSourceRefs(pullTarget.saveFks).has(c.source_ref)) : [];
 
+  // Presenter Mode is a full-screen takeover of the Timeline: available to
+  // Fahed and, read-only Andy alike (it works from Boss View too, since
+  // everything inside it is forced read-only regardless).
+  if (presenting) {
+    return (
+      <StrategyPresenterView strategyThreadsList={allStrategyThreadsList} openBlockerRows={openBlockerRows} showToast={showToast}
+        onExit={() => setPresenting(false)}
+        onUpdateStrategyGoal={(id, v) => onUpdateStrategy(id, { goal: v })} onUpdateThreadGoal={onUpdateThreadGoal}
+        onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+        onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones}
+        onAddThread={onAddThread} onAddRoute={onAddRoute}
+        trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
+        onReorderStrategies={onReorderStrategies} onReorderThreads={onReorderThreads} onReorderRoutes={onReorderRoutes}
+        routeBlockersFor={routeBlockersFor} onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker}
+        onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker} />
+    );
+  }
+
   return (
     <div className="strategy-tab">
       <div className="page-head">
@@ -9875,6 +9964,7 @@ function StrategyTab({
           <p className="page-sub">Parallel routes toward each institution's goal, dead ends included.</p>
         </div>
         <div className="strategy-page-head-actions">
+          <button type="button" className="btn-sec" onClick={() => setPresenting(true)}>▸ Present</button>
           {!readOnly && <button type="button" className="btn-sec" onClick={openStrategyEmail}>✉ Strategy Update Email</button>}
           {!readOnly && !addingStrategy && <button className="btn-primary" onClick={() => setAddingStrategy(true)}>+ New Strategy</button>}
         </div>

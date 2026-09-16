@@ -2569,6 +2569,41 @@ body.exec-presenting-body { overflow: hidden; }
 .strategy-open-blocker-strategy { font-weight: 700; color: var(--muted-2); text-transform: uppercase; letter-spacing: .02em; font-size: 10px; }
 .strategy-open-blocker-route { color: var(--muted); }
 
+/* ---------- STRATEGY PRESENTER MODE ---------- */
+/* A full-screen takeover of the Timeline for screen-share/room presenting:
+   everything scaled up via `zoom` (which scales layout, fonts, borders, and
+   the lane's own ResizeObserver-measured pixel widths all together, so
+   nothing needs re-computing in JS), every edit affordance force-hidden
+   (the presenter always passes readOnly to the tree underneath, boss or not),
+   still fully interactive (expand/collapse, moment click-to-view, range
+   control, institution/person links all keep working). */
+body.strategy-presenting-body { overflow: hidden; }
+.strategy-present { position: fixed; inset: 0; z-index: 400; background: var(--bg); display: flex; flex-direction: column; }
+.strategy-present-header {
+  display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
+  padding: 16px 28px; border-bottom: 2px solid var(--mango); background: var(--surface);
+}
+.strategy-present-title { font-size: 20px; font-weight: 750; color: var(--text); }
+.strategy-present-title-dim { font-weight: 600; color: var(--muted); margin-left: 8px; }
+.strategy-present-exit {
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  border-radius: 999px; padding: 9px 18px; font-family: inherit; font-size: 13.5px; font-weight: 650; cursor: pointer;
+}
+.strategy-present-exit:hover { border-color: var(--mango); color: var(--text); }
+.strategy-present-body {
+  flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 28px 40px 80px; zoom: 1.35;
+}
+.strategy-focus-strip { flex-wrap: wrap; }
+
+/* Sticky context while scrolling a tall stack: a strategy's own header band
+   sticks first, and the week-label row (every week cell shares the same
+   sticky offset, so together they read as one sticky header row) sticks
+   right below it, so the reader always knows which strategy and which week
+   they are looking at without scrolling back up. */
+.strategy-present .strategy-card-head { position: sticky; top: 0; z-index: 6; }
+.strategy-present .strategy-card-body .strategy-weeklabel { position: sticky; top: 52px; z-index: 5; background: var(--surface); }
+
 .strategy-inline-add-row { margin-top: 10px; padding-left: 4px; }
 .strategy-inline-add { flex-wrap: wrap; gap: 6px; }
 
