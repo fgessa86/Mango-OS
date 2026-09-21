@@ -2604,6 +2604,43 @@ body.strategy-presenting-body { overflow: hidden; }
 .strategy-present .strategy-card-head { position: sticky; top: 0; z-index: 6; }
 .strategy-present .strategy-card-body .strategy-weeklabel { position: sticky; top: 52px; z-index: 5; background: var(--surface); }
 
+/* ---------- ROUTE BRANCHES ---------- */
+/* A route forks into sub-paths (each responder to a batch outreach, say),
+   each with its own track, and a branch can branch again. Board: nested
+   cards with a left rail; Timeline: sub-lanes with a dashed fork marker at
+   the week they branched off. */
+.branch-rollup { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 650; color: var(--muted-2); flex-wrap: wrap; }
+.branch-rollup-glyph { color: var(--muted); font-size: 12px; }
+.branch-rollup > span:not(.branch-rollup-glyph):not(:last-child)::after { content: ","; color: var(--muted); margin-left: 1px; }
+.branch-rollup-active { color: #2A6FDB; }
+.branch-rollup-paused { color: #9A8F7C; }
+.branch-rollup-dead { color: #B0392E; }
+.branch-rollup-won { color: #1F8A5B; }
+.route-branches { margin: 8px 0 0 10px; display: flex; flex-direction: column; gap: 6px; }
+.route-branch-list { display: flex; flex-direction: column; gap: 8px; }
+.route-branch { border-left: 2px solid var(--border); margin-left: 8px; padding: 4px 0 4px 12px; }
+.route-branch-dead { border-left-color: #D9483A55; }
+.route-branch.strategy-dragging { opacity: .5; }
+.route-branch-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; position: relative; }
+.route-branch-fork { color: var(--muted-2); font-size: 13px; flex-shrink: 0; }
+.route-branch-title { font-size: 13px; font-weight: 650; color: var(--text); min-width: 120px; }
+.route-branch-date { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.route-branch-add { align-self: flex-start; font-size: 11.5px; }
+.route-mini-branch .route-mini-title { font-weight: 500; }
+.branch-contact { display: inline-flex; align-items: center; gap: 4px; }
+.branch-contact-name { font-size: 11.5px; font-weight: 650; color: #2A6FDB; }
+.branch-contact-picker { display: inline-flex; align-items: center; gap: 6px; min-width: 200px; }
+.branch-controls { position: relative; display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.branch-add-form { max-width: 420px; }
+.strategy-branch-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding-top: 8px; padding-bottom: 2px; position: relative; }
+.strategy-branch-head.strategy-dragging { opacity: .5; }
+.strategy-branch-title { font-size: 12px; font-weight: 650; color: var(--text-2); }
+.strategy-branch-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; }
+.strategy-branch-add-row { padding-bottom: 6px; }
+.strategy-lane-fork { position: absolute; top: -14px; bottom: 0; width: 0; border-left: 2px dashed var(--muted); opacity: .55; pointer-events: none; z-index: 1; }
+.strategy-lane-fork-glyph { position: absolute; top: -2px; left: 4px; font-size: 13px; color: var(--muted-2); background: var(--surface); line-height: 1; }
+.strategy-lane-childfork { position: absolute; bottom: 1px; font-size: 12px; color: var(--muted-2); transform: translateX(-50%); pointer-events: auto; z-index: 1; line-height: 1; }
+
 /* ---------- STRATEGY INCUBATOR ("In Preparation") ---------- */
 /* Strategy-level work in preparation: not yet a route, not yet on the week
    axis at all, so it gets a visually muted panel clearly separate from the

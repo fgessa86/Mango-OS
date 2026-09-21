@@ -1429,6 +1429,7 @@ export default function App() {
   const [progressMilestones, setProgressMilestones] = useState([]);
   const [routeBlockers, setRouteBlockers] = useState([]);
   const [strategyIncubator, setStrategyIncubator] = useState([]);
+  const [routeBranches, setRouteBranches] = useState([]);
   const [stageHistory, setStageHistory] = useState([]);
   const [execQuestions, setExecQuestions] = useState([]);
   const [execOpenId, setExecOpenId] = useState(null);
@@ -1499,7 +1500,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp, strat, sthr, sroutes, pms, rb, sinc, sh] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp, strat, sthr, sroutes, pms, rb, sinc, sbr, sh] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1539,6 +1540,7 @@ export default function App() {
         api("progress_milestones", "GET", null, "?select=*&order=milestone_date.asc,created_at.asc").catch(() => []),
         api("route_blockers", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("strategy_incubator", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("route_branches", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("stage_history", "GET", null, "?select=*&order=changed_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
@@ -1551,7 +1553,7 @@ export default function App() {
       setDiscussionPoints(dp || []); setTopOfMind(tom || []);
       setExecInitiatives(xi || []); setExecTracked(xti || []); setExecQuestions(xq || []); setExecTrackedPeople(xtp || []);
       setStrategies(strat || []); setStrategyThreads(sthr || []); setStrategyRoutes(sroutes || []);
-      setProgressMilestones(pms || []); setRouteBlockers(rb || []); setStrategyIncubator(sinc || []); setStageHistory(sh || []);
+      setProgressMilestones(pms || []); setRouteBlockers(rb || []); setStrategyIncubator(sinc || []); setRouteBranches(sbr || []); setStageHistory(sh || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -4271,10 +4273,21 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       setStrategies((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
     } catch { showToast("Could not save"); }
   };
+  // Deleting routes takes their branches (any depth) and the branches' own
+  // moments with them, since there is no DB-level cascade.
+  const purgeBranchesOfRoutes = async (routeIds) => {
+    if (!routeIds.length) return;
+    const branchIds = routeBranches.filter((b) => routeIds.includes(b.route_id)).map((b) => b.id);
+    if (branchIds.length) await api("progress_milestones", "DELETE", null, `?branch_id=in.(${branchIds.join(",")})`);
+    await api("route_branches", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+    setProgressMilestones((prev) => prev.filter((m) => !branchIds.includes(m.branch_id)));
+    setRouteBranches((prev) => prev.filter((b) => !routeIds.includes(b.route_id)));
+  };
   const deleteStrategy = async (id) => {
     try {
       const threadIds = strategyThreads.filter((t) => t.strategy_id === id).map((t) => t.id);
       const routeIds = strategyRoutes.filter((r) => threadIds.includes(r.thread_id)).map((r) => r.id);
+      await purgeBranchesOfRoutes(routeIds);
       if (routeIds.length) {
         await api("progress_milestones", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
         await api("route_blockers", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
@@ -4319,6 +4332,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const deleteStrategyThread = async (id) => {
     try {
       const routeIds = strategyRoutes.filter((r) => r.thread_id === id).map((r) => r.id);
+      await purgeBranchesOfRoutes(routeIds);
       if (routeIds.length) {
         await api("progress_milestones", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
         await api("route_blockers", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
@@ -4365,6 +4379,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   };
   const deleteStrategyRoute = async (id) => {
     try {
+      await purgeBranchesOfRoutes([id]);
       await api("progress_milestones", "DELETE", null, `?route_id=eq.${id}`);
       await api("route_blockers", "DELETE", null, `?route_id=eq.${id}`);
       await api("strategy_routes", "DELETE", null, `?id=eq.${id}`);
@@ -4428,7 +4443,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const bulkAddProgressMilestones = async (fks, picks) => {
     if (!picks.length) return;
     const rows = picks.map((p) => ({
-      thread_id: fks.thread_id || null, route_id: fks.route_id || null,
+      thread_id: fks.thread_id || null, route_id: fks.route_id || null, branch_id: fks.branch_id || null,
       deal_id: fks.deal_id || null, enabler_id: fks.enabler_id || null, organization_id: fks.organization_id || null, contact_id: fks.contact_id || null,
       title: upgradeTokenMentions((p.title || "").slice(0, 200)), detail: p.detail ? upgradeTokenMentions(p.detail) : null,
       milestone_date: p.date, is_setback: false, source_ref: p.source_ref,
@@ -4449,10 +4464,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     const clean = (content || "").trim();
     if (!clean) return null;
     try {
-      const siblings = routeBlockers.filter((b) => (fks.route_id ? b.route_id === fks.route_id : fks.thread_id ? b.thread_id === fks.thread_id && !b.route_id : b.strategy_id === fks.strategy_id && !b.thread_id && !b.route_id));
+      const siblings = routeBlockers.filter((b) => (fks.branch_id ? b.branch_id === fks.branch_id : fks.route_id ? b.route_id === fks.route_id && !b.branch_id : fks.thread_id ? b.thread_id === fks.thread_id && !b.route_id : b.strategy_id === fks.strategy_id && !b.thread_id && !b.route_id));
       const sort_order = siblings.length ? Math.max(...siblings.map((b) => b.sort_order ?? 0)) + 1 : 0;
       const rows = await api("route_blockers", "POST", {
-        route_id: fks.route_id || null, thread_id: fks.thread_id || null, strategy_id: fks.strategy_id || null,
+        route_id: fks.route_id || null, branch_id: fks.branch_id || null, thread_id: fks.thread_id || null, strategy_id: fks.strategy_id || null,
         content: upgradeTokenMentions(clean), raised_at: new Date().toISOString().slice(0, 10), sort_order,
       });
       const row = Array.isArray(rows) ? rows[0] : rows;
@@ -4487,8 +4502,53 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     await updateRouteBlocker(id, patch);
     if (addMilestone && route_id) {
       const b = routeBlockers.find((x) => x.id === id);
-      await addProgressMilestone({ route_id }, { title: `Unblocked: ${b?.content || ""}`.slice(0, 200) });
+      await addProgressMilestone(b?.branch_id ? { branch_id: b.branch_id } : { route_id }, { title: `Unblocked: ${b?.content || ""}`.slice(0, 200) });
     }
+  };
+
+  /* ---- Route branches: a route can fork into sub-paths (e.g. each person who
+     responded to a batch outreach), each progressing independently with its
+     own moments/plans/blockers, and each able to branch again. ---- */
+  const addRouteBranch = async (routeId, { title, contact_id, branched_at, parent_branch_id } = {}) => {
+    const clean = (title || "").trim();
+    if (!clean) return null;
+    try {
+      const siblings = routeBranches.filter((b) => b.route_id === routeId && (b.parent_branch_id || null) === (parent_branch_id || null));
+      const sort_order = siblings.length ? Math.max(...siblings.map((b) => b.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("route_branches", "POST", {
+        route_id: routeId, parent_branch_id: parent_branch_id || null, title: upgradeTokenMentions(clean),
+        contact_id: contact_id || null, state: "active", branched_at: branched_at || new Date().toISOString().slice(0, 10), sort_order,
+      });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setRouteBranches((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not add branch"); return null; }
+  };
+  const updateRouteBranch = async (id, patch) => {
+    if ("title" in patch) patch = { ...patch, title: upgradeTokenMentions(patch.title || "") };
+    if ("outcome_note" in patch) patch = { ...patch, outcome_note: upgradeTokenMentions(patch.outcome_note || "") };
+    try {
+      await api("route_branches", "PATCH", patch, `?id=eq.${id}`);
+      setRouteBranches((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+    } catch { showToast("Could not save branch"); }
+  };
+  const deleteRouteBranch = async (id) => {
+    try {
+      const ids = [id];
+      for (let i = 0; i < ids.length; i++) routeBranches.filter((b) => b.parent_branch_id === ids[i]).forEach((b) => ids.push(b.id));
+      const list = ids.join(",");
+      await api("progress_milestones", "DELETE", null, `?branch_id=in.(${list})`);
+      await api("route_blockers", "DELETE", null, `?branch_id=in.(${list})`);
+      await api("route_branches", "DELETE", null, `?id=in.(${list})`);
+      setProgressMilestones((prev) => prev.filter((m) => !ids.includes(m.branch_id)));
+      setRouteBlockers((prev) => prev.filter((b) => !ids.includes(b.branch_id)));
+      setRouteBranches((prev) => prev.filter((b) => !ids.includes(b.id)));
+    } catch { showToast("Could not delete branch"); }
+  };
+  const reorderRouteBranches = async (orderedIds) => {
+    setRouteBranches((prev) => prev.map((b) => { const i = orderedIds.indexOf(b.id); return i === -1 ? b : { ...b, sort_order: i }; }));
+    try { await Promise.all(orderedIds.map((id, i) => api("route_branches", "PATCH", { sort_order: i }, `?id=eq.${id}`))); }
+    catch { showToast("Could not save the new order"); }
   };
 
   /* ---- Strategy Incubator: strategy-level work in preparation, distinct
@@ -4587,6 +4647,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // no route), so re-opening the panel never offers a duplicate.
   const pulledSourceRefs = (fks) => {
     const matches = (m) => {
+      if (fks.branch_id) return m.branch_id === fks.branch_id;
       if (fks.route_id) return m.route_id === fks.route_id;
       if (fks.thread_id) return m.thread_id === fks.thread_id && !m.route_id;
       // Plain entity track (Tracking-section progress, no thread/route at all):
@@ -4602,6 +4663,26 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // Resolves a strategy thread's linked institution or person (a thread has
   // exactly one, same fk shape as exec_tracked_institutions/exec_tracked_people)
   // plus its routes, each carrying its own sorted milestones.
+  // A route's branches as a nested tree (a branch can branch again via
+  // parent_branch_id), each resolved like a track of its own: its dated
+  // moments (progress_milestones.branch_id), its blockers, and the linked
+  // contact's name so it can be shown and opened.
+  const buildBranchTree = (routeId) => {
+    const rows = routeBranches.filter((b) => b.route_id === routeId);
+    const bySort = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0);
+    const node = (b) => {
+      const contact = b.contact_id ? contacts.find((c) => c.id === b.contact_id) : null;
+      return {
+        ...b,
+        milestones: progressMilestones.filter((m) => m.branch_id === b.id).sort((x, y) => (x.milestone_date || "").localeCompare(y.milestone_date || "")),
+        blockers: routeBlockersFor({ branch_id: b.id }),
+        contactName: contact?.name || null,
+        onOpenContact: contact ? () => openPerson(contact.id) : null,
+        children: rows.filter((x) => x.parent_branch_id === b.id).sort(bySort).map(node),
+      };
+    };
+    return rows.filter((b) => !b.parent_branch_id).sort(bySort).map(node);
+  };
   const resolveStrategyThreadCard = (t) => {
     const isPerson = !!t.contact_id;
     let name = t.title, entityKey = null, typeMeta = null, onOpen = null;
@@ -4623,6 +4704,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         ...r,
         milestones: progressMilestones.filter((m) => m.route_id === r.id).sort((a, b) => (a.milestone_date || "").localeCompare(b.milestone_date || "")),
         blockers: routeBlockersFor({ route_id: r.id }),
+        branches: buildBranchTree(r.id),
       }));
     return { ...t, isPerson, name, entityKey, typeMeta, onOpen, routes, blockers: routeBlockersFor({ thread_id: t.id }) };
   };
@@ -4630,7 +4712,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   // route_id null), or a whole strategy (strategy_id set, thread_id and
   // route_id both null), sorted by priority (sort_order) then raised date.
   const routeBlockersFor = (fks) => routeBlockers.filter((b) => {
-    if (fks.route_id) return b.route_id === fks.route_id;
+    if (fks.branch_id) return b.branch_id === fks.branch_id;
+    if (fks.route_id) return b.route_id === fks.route_id && !b.branch_id;
     if (fks.thread_id) return b.thread_id === fks.thread_id && !b.route_id;
     return b.strategy_id === fks.strategy_id && !b.thread_id && !b.route_id;
   }).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || (a.raised_at || "").localeCompare(b.raised_at || ""));
@@ -4680,6 +4763,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           r.milestones.filter((m) => !m.is_backlog && inWeek(m.milestone_date)).forEach((m) => {
             stratLines.push(`  - ${t.name} > ${r.title}: ${digestText(m.title)} (${formatDate(m.milestone_date)})`);
           });
+          flattenBranches(r.branches).forEach(({ branch }) => {
+            branch.milestones.filter((m) => !m.is_backlog && inWeek(m.milestone_date)).forEach((m) => {
+              stratLines.push(`  - ${t.name} > ${r.title} > ${digestText(branch.title)}: ${digestText(m.title)} (${formatDate(m.milestone_date)})`);
+            });
+          });
         });
       });
       lines.push(`${s.name}:`);
@@ -4692,6 +4780,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       resolvedFor(s).forEach((t) => {
         t.routes.forEach((r) => {
           if ((r.state === "dead_end" || r.state === "succeeded") && r.ended_at && inWeek(r.ended_at)) ended.push({ s, t, r });
+          flattenBranches(r.branches).forEach(({ branch }) => {
+            if ((branch.state === "dead_end" || branch.state === "succeeded") && branch.ended_at && inWeek(branch.ended_at)) {
+              ended.push({ s, t, r: { ...branch, title: `${r.title} > ${digestText(branch.title)}` } });
+            }
+          });
         });
       });
     });
@@ -4734,6 +4827,9 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         (t.blockers || []).filter((b) => !b.is_resolved).forEach((b) => openBlockers.push({ s, t, r: null, b }));
         t.routes.forEach((r) => {
           (r.blockers || []).filter((b) => !b.is_resolved).forEach((b) => openBlockers.push({ s, t, r, b }));
+          flattenBranches(r.branches).forEach(({ branch }) => {
+            (branch.blockers || []).filter((b) => !b.is_resolved).forEach((b) => openBlockers.push({ s, t, r: { title: `${r.title} > ${digestText(branch.title)}` }, b }));
+          });
         });
       });
     });
@@ -6227,6 +6323,10 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onReorderIncubatorItems={reorderIncubatorItems}
           onDropIncubatorItem={dropIncubatorItem}
           onActivateIncubatorItem={activateIncubatorItem}
+          onAddBranch={addRouteBranch}
+          onUpdateBranch={updateRouteBranch}
+          onDeleteBranch={deleteRouteBranch}
+          onReorderBranches={reorderRouteBranches}
           trackOptions={execTrackOptions}
           contactOptions={contacts}
           onCreateContact={createContactForMention}
@@ -8433,13 +8533,23 @@ const STRATEGY_ROUTE_STATES = [
 const strategyRouteStateMeta = (id) => STRATEGY_ROUTE_STATES.find((s) => s.id === id) || STRATEGY_ROUTE_STATES[0];
 const strategyEndGlyph = (state) => (state === "dead_end" ? "✕" : state === "succeeded" ? "✓" : state === "paused" ? "❚❚" : "→");
 
+// Branches: a route can fork into sub-paths (each with its own moments,
+// plans and blockers), and a branch can branch again. A resolved route carries
+// `branches` (root branches, each with nested `children`); these helpers view
+// that tree as a flat list, and treat the route plus every descendant branch
+// as one set of "tracks" wherever movement, blockers or plans are summed.
+const flattenBranches = (branches, depth = 0) => (branches || []).flatMap((b) => [{ branch: b, depth }, ...flattenBranches(b.children, depth + 1)]);
+const routeBranchList = (routeOrBranch) => flattenBranches(routeOrBranch.branches || routeOrBranch.children).map((x) => x.branch);
+const routeTracks = (route) => [route, ...routeBranchList(route)];
+const routeBlockedTotal = (route) => routeTracks(route).reduce((a, t) => a + (t.blockers || []).filter((b) => !b.is_resolved).length, 0);
+
 // Counts route-level movement across a set of resolved threads: routes with a
 // milestone dated this week (advanced), and routes that ended this week
 // dead_end/succeeded, so pruning a dead route shows as progress too.
 function strategyWeekSummary(threads) {
   let advanced = 0, deadEnded = 0, succeeded = 0;
   threads.forEach((t) => t.routes.forEach((r) => {
-    if (r.milestones.some((m) => isThisWeek(m.milestone_date))) advanced++;
+    if (routeTracks(r).some((tr) => tr.milestones.some((m) => isThisWeek(m.milestone_date)))) advanced++;
     if (r.state === "dead_end" && r.ended_at && isThisWeek(r.ended_at)) deadEnded++;
     if (r.state === "succeeded" && r.ended_at && isThisWeek(r.ended_at)) succeeded++;
   }));
@@ -8810,6 +8920,160 @@ function StrategyBlockedBadge({ count }) {
   return <span className="strategy-blocked-badge">⚑ {count} blocked</span>;
 }
 
+// ---------- Branches (a route forking into independent sub-paths) ----------
+// "13 sent, 2 active branches, 1 dead end": the at-a-glance roll-up of every
+// branch (any depth) under a route or branch.
+function BranchRollup({ route }) {
+  const bs = routeBranchList(route);
+  if (!bs.length) return null;
+  const n = (st) => bs.filter((b) => (b.state || "active") === st).length;
+  const active = n("active"), paused = n("paused"), dead = n("dead_end"), won = n("succeeded");
+  return (
+    <span className="branch-rollup" title={`${bs.length} branch${bs.length === 1 ? "" : "es"} in total`}>
+      <span className="branch-rollup-glyph">⑂</span>
+      {active > 0 && <span className="branch-rollup-active">{active} active branch{active === 1 ? "" : "es"}</span>}
+      {paused > 0 && <span className="branch-rollup-paused">{paused} paused</span>}
+      {dead > 0 && <span className="branch-rollup-dead">{dead} dead end{dead === 1 ? "" : "s"}</span>}
+      {won > 0 && <span className="branch-rollup-won">{won} succeeded</span>}
+    </span>
+  );
+}
+// The person a branch is about: clickable to their sheet, unlinkable, or (when
+// none is linked yet) a "Link person" picker.
+function BranchContactLink({ branch, readOnly, contactOptions, onCreateContact, onUpdate }) {
+  const [picking, setPicking] = useState(false);
+  if (branch.contactName) {
+    return (
+      <span className="branch-contact">
+        <button type="button" className="link-btn branch-contact-name" onClick={() => branch.onOpenContact && branch.onOpenContact()} disabled={!branch.onOpenContact}>{branch.contactName}</button>
+        {!readOnly && <button type="button" className="moment-node-del" title="Unlink person" onClick={() => onUpdate(branch.id, { contact_id: null })}>✕</button>}
+      </span>
+    );
+  }
+  if (readOnly || !contactOptions) return null;
+  return picking ? (
+    <span className="branch-contact-picker">
+      <ContactConnectPicker contacts={contactOptions} value="" onChange={(id) => { if (id) { onUpdate(branch.id, { contact_id: id }); setPicking(false); } }} onCreateContact={onCreateContact} placeholder="Link a person..." />
+      <button type="button" className="link-btn" onClick={() => setPicking(false)}>Cancel</button>
+    </span>
+  ) : <button type="button" className="link-btn" onClick={() => setPicking(true)}>Link person</button>;
+}
+// State select (dead end / succeeded ask for a date and outcome note first,
+// same prompt as a route) plus delete.
+function BranchControls({ branch, readOnly, onUpdate, onDelete }) {
+  const [statePrompt, setStatePrompt] = useState(null);
+  if (readOnly) return null;
+  const pickState = (next) => {
+    if (next === (branch.state || "active")) return;
+    if (next === "dead_end" || next === "succeeded") { setStatePrompt(next); return; }
+    onUpdate(branch.id, { state: next, ended_at: null });
+  };
+  return (
+    <span className="branch-controls">
+      <select className="input route-state-select" value={branch.state || "active"} onChange={(e) => pickState(e.target.value)}>
+        {STRATEGY_ROUTE_STATES.map((st) => <option key={st.id} value={st.id}>{st.label}</option>)}
+      </select>
+      <button type="button" className="exec-track-remove" title="Delete branch"
+        onClick={() => { if (window.confirm("Delete this branch, its sub-branches and their moments?")) onDelete(branch.id); }}>✕</button>
+      {statePrompt && (
+        <RouteStatePrompt state={statePrompt} onCancel={() => setStatePrompt(null)}
+          onConfirm={(vals) => { onUpdate(branch.id, { state: statePrompt, ...vals }); setStatePrompt(null); }} />
+      )}
+    </span>
+  );
+}
+function BranchAddForm({ contactOptions, onCreateContact, onAdd, onCancel, showToast }) {
+  const [title, setTitle] = useState("");
+  const [contactId, setContactId] = useState("");
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const submit = () => {
+    const person = (contactOptions || []).find((c) => c.id === contactId);
+    const t = title.trim() || person?.name || "";
+    if (!t) return;
+    onAdd({ title: t, contact_id: contactId || null, branched_at: date });
+  };
+  return (
+    <div className="route-chip-edit branch-add-form" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}>
+      <MentionEditor value={title} onChange={setTitle} multiline={false} placeholder="e.g. Dr. Ahmed responded" autoFocus onSubmit={submit} />
+      <VoiceRecorder mode="plain" compact showToast={showToast} onPlainText={(t) => setTitle((prev) => (prev ? `${prev} ${t}` : t))} />
+      {contactOptions && <ContactConnectPicker contacts={contactOptions} value={contactId} onChange={setContactId} onCreateContact={onCreateContact} placeholder="Link a person (optional)..." />}
+      <label className="route-chip-setback-toggle">Branched on <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} /></label>
+      <div className="route-chip-edit-actions">
+        <button type="button" className="btn-primary" onClick={submit}>Add branch</button>
+        <button type="button" className="btn-ghost" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+// Board: a route's branches as a nested tree of cards, each with its own full
+// track (labeled nodes, planned/backlog, blockers, pull-existing-moments) by
+// reusing RouteTrack with the branch standing in as the "route".
+function StrategyBranchBoardList({ branches, route, thread, readOnly, ctx }) {
+  const [dragId, setDragId] = useState(null);
+  const drop = (targetId) => {
+    if (!dragId || dragId === targetId) { setDragId(null); return; }
+    const ids = branches.map((b) => b.id);
+    const from = ids.indexOf(dragId), to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) { setDragId(null); return; }
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    ctx.onReorderBranches(ids);
+    setDragId(null);
+  };
+  return (
+    <div className="route-branch-list">
+      {branches.map((b) => (
+        <StrategyBranchBoardItem key={b.id} branch={b} route={route} thread={thread} readOnly={readOnly} ctx={ctx}
+          isDragging={dragId === b.id} onDragStart={() => setDragId(b.id)} onDrop={() => drop(b.id)} />
+      ))}
+    </div>
+  );
+}
+function StrategyBranchBoardItem({ branch, route, thread, readOnly, ctx, isDragging, onDragStart, onDrop }) {
+  const [open, setOpen] = useState(true);
+  const [addingChild, setAddingChild] = useState(false);
+  const meta = strategyRouteStateMeta(branch.state);
+  const dead = branch.state === "dead_end";
+  const blocked = (branch.blockers || []).filter((b) => !b.is_resolved).length;
+  const plainTitle = mentionsToPlainText(branch.title || "");
+  return (
+    <div className={`route-branch ${dead ? "route-branch-dead" : ""} ${isDragging ? "strategy-dragging" : ""}`}
+      onDragOver={readOnly ? undefined : (e) => e.preventDefault()} onDrop={readOnly ? undefined : (e) => { e.preventDefault(); e.stopPropagation(); onDrop(); }}>
+      <div className="route-branch-head">
+        {!readOnly && <span className="strategy-drag-handle" title="Drag to reorder" draggable onDragStart={(e) => { e.stopPropagation(); onDragStart(); }}>⠿</span>}
+        <button type="button" className="link-btn strategy-tree-toggle" onClick={() => setOpen((v) => !v)}>{open ? "▾" : "▸"}</button>
+        <span className="route-branch-fork" title={`Branched ${formatDate(branch.branched_at)}`}>⑂</span>
+        <span className="route-branch-title"><StrategyMentionField value={branch.title || ""} onSave={(v) => ctx.onUpdateBranch(branch.id, { title: v })} readOnly={readOnly} placeholder="Branch" /></span>
+        {blocked > 0 && <span className="route-blocked-marker" title={`${blocked} open blocker${blocked === 1 ? "" : "s"}`}>⚑</span>}
+        <span className="badge route-state-badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{meta.label}</span>
+        <span className="route-branch-date">Branched {formatDate(branch.branched_at)}{branch.ended_at ? `, ended ${formatDate(branch.ended_at)}` : ""}</span>
+        <BranchContactLink branch={branch} readOnly={readOnly} contactOptions={ctx.contactOptions} onCreateContact={ctx.onCreateContact} onUpdate={ctx.onUpdateBranch} />
+        <BranchRollup route={branch} />
+        <BranchControls branch={branch} readOnly={readOnly} onUpdate={ctx.onUpdateBranch} onDelete={ctx.onDeleteBranch} />
+      </div>
+      {open && (
+        <>
+          <RouteTrack route={branch} readOnly={readOnly}
+            onAddMilestone={(vals) => ctx.onAddMilestone({ branch_id: branch.id }, vals)}
+            onUpdateMilestone={ctx.onUpdateMilestone} onDeleteMilestone={ctx.onDeleteMilestone}
+            onReorderMilestones={ctx.onReorderMilestones} showToast={ctx.showToast}
+            onAddBlocker={(c) => ctx.onAddBlocker({ route_id: route.id, branch_id: branch.id }, c)}
+            onUpdateBlocker={ctx.onUpdateBlocker} onDeleteBlocker={ctx.onDeleteBlocker} onResolveBlocker={ctx.onResolveBlocker}
+            onOpenPull={readOnly || !ctx.onOpenPull ? null : () => ctx.onOpenPull({ branch_id: branch.id },
+              branch.contact_id ? { contact_id: branch.contact_id } : { deal_id: thread.deal_id, enabler_id: thread.enabler_id, organization_id: thread.organization_id, contact_id: thread.contact_id },
+              plainTitle)} />
+          {(branch.children || []).length > 0 && (
+            <StrategyBranchBoardList branches={branch.children} route={route} thread={thread} readOnly={readOnly} ctx={ctx} />
+          )}
+          {!readOnly && (addingChild
+            ? <BranchAddForm contactOptions={ctx.contactOptions} onCreateContact={ctx.onCreateContact} showToast={ctx.showToast}
+                onAdd={(vals) => { ctx.onAddBranch(route.id, { ...vals, parent_branch_id: branch.id }); setAddingChild(false); }} onCancel={() => setAddingChild(false)} />
+            : <button type="button" className="link-btn route-branch-add" onClick={() => setAddingChild(true)}>+ Add sub-branch</button>)}
+        </>
+      )}
+    </div>
+  );
+}
+
 function RouteTrack({ route, readOnly, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker }) {
   const [adding, setAdding] = useState(false);
   const dead = route.state === "dead_end";
@@ -8869,7 +9133,7 @@ function RouteHeader({ route, readOnly, onUpdate, onDelete }) {
   const [title, setTitle] = useState(route.title);
   const [statePrompt, setStatePrompt] = useState(null);
   const meta = strategyRouteStateMeta(route.state);
-  const blockedCount = (route.blockers || []).filter((b) => !b.is_resolved).length;
+  const blockedCount = routeBlockedTotal(route);
   const pickState = (next) => {
     if (next === route.state) return;
     if (next === "dead_end" || next === "succeeded") { setStatePrompt(next); return; }
@@ -8886,6 +9150,7 @@ function RouteHeader({ route, readOnly, onUpdate, onDelete }) {
       )}
       {blockedCount > 0 && <span className="route-blocked-marker" title={`${blockedCount} open blocker${blockedCount === 1 ? "" : "s"}`}>⚑</span>}
       <span className="badge route-state-badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{meta.label}</span>
+      <BranchRollup route={route} />
       {route.ended_at && <span className="route-ended-date">Ended {formatDate(route.ended_at)}</span>}
       {!readOnly && (
         <span className="route-head-right">
@@ -8905,14 +9170,14 @@ function RouteHeader({ route, readOnly, onUpdate, onDelete }) {
 
 // Compact route bar for the collapsed Board card: a short line with a few
 // evenly-spaced dots and the same terminus glyph, muted when dead-ended.
-function RouteMiniBar({ route }) {
+function RouteMiniBar({ route, depth = 0 }) {
   const meta = strategyRouteStateMeta(route.state);
   const dead = route.state === "dead_end";
   const n = Math.min(route.milestones.length, 6);
-  const blockedCount = (route.blockers || []).filter((b) => !b.is_resolved).length;
+  const blockedCount = depth ? (route.blockers || []).filter((b) => !b.is_resolved).length : routeBlockedTotal(route);
   return (
-    <div className={`route-mini ${dead ? "route-mini-dead" : ""}`}>
-      <span className="route-mini-title">{route.title}</span>
+    <div className={`route-mini ${dead ? "route-mini-dead" : ""} ${depth ? "route-mini-branch" : ""}`} style={depth ? { paddingLeft: depth * 16 } : undefined}>
+      <span className="route-mini-title">{depth ? <><span className="route-branch-fork">⑂</span> {mentionsToPlainText(route.title || "")}</> : route.title}</span>
       {blockedCount > 0 && <span className="route-blocked-marker" title={`${blockedCount} open blocker${blockedCount === 1 ? "" : "s"}`}>⚑</span>}
       <div className="route-mini-bar">
         <span className="route-mini-line" style={{ background: dead ? "var(--border)" : meta.color + "55" }} />
@@ -8921,6 +9186,7 @@ function RouteMiniBar({ route }) {
         ))}
         <span className={`route-mini-end route-mini-end-${route.state}`}>{strategyEndGlyph(route.state)}</span>
       </div>
+      {!depth && <BranchRollup route={route} />}
     </div>
   );
 }
@@ -8929,13 +9195,17 @@ function RouteMiniBar({ route }) {
 // and its parallel routes, either full tracks (expanded) or mini bars (Board
 // default, per spec 5: "institution card shows goal and routes as mini
 // progress bars").
-function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpdateGoal, onDeleteThread, onAddRoute, onUpdateRoute, onDeleteRoute, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker }) {
+function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpdateGoal, onDeleteThread, onAddRoute, onUpdateRoute, onDeleteRoute, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker, onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches, contactOptions, onCreateContact }) {
   const [addingRoute, setAddingRoute] = useState(false);
+  const [addingBranchFor, setAddingBranchFor] = useState(null);
   const [routeTitle, setRouteTitle] = useState("");
   const submitRoute = () => { if (!routeTitle.trim()) return; onAddRoute(thread.id, routeTitle.trim()); setRouteTitle(""); setAddingRoute(false); };
-  const movedThisWeek = thread.routes.some((r) => r.milestones.some((m) => isThisWeek(m.milestone_date)) || (r.ended_at && isThisWeek(r.ended_at)));
+  const movedThisWeek = thread.routes.some((r) => routeTracks(r).some((tr) => tr.milestones.some((m) => isThisWeek(m.milestone_date)) || (tr.ended_at && isThisWeek(tr.ended_at))));
   const threadBlockedCount = (thread.blockers || []).filter((b) => !b.is_resolved).length
-    + thread.routes.reduce((a, r) => a + (r.blockers || []).filter((b) => !b.is_resolved).length, 0);
+    + thread.routes.reduce((a, r) => a + routeBlockedTotal(r), 0);
+  const branchCtx = { onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches, contactOptions, onCreateContact,
+    onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull,
+    onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker };
   return (
     <div className={`strategy-thread ${movedThisWeek ? "strategy-thread-moved" : ""}`}>
       <div className="strategy-thread-head">
@@ -8966,6 +9236,17 @@ function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpda
                 onAddBlocker={(c) => onAddBlocker({ thread_id: thread.id, route_id: route.id }, c)}
                 onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
                 onOpenPull={readOnly ? null : () => onOpenPull({ thread_id: thread.id, route_id: route.id }, { deal_id: thread.deal_id, enabler_id: thread.enabler_id, organization_id: thread.organization_id, contact_id: thread.contact_id }, route.title)} />
+              {((route.branches || []).length > 0 || !readOnly) && (
+                <div className="route-branches">
+                  {(route.branches || []).length > 0 && (
+                    <StrategyBranchBoardList branches={route.branches} route={route} thread={thread} readOnly={readOnly} ctx={branchCtx} />
+                  )}
+                  {!readOnly && (addingBranchFor === route.id
+                    ? <BranchAddForm contactOptions={contactOptions} onCreateContact={onCreateContact} showToast={showToast}
+                        onAdd={(vals) => { onAddBranch(route.id, vals); setAddingBranchFor(null); }} onCancel={() => setAddingBranchFor(null)} />
+                    : <button type="button" className="link-btn route-branch-add" onClick={() => setAddingBranchFor(route.id)}>+ Add branch</button>)}
+                </div>
+              )}
             </div>
           ))}
           {thread.routes.length === 0 && <div className="empty-small">No routes yet. Add the first path toward this goal.</div>}
@@ -8981,7 +9262,12 @@ function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpda
         </div>
       ) : (
         <div className="strategy-mini-bars">
-          {thread.routes.map((route) => <RouteMiniBar key={route.id} route={route} />)}
+          {thread.routes.map((route) => (
+            <Fragment key={route.id}>
+              <RouteMiniBar route={route} />
+              {flattenBranches(route.branches).map(({ branch, depth }) => <RouteMiniBar key={branch.id} route={branch} depth={depth + 1} />)}
+            </Fragment>
+          ))}
           {thread.routes.length === 0 && <div className="strategy-mini-empty">No routes yet.</div>}
         </div>
       )}
@@ -9182,15 +9468,20 @@ function bucketThreadsByWeek(threads) {
   const push = (weekKey, entry) => { if (!byWeek.has(weekKey)) byWeek.set(weekKey, []); byWeek.get(weekKey).push(entry); };
   threads.forEach((t) => {
     t.routes.forEach((r) => {
-      r.milestones.forEach((m) => {
-        if (!m.milestone_date) return;
-        const wk = startOfWeek(new Date(m.milestone_date)).toISOString().slice(0, 10);
-        push(wk, { threadId: t.id, name: t.name, onOpen: t.onOpen, route: r, kind: "milestone", milestone: m, date: m.milestone_date });
+      // The route plus every branch under it: a branch's moments show in the
+      // merged (collapsed) view labeled "Route > Branch".
+      routeTracks(r).forEach((tr) => {
+        const label = tr === r ? r : { id: tr.id, title: `${r.title} > ${mentionsToPlainText(tr.title || "")}`, state: tr.state, ended_at: tr.ended_at, outcome_note: tr.outcome_note };
+        tr.milestones.forEach((m) => {
+          if (!m.milestone_date) return;
+          const wk = startOfWeek(new Date(m.milestone_date)).toISOString().slice(0, 10);
+          push(wk, { threadId: t.id, name: t.name, onOpen: t.onOpen, route: label, kind: "milestone", milestone: m, date: m.milestone_date });
+        });
+        if (tr.ended_at) {
+          const wk = startOfWeek(new Date(tr.ended_at)).toISOString().slice(0, 10);
+          push(wk, { threadId: t.id, name: t.name, onOpen: t.onOpen, route: label, kind: "terminus", date: tr.ended_at });
+        }
       });
-      if (r.ended_at) {
-        const wk = startOfWeek(new Date(r.ended_at)).toISOString().slice(0, 10);
-        push(wk, { threadId: t.id, name: t.name, onOpen: t.onOpen, route: r, kind: "terminus", date: r.ended_at });
-      }
     });
   });
   return byWeek;
@@ -9216,10 +9507,11 @@ function groupWeekItemsByThread(items) {
 function computeStrategyGridWeeks(strategyThreadsList, rangeWeeks) {
   const todayISO = new Date().toISOString().slice(0, 10);
   const allDates = [];
-  strategyThreadsList.forEach(({ threads }) => threads.forEach((t) => t.routes.forEach((r) => {
-    r.milestones.forEach((m) => { if (m.milestone_date) allDates.push(m.milestone_date); });
-    if (r.ended_at) allDates.push(r.ended_at);
-  })));
+  strategyThreadsList.forEach(({ threads }) => threads.forEach((t) => t.routes.forEach((r) => routeTracks(r).forEach((tr) => {
+    tr.milestones.forEach((m) => { if (m.milestone_date) allDates.push(m.milestone_date); });
+    if (tr.ended_at) allDates.push(tr.ended_at);
+    if (tr !== r && tr.branched_at) allDates.push(tr.branched_at);
+  }))));
   const pastDates = allDates.filter((d) => d <= todayISO);
   const futureDates = allDates.filter((d) => d > todayISO);
   const earliestPast = pastDates.length ? pastDates.reduce((a, b) => (a < b ? a : b)) : todayISO;
@@ -9305,7 +9597,7 @@ const weekSlotClass = (i, w, mutedFrom) =>
 // institutions), so a collapsed level can still show how much intended work
 // is waiting behind it.
 const routeBacklog = (route) => route.milestones.filter((m) => m.is_backlog);
-const threadBacklogCount = (thread) => thread.routes.reduce((a, r) => a + routeBacklog(r).length, 0);
+const threadBacklogCount = (thread) => thread.routes.reduce((a, r) => a + routeTracks(r).reduce((a2, t) => a2 + routeBacklog(t).length, 0), 0);
 const strategyBacklogCount = (threads) => threads.reduce((a, t) => a + threadBacklogCount(t), 0);
 
 // One backlog chip: an undated intended next move. Click its text to edit in
@@ -9412,7 +9704,7 @@ function StrategyBacklogZone({ items, readOnly, onAdd, onUpdate, onDelete, onSch
 // light connecting line runs from anchor to anchor in chronological order.
 const LANE_ROW_H = 54;
 const LANE_CARD_MAX_W = 230;
-function StrategyRouteLane({ thread, route, weeks, readOnly, onUpdateMilestone, onDeleteMilestone, onDropWeek }) {
+function StrategyRouteLane({ thread, route, weeks, readOnly, onUpdateMilestone, onDeleteMilestone, onDropWeek, forkAt, childForks }) {
   const laneRef = useRef(null);
   const [laneWidth, setLaneWidth] = useState(0);
   useEffect(() => {
@@ -9463,6 +9755,16 @@ function StrategyRouteLane({ thread, route, weeks, readOnly, onUpdateMilestone, 
   const laneHeight = rowCount * LANE_ROW_H + 14;
   const leftPct = (idx) => (weeks.length ? (idx / weeks.length) * 100 : 0);
 
+  // Where a branch forks off its parent (its own lane's start marker) and
+  // where its own children fork off it (small ticks), clamped to the visible
+  // range when the date is older than the first week shown.
+  const forkIndexFor = (d) => {
+    if (!d || !weeks.length) return null;
+    const idx = dateToIndex(d);
+    if (idx != null) return idx;
+    return d < weeks[0].key ? 0 : null;
+  };
+  const forkIdx = forkIndexFor(forkAt);
   const droppable = !!onDropWeek;
   const onLaneDrop = (e) => {
     if (!droppable || !laneRef.current) return;
@@ -9491,6 +9793,15 @@ function StrategyRouteLane({ thread, route, weeks, readOnly, onUpdateMilestone, 
           })}
         </svg>
       )}
+      {forkIdx != null && (
+        <div className="strategy-lane-fork" style={{ left: `${leftPct(forkIdx)}%` }} title={`Branched off ${formatDate(forkAt)}`}>
+          <span className="strategy-lane-fork-glyph">⑂</span>
+        </div>
+      )}
+      {(childForks || []).map((cf) => {
+        const ci = forkIndexFor(cf.date);
+        return ci == null ? null : <span key={cf.id} className="strategy-lane-childfork" style={{ left: `${leftPct(ci)}%` }} title={`Branch: ${cf.title}, ${formatDate(cf.date)}`}>⑂</span>;
+      })}
       {placed.map((p) => (
         <StrategyLaneNode key={p.kind === "terminus" ? "terminus" : p.milestone.id} point={p} route={route} todayISO={todayISO}
           leftPct={leftPct(p.weekIdx)} top={p.row * LANE_ROW_H}
@@ -9525,12 +9836,19 @@ function StrategyLaneNode({ point, route, todayISO, leftPct, top, readOnly, onUp
 function StrategyRouteRows({
   thread, route, weeks, readOnly, onUpdateMilestone, onDeleteMilestone, onAddMilestone, onReorderMilestones, showToast,
   isDragging, onDragStart, onDragOver, onDrop, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
+  onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches, contactOptions, onCreateContact,
 }) {
   const backlog = useMemo(() => routeBacklog(route).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)), [route]);
   const meta = strategyRouteStateMeta(route.state);
   const dead = route.state === "dead_end";
-  const blockedCount = (route.blockers || []).filter((b) => !b.is_resolved).length;
+  const blockedCount = routeBlockedTotal(route);
   const [draggingBacklogId, setDraggingBacklogId] = useState(null);
+  const [branchesOpen, setBranchesOpen] = useState(true);
+  const [addingBranch, setAddingBranch] = useState(false);
+  const branches = route.branches || [];
+  const branchCtx = { onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches, contactOptions, onCreateContact,
+    onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast,
+    onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker };
   const scheduleBacklog = (id, dateStr) => onUpdateMilestone(id, { milestone_date: dateStr, is_backlog: false });
   const completeBacklog = (id, dateStr) => onUpdateMilestone(id, { milestone_date: dateStr, is_backlog: false, is_planned: false });
   return (
@@ -9541,6 +9859,12 @@ function StrategyRouteRows({
         <span className="strategy-route-title">{route.title}</span>
         {blockedCount > 0 && <span className="route-blocked-marker" title={`${blockedCount} open blocker${blockedCount === 1 ? "" : "s"}`}>⚑</span>}
         <span className="badge strategy-route-badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{meta.label}</span>
+        {branches.length > 0 && (
+          <button type="button" className="link-btn strategy-branch-toggle" onClick={() => setBranchesOpen((v) => !v)} title={branchesOpen ? "Hide branches" : "Show branches"}>
+            {branchesOpen ? "▾" : "▸"} <BranchRollup route={route} />
+          </button>
+        )}
+        {!readOnly && <button type="button" className="link-btn route-branch-add" onClick={() => { setAddingBranch(true); setBranchesOpen(true); }}>+ Add branch</button>}
       </div>
       {((route.blockers || []).length > 0 || !readOnly) && (
         <div style={{ gridColumn: "1 / -1" }}>
@@ -9551,6 +9875,7 @@ function StrategyRouteRows({
       )}
       <StrategyRouteLane thread={thread} route={route} weeks={weeks} readOnly={readOnly}
         onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+        childForks={branches.map((b) => ({ id: b.id, title: mentionsToPlainText(b.title || ""), date: b.branched_at }))}
         onDropWeek={draggingBacklogId ? (w) => { scheduleBacklog(draggingBacklogId, w.key); setDraggingBacklogId(null); } : undefined} />
       <StrategyBacklogZone items={backlog} readOnly={readOnly}
         onAdd={(title) => onAddMilestone({ thread_id: thread.id, route_id: route.id }, { title, is_planned: true, is_backlog: true, milestone_date: null })}
@@ -9559,6 +9884,100 @@ function StrategyRouteRows({
         onReorder={onReorderMilestones}
         draggingId={draggingBacklogId} onDragStart={setDraggingBacklogId} onDragEnd={() => setDraggingBacklogId(null)}
         showToast={showToast} />
+      {!readOnly && addingBranch && (
+        <div className="strategy-branch-add-row" style={{ gridColumn: "1 / -1" }}>
+          <BranchAddForm contactOptions={contactOptions} onCreateContact={onCreateContact} showToast={showToast}
+            onAdd={(vals) => { onAddBranch(route.id, vals); setAddingBranch(false); }} onCancel={() => setAddingBranch(false)} />
+        </div>
+      )}
+      {branchesOpen && branches.length > 0 && (
+        <StrategyBranchLaneList branches={branches} route={route} thread={thread} depth={1} weeks={weeks} readOnly={readOnly} ctx={branchCtx} />
+      )}
+    </>
+  );
+}
+// Timeline branches: each branch is a sub-lane under its parent's lane,
+// forking off at its branched_at week (a dashed marker at the fork), with its
+// own moments, Planned zone and blockers, and its own sub-branches nested
+// beneath (indented one step per level).
+function StrategyBranchLaneList({ branches, route, thread, depth, weeks, readOnly, ctx }) {
+  const [dragId, setDragId] = useState(null);
+  const drop = (targetId) => {
+    if (!dragId || dragId === targetId) { setDragId(null); return; }
+    const ids = branches.map((b) => b.id);
+    const from = ids.indexOf(dragId), to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) { setDragId(null); return; }
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    ctx.onReorderBranches(ids);
+    setDragId(null);
+  };
+  return (
+    <>
+      {branches.map((b) => (
+        <StrategyBranchRows key={b.id} branch={b} route={route} thread={thread} depth={depth} weeks={weeks} readOnly={readOnly} ctx={ctx}
+          isDragging={dragId === b.id} onDragStart={() => setDragId(b.id)} onDrop={() => drop(b.id)} />
+      ))}
+    </>
+  );
+}
+function StrategyBranchRows({ branch, route, thread, depth, weeks, readOnly, ctx, isDragging, onDragStart, onDrop }) {
+  const [open, setOpen] = useState(true);
+  const [addingChild, setAddingChild] = useState(false);
+  const [draggingBacklogId, setDraggingBacklogId] = useState(null);
+  const backlog = useMemo(() => routeBacklog(branch).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)), [branch]);
+  const meta = strategyRouteStateMeta(branch.state);
+  const dead = branch.state === "dead_end";
+  const children = branch.children || [];
+  const blocked = (branch.blockers || []).filter((b) => !b.is_resolved).length;
+  const scheduleBacklog = (id, dateStr) => ctx.onUpdateMilestone(id, { milestone_date: dateStr, is_backlog: false });
+  const completeBacklog = (id, dateStr) => ctx.onUpdateMilestone(id, { milestone_date: dateStr, is_backlog: false, is_planned: false });
+  return (
+    <>
+      <div className={`strategy-branch-head ${dead ? "strategy-route-head-dead" : ""} ${isDragging ? "strategy-dragging" : ""}`}
+        style={{ gridColumn: "1 / -1", paddingLeft: 10 + depth * 22 }}
+        onDragOver={readOnly ? undefined : (e) => e.preventDefault()} onDrop={readOnly ? undefined : (e) => { e.preventDefault(); onDrop(); }}>
+        {!readOnly && <span className="strategy-drag-handle" title="Drag to reorder" draggable onDragStart={onDragStart}>⠿</span>}
+        <span className="route-branch-fork" title={`Branched ${formatDate(branch.branched_at)}`}>⑂</span>
+        <span className="strategy-route-glyph" style={{ color: meta.color }}>{strategyEndGlyph(branch.state)}</span>
+        <span className="strategy-branch-title"><StrategyMentionField value={branch.title || ""} onSave={(v) => ctx.onUpdateBranch(branch.id, { title: v })} readOnly={readOnly} placeholder="Branch" /></span>
+        {blocked > 0 && <span className="route-blocked-marker" title={`${blocked} open blocker${blocked === 1 ? "" : "s"}`}>⚑</span>}
+        <span className="badge strategy-route-badge" style={{ background: meta.color + "22", color: meta.color, border: `1px solid ${meta.color}44` }}>{meta.label}</span>
+        <span className="route-branch-date">Branched {formatDate(branch.branched_at)}</span>
+        <BranchContactLink branch={branch} readOnly={readOnly} contactOptions={ctx.contactOptions} onCreateContact={ctx.onCreateContact} onUpdate={ctx.onUpdateBranch} />
+        {children.length > 0 && (
+          <button type="button" className="link-btn strategy-branch-toggle" onClick={() => setOpen((v) => !v)}>{open ? "▾" : "▸"} <BranchRollup route={branch} /></button>
+        )}
+        {!readOnly && <button type="button" className="link-btn route-branch-add" onClick={() => { setAddingChild(true); setOpen(true); }}>+ Sub-branch</button>}
+        <BranchControls branch={branch} readOnly={readOnly} onUpdate={ctx.onUpdateBranch} onDelete={ctx.onDeleteBranch} />
+      </div>
+      {((branch.blockers || []).length > 0 || !readOnly) && (
+        <div style={{ gridColumn: "1 / -1", paddingLeft: 10 + depth * 22 }}>
+          <StrategyBlockerZone blockers={branch.blockers || []} readOnly={readOnly}
+            onAdd={(c) => ctx.onAddBlocker({ route_id: route.id, branch_id: branch.id }, c)}
+            onUpdate={ctx.onUpdateBlocker} onDelete={ctx.onDeleteBlocker} onResolve={ctx.onResolveBlocker} showToast={ctx.showToast} />
+        </div>
+      )}
+      <StrategyRouteLane thread={thread} route={branch} weeks={weeks} readOnly={readOnly}
+        onUpdateMilestone={ctx.onUpdateMilestone} onDeleteMilestone={ctx.onDeleteMilestone}
+        forkAt={branch.branched_at}
+        childForks={children.map((c) => ({ id: c.id, title: mentionsToPlainText(c.title || ""), date: c.branched_at }))}
+        onDropWeek={draggingBacklogId ? (w) => { scheduleBacklog(draggingBacklogId, w.key); setDraggingBacklogId(null); } : undefined} />
+      <StrategyBacklogZone items={backlog} readOnly={readOnly}
+        onAdd={(title) => ctx.onAddMilestone({ branch_id: branch.id }, { title, is_planned: true, is_backlog: true, milestone_date: null })}
+        onUpdate={ctx.onUpdateMilestone} onDelete={ctx.onDeleteMilestone}
+        onSchedule={scheduleBacklog} onComplete={completeBacklog}
+        onReorder={ctx.onReorderMilestones}
+        draggingId={draggingBacklogId} onDragStart={setDraggingBacklogId} onDragEnd={() => setDraggingBacklogId(null)}
+        showToast={ctx.showToast} />
+      {!readOnly && addingChild && (
+        <div className="strategy-branch-add-row" style={{ gridColumn: "1 / -1", paddingLeft: 10 + (depth + 1) * 22 }}>
+          <BranchAddForm contactOptions={ctx.contactOptions} onCreateContact={ctx.onCreateContact} showToast={ctx.showToast}
+            onAdd={(vals) => { ctx.onAddBranch(route.id, { ...vals, parent_branch_id: branch.id }); setAddingChild(false); }} onCancel={() => setAddingChild(false)} />
+        </div>
+      )}
+      {open && children.length > 0 && (
+        <StrategyBranchLaneList branches={children} route={route} thread={thread} depth={depth + 1} weeks={weeks} readOnly={readOnly} ctx={ctx} />
+      )}
     </>
   );
 }
@@ -9571,6 +9990,7 @@ function StrategyInstitutionRows({
   thread, weeks, collapsed, onToggleCollapse, onUpdateGoal, readOnly, onUpdateMilestone, onDeleteMilestone, onAddMilestone, onReorderMilestones, showToast,
   addingRoute, onStartAddRoute, onCancelAddRoute, onAddRoute, onReorderRoutes,
   isDragging, onDragStart, onDragOver, onDrop, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
+  onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches, contactOptions, onCreateContact,
 }) {
   const byWeek = useMemo(() => bucketThreadsByWeek([thread]), [thread]);
   const [routeTitle, setRouteTitle] = useState("");
@@ -9587,7 +10007,7 @@ function StrategyInstitutionRows({
   };
   const pending = threadBacklogCount(thread);
   const threadBlockedCount = (thread.blockers || []).filter((b) => !b.is_resolved).length
-    + thread.routes.reduce((a, r) => a + (r.blockers || []).filter((b) => !b.is_resolved).length, 0);
+    + thread.routes.reduce((a, r) => a + routeBlockedTotal(r), 0);
   return (
     <>
       <div className={`strategy-inst-head ${isDragging ? "strategy-dragging" : ""}`} style={{ gridColumn: "1 / -1" }} onDragOver={onDragOver} onDrop={onDrop}>
@@ -9619,6 +10039,8 @@ function StrategyInstitutionRows({
               onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
               onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
               onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+              onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches}
+              contactOptions={contactOptions} onCreateContact={onCreateContact}
               isDragging={routeDragId === route.id} onDragStart={() => setRouteDragId(route.id)}
               onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); dropRoute(route.id); }} />
           ))}
@@ -9816,13 +10238,14 @@ function StrategyCard({
   isDragging, onDragStart, onDragOverSelf, onDropSelf,
   strategyBlockers, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
   incubatorItems, onAddIncubatorItem, onUpdateIncubatorItem, onDeleteIncubatorItem, onReorderIncubatorItems, onDropIncubatorItem, onActivateIncubatorItem,
+  onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches,
 }) {
   const byWeek = useMemo(() => bucketThreadsByWeek(threads), [threads]);
   const pending = strategyBacklogCount(threads);
-  const lastMoveDate = threads.reduce((acc, t) => t.routes.reduce((acc2, r) => {
-    const d = r.ended_at || r.milestones[r.milestones.length - 1]?.milestone_date;
-    return d && d > acc2 ? d : acc2;
-  }, acc), "");
+  const lastMoveDate = threads.reduce((acc, t) => t.routes.reduce((acc2, r) => routeTracks(r).reduce((acc3, tr) => {
+    const d = tr.ended_at || tr.milestones[tr.milestones.length - 1]?.milestone_date;
+    return d && d > acc3 ? d : acc3;
+  }, acc2), acc), "");
   const [threadDragId, setThreadDragId] = useState(null);
   const dropThread = (targetId) => {
     if (!threadDragId || threadDragId === targetId) { setThreadDragId(null); return; }
@@ -9835,7 +10258,7 @@ function StrategyCard({
   };
   const strategyBlockedCount = (strategyBlockers || []).filter((b) => !b.is_resolved).length
     + threads.reduce((a, t) => a + (t.blockers || []).filter((b) => !b.is_resolved).length
-      + t.routes.reduce((a2, r) => a2 + (r.blockers || []).filter((b) => !b.is_resolved).length, 0), 0);
+      + t.routes.reduce((a2, r) => a2 + routeBlockedTotal(r), 0), 0);
   return (
     <div className={`strategy-card ${isDragging ? "strategy-dragging" : ""}`} style={{ borderColor: (strategy.color || "var(--mango)") + "55" }}
       onDragOver={onDragOverSelf} onDrop={onDropSelf}>
@@ -9887,6 +10310,8 @@ function StrategyCard({
                 onUpdateGoal={onUpdateThreadGoal} readOnly={readOnly} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
                 onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
                 onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+                onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches}
+                contactOptions={contactOptions} onCreateContact={onCreateContact}
                 addingRoute={addingRouteFor === thread.id} onStartAddRoute={() => onStartAddRoute(thread.id)} onCancelAddRoute={onCancelAddRoute}
                 onAddRoute={onAddRoute} onReorderRoutes={onReorderRoutes}
                 isDragging={threadDragId === thread.id} onDragStart={() => setThreadDragId(thread.id)}
@@ -9924,6 +10349,7 @@ function StrategyCardsTimeline({
   onReorderStrategies, onReorderThreads, onReorderRoutes,
   routeBlockersFor, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
   incubatorFor = () => [], onAddIncubatorItem, onUpdateIncubatorItem, onDeleteIncubatorItem, onReorderIncubatorItems, onDropIncubatorItem, onActivateIncubatorItem,
+  onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches,
   presenting = false, focusedStrategyId = null, onFocusStrategy,
 }) {
   const [rangeId, setRangeId] = useState("8w");
@@ -10006,7 +10432,8 @@ function StrategyCardsTimeline({
               onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
               incubatorItems={incubatorFor(strategy.id)} onAddIncubatorItem={onAddIncubatorItem} onUpdateIncubatorItem={onUpdateIncubatorItem}
               onDeleteIncubatorItem={onDeleteIncubatorItem} onReorderIncubatorItems={onReorderIncubatorItems}
-              onDropIncubatorItem={onDropIncubatorItem} onActivateIncubatorItem={onActivateIncubatorItem} />
+              onDropIncubatorItem={onDropIncubatorItem} onActivateIncubatorItem={onActivateIncubatorItem}
+              onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches} />
           ))}
         </div>
       )}
@@ -10107,6 +10534,7 @@ function StrategyTab({
   routeBlockersFor, openBlockersCount, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
   onBuildStrategyDigest,
   incubatorFor, onAddIncubatorItem, onUpdateIncubatorItem, onDeleteIncubatorItem, onReorderIncubatorItems, onDropIncubatorItem, onActivateIncubatorItem,
+  onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches,
   trackOptions, contactOptions, onCreateContact, showToast,
 }) {
   const readOnly = useReadOnly();
@@ -10165,6 +10593,11 @@ function StrategyTab({
       t.routes.forEach((r) => {
         (r.blockers || []).filter((b) => !b.is_resolved).forEach((blocker) => {
           rows.push({ blocker, strategyName: s.name, threadName: t.name, routeTitle: r.title, onOpen: t.onOpen });
+        });
+        flattenBranches(r.branches).forEach(({ branch }) => {
+          (branch.blockers || []).filter((b) => !b.is_resolved).forEach((blocker) => {
+            rows.push({ blocker, strategyName: s.name, threadName: t.name, routeTitle: `${r.title} > ${mentionsToPlainText(branch.title || "")}`, onOpen: t.onOpen });
+          });
         });
       });
     });
@@ -10255,7 +10688,8 @@ function StrategyTab({
               onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
               incubatorFor={incubatorFor} onAddIncubatorItem={onAddIncubatorItem} onUpdateIncubatorItem={onUpdateIncubatorItem}
               onDeleteIncubatorItem={onDeleteIncubatorItem} onReorderIncubatorItems={onReorderIncubatorItems}
-              onDropIncubatorItem={onDropIncubatorItem} onActivateIncubatorItem={onActivateIncubatorItem} />
+              onDropIncubatorItem={onDropIncubatorItem} onActivateIncubatorItem={onActivateIncubatorItem}
+              onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches} />
           ) : (
             <>
               {strategies.length > 1 && (
@@ -10297,7 +10731,9 @@ function StrategyTab({
                 onUpdateGoal={onUpdateThreadGoal} onDeleteThread={onDeleteThread} onAddRoute={onAddRoute} onUpdateRoute={onUpdateRoute} onDeleteRoute={onDeleteRoute}
                 onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onOpenPull={openPull}
                 onReorderMilestones={onReorderMilestones} showToast={showToast}
-                onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker} />
+                onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+                onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches}
+                contactOptions={contactOptions} onCreateContact={onCreateContact} />
             </>
           )}
         </>
