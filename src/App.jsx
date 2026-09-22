@@ -1430,6 +1430,12 @@ export default function App() {
   const [routeBlockers, setRouteBlockers] = useState([]);
   const [strategyIncubator, setStrategyIncubator] = useState([]);
   const [routeBranches, setRouteBranches] = useState([]);
+  const [strategyInitiatives, setStrategyInitiatives] = useState([]);
+  const [initiativeCompanies, setInitiativeCompanies] = useState([]);
+  // Set when "In Strategies" on a company profile is clicked, so the
+  // Strategy tab can jump straight to that placement; consumed once then
+  // cleared, so it never re-triggers on a later, unrelated visit.
+  const [strategyDeepLink, setStrategyDeepLink] = useState(null);
   const [stageHistory, setStageHistory] = useState([]);
   const [execQuestions, setExecQuestions] = useState([]);
   const [execOpenId, setExecOpenId] = useState(null);
@@ -1500,7 +1506,7 @@ export default function App() {
 
   const loadData = useCallback(async () => {
     try {
-      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp, strat, sthr, sroutes, pms, rb, sinc, sbr, sh] = await Promise.all([
+      const [d, c, a, en, dc, ec, td, tdc, orgs, de, ne, co, cr, bc, nt, nf, mat, ml, mb, et, cal, evinst, evcon, xp, xb, dp, tom, xi, xti, xq, xtp, strat, sthr, sroutes, pms, rb, sinc, sbr, sinit, sicomp, sh] = await Promise.all([
         api("deals", "GET", null, "?select=*&order=created_at.desc"),
         api("contacts", "GET", null, "?select=*&order=name.asc"),
         api("activities", "GET", null, "?select=*&order=created_at.desc"),
@@ -1541,6 +1547,8 @@ export default function App() {
         api("route_blockers", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("strategy_incubator", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("route_branches", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("strategy_initiatives", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
+        api("initiative_companies", "GET", null, "?select=*&order=sort_order.asc,created_at.asc").catch(() => []),
         api("stage_history", "GET", null, "?select=*&order=changed_at.asc").catch(() => []),
       ]);
       setDeals(d || []); setContacts(c || []); setActivities(a || []); setEnablers(en || []);
@@ -1554,6 +1562,7 @@ export default function App() {
       setExecInitiatives(xi || []); setExecTracked(xti || []); setExecQuestions(xq || []); setExecTrackedPeople(xtp || []);
       setStrategies(strat || []); setStrategyThreads(sthr || []); setStrategyRoutes(sroutes || []);
       setProgressMilestones(pms || []); setRouteBlockers(rb || []); setStrategyIncubator(sinc || []); setRouteBranches(sbr || []); setStageHistory(sh || []);
+      setStrategyInitiatives(sinit || []); setInitiativeCompanies(sicomp || []);
     } catch (e) { showToast("Failed to load data"); }
     setLoading(false);
   }, []);
@@ -4298,6 +4307,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
         await api("strategy_routes", "DELETE", null, `?thread_id=in.(${threadIds.join(",")})`);
         await api("strategy_threads", "DELETE", null, `?strategy_id=eq.${id}`);
       }
+      const initIds = strategyInitiatives.filter((i) => i.strategy_id === id).map((i) => i.id);
+      for (const initId of initIds) await deleteStrategyInitiative(initId);
       await api("route_blockers", "DELETE", null, `?strategy_id=eq.${id}`);
       await api("strategy_incubator", "DELETE", null, `?strategy_id=eq.${id}`);
       await api("strategies", "DELETE", null, `?id=eq.${id}`);
@@ -4358,13 +4369,24 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     catch { showToast("Could not save the new order"); }
   };
 
-  const addStrategyRoute = async (threadId, title) => {
+  // `owner` is either a bare thread id (legacy call shape, kept so every
+  // existing "+ Add route" caller works unchanged) or an fks object picking
+  // exactly one of thread_id / initiative_id / initiative_company_id: a
+  // route can hang directly off a strategic initiative, or off a company
+  // placed under one, with no thread involved at all.
+  const addStrategyRoute = async (owner, title) => {
     const clean = (title || "").trim();
     if (!clean) return null;
+    const fks = typeof owner === "string" ? { thread_id: owner } : (owner || {});
+    const siblingKey = fks.thread_id ? "thread_id" : fks.initiative_company_id ? "initiative_company_id" : "initiative_id";
+    if (!fks[siblingKey]) return null;
     try {
-      const siblings = strategyRoutes.filter((r) => r.thread_id === threadId);
+      const siblings = strategyRoutes.filter((r) => r[siblingKey] === fks[siblingKey]);
       const sort_order = siblings.length ? Math.max(...siblings.map((r) => r.sort_order ?? 0)) + 1 : 0;
-      const rows = await api("strategy_routes", "POST", { thread_id: threadId, title: clean, state: "active", sort_order });
+      const rows = await api("strategy_routes", "POST", {
+        thread_id: fks.thread_id || null, initiative_id: fks.initiative_id || null, initiative_company_id: fks.initiative_company_id || null,
+        title: clean, state: "active", sort_order,
+      });
       const row = Array.isArray(rows) ? rows[0] : rows;
       if (row) setStrategyRoutes((prev) => [...prev, row]);
       return row;
@@ -4464,10 +4486,11 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     const clean = (content || "").trim();
     if (!clean) return null;
     try {
-      const siblings = routeBlockers.filter((b) => (fks.branch_id ? b.branch_id === fks.branch_id : fks.route_id ? b.route_id === fks.route_id && !b.branch_id : fks.thread_id ? b.thread_id === fks.thread_id && !b.route_id : b.strategy_id === fks.strategy_id && !b.thread_id && !b.route_id));
+      const siblings = routeBlockersFor(fks);
       const sort_order = siblings.length ? Math.max(...siblings.map((b) => b.sort_order ?? 0)) + 1 : 0;
       const rows = await api("route_blockers", "POST", {
         route_id: fks.route_id || null, branch_id: fks.branch_id || null, thread_id: fks.thread_id || null, strategy_id: fks.strategy_id || null,
+        initiative_id: fks.initiative_id || null, initiative_company_id: fks.initiative_company_id || null,
         content: upgradeTokenMentions(clean), raised_at: new Date().toISOString().slice(0, 10), sort_order,
       });
       const row = Array.isArray(rows) ? rows[0] : rows;
@@ -4549,6 +4572,171 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
     setRouteBranches((prev) => prev.map((b) => { const i = orderedIds.indexOf(b.id); return i === -1 ? b : { ...b, sort_order: i }; }));
     try { await Promise.all(orderedIds.map((id, i) => api("route_branches", "PATCH", { sort_order: i }, `?id=eq.${id}`))); }
     catch { showToast("Could not save the new order"); }
+  };
+
+  /* ---- Strategic Initiatives: an organizing layer inside a strategy. An
+     initiative can group several company placements (the same institution
+     can sit under many initiatives, each placement tracked separately) AND
+     carry its own direct routes not tied to any one company. ---- */
+  const initiativesForStrategy = (strategyId) => strategyInitiatives.filter((i) => i.strategy_id === strategyId).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+  const companiesForInitiative = (initiativeId) => initiativeCompanies.filter((c) => c.initiative_id === initiativeId).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+  const addStrategyInitiative = async (strategyId, { title, goal, description } = {}) => {
+    const clean = (title || "").trim();
+    if (!clean) return null;
+    try {
+      const siblings = initiativesForStrategy(strategyId);
+      const sort_order = siblings.length ? Math.max(...siblings.map((i) => i.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("strategy_initiatives", "POST", {
+        strategy_id: strategyId, title: clean, goal: (goal || "").trim() || null, description: (description || "").trim() || null,
+        sort_order, is_active: true,
+      });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setStrategyInitiatives((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not add initiative"); return null; }
+  };
+  const updateStrategyInitiative = async (id, patch) => {
+    if ("goal" in patch) patch = { ...patch, goal: upgradeTokenMentions(patch.goal || "") };
+    if ("description" in patch) patch = { ...patch, description: upgradeTokenMentions(patch.description || "") };
+    if ("title" in patch) patch = { ...patch, title: upgradeTokenMentions(patch.title || "") };
+    try {
+      await api("strategy_initiatives", "PATCH", patch, `?id=eq.${id}`);
+      setStrategyInitiatives((prev) => prev.map((i) => (i.id === id ? { ...i, ...patch } : i)));
+    } catch { showToast("Could not save"); }
+  };
+  // Cascades manually, same convention as every other Strategy delete:
+  // every company placed under the initiative, every route hanging off the
+  // initiative directly or off one of its placements, and each route's own
+  // branches/milestones/blockers.
+  const deleteStrategyInitiative = async (id) => {
+    try {
+      const companyIds = initiativeCompanies.filter((c) => c.initiative_id === id).map((c) => c.id);
+      const routeIds = strategyRoutes.filter((r) => r.initiative_id === id || companyIds.includes(r.initiative_company_id)).map((r) => r.id);
+      await purgeBranchesOfRoutes(routeIds);
+      if (routeIds.length) {
+        await api("progress_milestones", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+        await api("route_blockers", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+        await api("strategy_routes", "DELETE", null, `?id=in.(${routeIds.join(",")})`);
+      }
+      await api("route_blockers", "DELETE", null, `?initiative_id=eq.${id}`);
+      if (companyIds.length) {
+        await api("route_blockers", "DELETE", null, `?initiative_company_id=in.(${companyIds.join(",")})`);
+        await api("initiative_companies", "DELETE", null, `?initiative_id=eq.${id}`);
+      }
+      await api("strategy_initiatives", "DELETE", null, `?id=eq.${id}`);
+      setStrategyRoutes((prev) => prev.filter((r) => !routeIds.includes(r.id)));
+      setProgressMilestones((prev) => prev.filter((m) => !routeIds.includes(m.route_id)));
+      setRouteBlockers((prev) => prev.filter((b) => !routeIds.includes(b.route_id) && b.initiative_id !== id && !companyIds.includes(b.initiative_company_id)));
+      setInitiativeCompanies((prev) => prev.filter((c) => c.initiative_id !== id));
+      setStrategyInitiatives((prev) => prev.filter((i) => i.id !== id));
+    } catch { showToast("Could not delete initiative"); }
+  };
+  const reorderStrategyInitiatives = async (orderedIds) => {
+    setStrategyInitiatives((prev) => prev.map((i) => { const ix = orderedIds.indexOf(i.id); return ix === -1 ? i : { ...i, sort_order: ix }; }));
+    try { await Promise.all(orderedIds.map((id, ix) => api("strategy_initiatives", "PATCH", { sort_order: ix }, `?id=eq.${id}`))); }
+    catch { showToast("Could not save the new order"); }
+  };
+  // A company placement: the SAME underlying institution/person can be
+  // placed under many initiatives (and many strategies); each placement is
+  // its own row with its own goal, routes, and progress, tracked separately.
+  const addInitiativeCompany = async (initiativeId, { fks, goal } = {}) => {
+    try {
+      const siblings = companiesForInitiative(initiativeId);
+      const sort_order = siblings.length ? Math.max(...siblings.map((c) => c.sort_order ?? 0)) + 1 : 0;
+      const rows = await api("initiative_companies", "POST", { initiative_id: initiativeId, ...fks, goal: (goal || "").trim() || null, sort_order });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      if (row) setInitiativeCompanies((prev) => [...prev, row]);
+      return row;
+    } catch { showToast("Could not add company"); return null; }
+  };
+  const updateInitiativeCompany = async (id, patch) => {
+    if ("goal" in patch) patch = { ...patch, goal: upgradeTokenMentions(patch.goal || "") };
+    try {
+      await api("initiative_companies", "PATCH", patch, `?id=eq.${id}`);
+      setInitiativeCompanies((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+    } catch { showToast("Could not save"); }
+  };
+  const deleteInitiativeCompany = async (id) => {
+    try {
+      const routeIds = strategyRoutes.filter((r) => r.initiative_company_id === id).map((r) => r.id);
+      await purgeBranchesOfRoutes(routeIds);
+      if (routeIds.length) {
+        await api("progress_milestones", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+        await api("route_blockers", "DELETE", null, `?route_id=in.(${routeIds.join(",")})`);
+        await api("strategy_routes", "DELETE", null, `?id=in.(${routeIds.join(",")})`);
+      }
+      await api("route_blockers", "DELETE", null, `?initiative_company_id=eq.${id}`);
+      await api("initiative_companies", "DELETE", null, `?id=eq.${id}`);
+      setStrategyRoutes((prev) => prev.filter((r) => !routeIds.includes(r.id)));
+      setProgressMilestones((prev) => prev.filter((m) => !routeIds.includes(m.route_id)));
+      setRouteBlockers((prev) => prev.filter((b) => !routeIds.includes(b.route_id) && b.initiative_company_id !== id));
+      setInitiativeCompanies((prev) => prev.filter((c) => c.id !== id));
+    } catch { showToast("Could not delete company"); }
+  };
+  const reorderInitiativeCompanies = async (orderedIds) => {
+    setInitiativeCompanies((prev) => prev.map((c) => { const ix = orderedIds.indexOf(c.id); return ix === -1 ? c : { ...c, sort_order: ix }; }));
+    try { await Promise.all(orderedIds.map((id, ix) => api("initiative_companies", "PATCH", { sort_order: ix }, `?id=eq.${id}`))); }
+    catch { showToast("Could not save the new order"); }
+  };
+  // Resolves one route (milestones, blockers, branches), regardless of
+  // whether it hangs off a thread, an initiative directly, or a company
+  // placement within one: the same shape everywhere so track rendering
+  // never needs to know which kind of owner it has.
+  const resolveRouteWithTracks = (r) => ({
+    ...r,
+    milestones: progressMilestones.filter((m) => m.route_id === r.id).sort((a, b) => (a.milestone_date || "").localeCompare(b.milestone_date || "")),
+    blockers: routeBlockersFor({ route_id: r.id }),
+    branches: buildBranchTree(r.id),
+  });
+  // Resolves a company PLACEMENT (an institution or person placed under one
+  // initiative): its own goal and its own routes, tracked separately from
+  // any other placement of the same underlying institution.
+  const resolveInitiativeCompanyCard = (c) => {
+    const isPerson = !!c.contact_id;
+    let name = "Unknown", entityKey = null, typeMeta = null, onOpen = null;
+    if (isPerson) {
+      const contact = contacts.find((x) => x.id === c.contact_id);
+      name = contact?.name || name;
+      onOpen = contact ? () => openPerson(contact.id) : null;
+    } else {
+      const inst = c.deal_id ? institutions.find((i) => i.dealId === c.deal_id)
+        : c.enabler_id ? institutions.find((i) => i.enablerId === c.enabler_id)
+        : institutions.find((i) => i.orgId === c.organization_id);
+      name = inst?.name || name;
+      entityKey = inst?.key || null;
+      typeMeta = inst?.type ? institutionTypeMeta(inst.type, customOptions) : null;
+      onOpen = inst ? () => openInstitution(inst.name) : null;
+    }
+    const routes = strategyRoutes.filter((r) => r.initiative_company_id === c.id).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)).map(resolveRouteWithTracks);
+    return { ...c, isPerson, name, entityKey, typeMeta, onOpen, routes, blockers: routeBlockersFor({ initiative_company_id: c.id }) };
+  };
+  // Resolves an initiative: its company placements, plus its own direct
+  // routes (initiative_id set, no company, no thread).
+  const resolveInitiativeCard = (init) => {
+    const companies = companiesForInitiative(init.id).map(resolveInitiativeCompanyCard);
+    const directRoutes = strategyRoutes.filter((r) => r.initiative_id === init.id && !r.initiative_company_id && !r.thread_id)
+      .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)).map(resolveRouteWithTracks);
+    return { ...init, companies, directRoutes, blockers: routeBlockersFor({ initiative_id: init.id }) };
+  };
+  // Every place a given company (by institution fks) or person (by contact
+  // id) has been placed under a strategic initiative, across every strategy:
+  // the "mother record" roll-up on the institution/person's own profile.
+  const strategicPlacementsFor = (fks) => {
+    const matches = (c) => (fks.deal_id && c.deal_id === fks.deal_id) || (fks.enabler_id && c.enabler_id === fks.enabler_id)
+      || (fks.organization_id && c.organization_id === fks.organization_id) || (fks.contact_id && c.contact_id === fks.contact_id);
+    return initiativeCompanies.filter(matches).map((c) => {
+      const initiative = strategyInitiatives.find((i) => i.id === c.initiative_id);
+      const strategy = initiative ? strategies.find((s) => s.id === initiative.strategy_id) : null;
+      const routes = strategyRoutes.filter((r) => r.initiative_company_id === c.id).map(resolveRouteWithTracks);
+      const tracks = routes.flatMap(routeTracks);
+      return {
+        placement: c, initiative, strategy,
+        activeRoutes: tracks.filter((t) => t.state === "active").length,
+        deadEnds: tracks.filter((t) => t.state === "dead_end").length,
+        lastMovement: tracks.flatMap((t) => t.milestones.map((m) => m.milestone_date)).filter(Boolean).sort().slice(-1)[0] || null,
+        onOpen: () => { setView("strategy"); setStrategyDeepLink({ strategyId: initiative?.strategy_id, initiativeId: initiative?.id, companyId: c.id }); },
+      };
+    }).filter((p) => p.strategy);
   };
 
   /* ---- Strategy Incubator: strategy-level work in preparation, distinct
@@ -4699,13 +4887,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
       typeMeta = inst?.type ? institutionTypeMeta(inst.type, customOptions) : null;
       onOpen = inst ? () => openInstitution(inst.name) : null;
     }
-    const routes = strategyRoutes.filter((r) => r.thread_id === t.id).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
-      .map((r) => ({
-        ...r,
-        milestones: progressMilestones.filter((m) => m.route_id === r.id).sort((a, b) => (a.milestone_date || "").localeCompare(b.milestone_date || "")),
-        blockers: routeBlockersFor({ route_id: r.id }),
-        branches: buildBranchTree(r.id),
-      }));
+    const routes = strategyRoutes.filter((r) => r.thread_id === t.id).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)).map(resolveRouteWithTracks);
     return { ...t, isPerson, name, entityKey, typeMeta, onOpen, routes, blockers: routeBlockersFor({ thread_id: t.id }) };
   };
   // Blockers for a route (route_id set), a thread/institution (thread_id set,
@@ -4714,6 +4896,8 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
   const routeBlockersFor = (fks) => routeBlockers.filter((b) => {
     if (fks.branch_id) return b.branch_id === fks.branch_id;
     if (fks.route_id) return b.route_id === fks.route_id && !b.branch_id;
+    if (fks.initiative_company_id) return b.initiative_company_id === fks.initiative_company_id;
+    if (fks.initiative_id) return b.initiative_id === fks.initiative_id;
     if (fks.thread_id) return b.thread_id === fks.thread_id && !b.route_id;
     return b.strategy_id === fks.strategy_id && !b.thread_id && !b.route_id;
   }).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || (a.raised_at || "").localeCompare(b.raised_at || ""));
@@ -5790,6 +5974,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onOpenInstitution={openInstitution}
             onOpenPerson={openPerson}
             onOpenCalendarEvent={openCalendarEventDetail}
+            strategicPlacements={strategicPlacementsFor({ deal_id: inst.dealId, enabler_id: inst.enablerId, organization_id: inst.orgId })}
             backLabel={backLabel}
             onBack={goBack}
             bossNotesSlot={(() => {
@@ -5861,6 +6046,7 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
             onOpenInstitution={openInstitution}
             onOpenPerson={openPerson}
             onOpenCalendarEvent={openCalendarEventDetail}
+            strategicPlacements={strategicPlacementsFor({ contact_id: sheetContact.id })}
             onBack={goBack}
             backLabel={backLabel}
           />
@@ -6327,6 +6513,18 @@ Keep it tight and scannable. No preamble. Do not use em dashes anywhere in the s
           onUpdateBranch={updateRouteBranch}
           onDeleteBranch={deleteRouteBranch}
           onReorderBranches={reorderRouteBranches}
+          initiativesForStrategy={initiativesForStrategy}
+          resolveInitiativeCard={resolveInitiativeCard}
+          onAddInitiative={addStrategyInitiative}
+          onUpdateInitiative={updateStrategyInitiative}
+          onDeleteInitiative={deleteStrategyInitiative}
+          onReorderInitiatives={reorderStrategyInitiatives}
+          onAddInitiativeCompany={addInitiativeCompany}
+          onUpdateInitiativeCompany={updateInitiativeCompany}
+          onDeleteInitiativeCompany={deleteInitiativeCompany}
+          onReorderInitiativeCompanies={reorderInitiativeCompanies}
+          strategyDeepLink={strategyDeepLink}
+          onConsumeDeepLink={() => setStrategyDeepLink(null)}
           trackOptions={execTrackOptions}
           contactOptions={contacts}
           onCreateContact={createContactForMention}
@@ -9195,7 +9393,7 @@ function RouteMiniBar({ route, depth = 0 }) {
 // and its parallel routes, either full tracks (expanded) or mini bars (Board
 // default, per spec 5: "institution card shows goal and routes as mini
 // progress bars").
-function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpdateGoal, onDeleteThread, onAddRoute, onUpdateRoute, onDeleteRoute, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker, onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches, contactOptions, onCreateContact }) {
+function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpdateGoal, onDeleteThread, onAddRoute, onUpdateRoute, onDeleteRoute, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker, onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches, contactOptions, onCreateContact, ownerFksKey = "thread_id", entityNoun = "thread" }) {
   const [addingRoute, setAddingRoute] = useState(false);
   const [addingBranchFor, setAddingBranchFor] = useState(null);
   const [routeTitle, setRouteTitle] = useState("");
@@ -9215,7 +9413,7 @@ function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpda
         <StrategyBlockedBadge count={threadBlockedCount} />
         <span className="strategy-thread-head-right">
           <button type="button" className="link-btn strategy-expand-btn" onClick={onToggleExpand}>{expanded ? "Collapse" : "Expand"}</button>
-          {!readOnly && <button type="button" className="exec-track-remove" onClick={() => { if (window.confirm("Remove this thread and all of its routes?")) onDeleteThread(thread.id); }} title="Remove thread">✕</button>}
+          {!readOnly && <button type="button" className="exec-track-remove" onClick={() => { if (window.confirm(`Remove this ${entityNoun} and all of its routes?`)) onDeleteThread(thread.id); }} title={`Remove ${entityNoun}`}>✕</button>}
         </span>
       </div>
       <div className="strategy-thread-goal">
@@ -9223,19 +9421,19 @@ function StrategyThreadCard({ thread, readOnly, expanded, onToggleExpand, onUpda
         <StrategyMentionField value={thread.goal || ""} onSave={(v) => onUpdateGoal(thread.id, v)} readOnly={readOnly} placeholder="What are we trying to achieve here?" />
       </div>
       <StrategyBlockerZone blockers={thread.blockers || []} readOnly={readOnly}
-        onAdd={(c) => onAddBlocker({ thread_id: thread.id }, c)} onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
+        onAdd={(c) => onAddBlocker({ [ownerFksKey]: thread.id }, c)} onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
       {expanded ? (
         <div className="strategy-routes">
           {thread.routes.map((route) => (
             <div key={route.id} className="strategy-route">
               <RouteHeader route={route} readOnly={readOnly} onUpdate={onUpdateRoute} onDelete={onDeleteRoute} />
               <RouteTrack route={route} readOnly={readOnly}
-                onAddMilestone={(vals) => onAddMilestone({ thread_id: thread.id, route_id: route.id }, vals)}
+                onAddMilestone={(vals) => onAddMilestone({ route_id: route.id }, vals)}
                 onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
                 onReorderMilestones={onReorderMilestones} showToast={showToast}
-                onAddBlocker={(c) => onAddBlocker({ thread_id: thread.id, route_id: route.id }, c)}
+                onAddBlocker={(c) => onAddBlocker({ route_id: route.id }, c)}
                 onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
-                onOpenPull={readOnly ? null : () => onOpenPull({ thread_id: thread.id, route_id: route.id }, { deal_id: thread.deal_id, enabler_id: thread.enabler_id, organization_id: thread.organization_id, contact_id: thread.contact_id }, route.title)} />
+                onOpenPull={readOnly ? null : () => onOpenPull({ route_id: route.id }, { deal_id: thread.deal_id, enabler_id: thread.enabler_id, organization_id: thread.organization_id, contact_id: thread.contact_id }, route.title)} />
               {((route.branches || []).length > 0 || !readOnly) && (
                 <div className="route-branches">
                   {(route.branches || []).length > 0 && (
@@ -9317,6 +9515,217 @@ function StrategyAddThreadForm({ trackOptions, contactOptions, onCreateContact, 
       <input className="input" value={customTitle} onChange={(e) => setCustomTitle(e.target.value)} placeholder="Thread title (optional)" />
       <button type="button" className="btn-primary" onClick={submit}>Add</button>
       <button type="button" className="link-btn" onClick={onCancel}>Cancel</button>
+    </div>
+  );
+}
+
+/* ============================================================
+   Strategic Initiatives: an organizing layer inside a strategy. An
+   initiative can group COMPANY PLACEMENTS (the same underlying institution
+   can be placed under many initiatives, each placement tracked separately,
+   with its own routes/branches/moments) and/or carry its own DIRECT routes
+   not tied to any one company. Board rendering only; the Timeline rendering
+   lives further below alongside StrategyCard.
+   ============================================================ */
+// "+ Add company": place an institution or person under this initiative, no
+// title (initiative_companies has none, only an optional per-placement goal).
+function StrategyAddCompanyForm({ trackOptions, contactOptions, onCreateContact, onAdd, onCancel }) {
+  const [kind, setKind] = useState("institution");
+  const [pickedInst, setPickedInst] = useState("");
+  const [pickedPersonId, setPickedPersonId] = useState("");
+  const [goal, setGoal] = useState("");
+  const submit = async () => {
+    if (kind === "institution") {
+      if (!pickedInst) return;
+      const i = pickedInst.indexOf(":"); const type = pickedInst.slice(0, i); const id = pickedInst.slice(i + 1);
+      await onAdd({ fks: { [`${type}_id`]: id }, goal: goal.trim() });
+    } else {
+      if (!pickedPersonId) return;
+      await onAdd({ fks: { contact_id: pickedPersonId }, goal: goal.trim() });
+    }
+  };
+  return (
+    <div className="exec-track-add strategy-add-form">
+      <div className="strategy-add-kind">
+        <button type="button" className={kind === "institution" ? "active" : ""} onClick={() => setKind("institution")}>Institution</button>
+        <button type="button" className={kind === "person" ? "active" : ""} onClick={() => setKind("person")}>Person</button>
+      </div>
+      {kind === "institution"
+        ? <EntityPicker placeholder="Search institutions..." options={trackOptions} value={pickedInst} onChange={setPickedInst} />
+        : <ContactConnectPicker contacts={contactOptions} value={pickedPersonId} onChange={setPickedPersonId} onCreateContact={onCreateContact} placeholder="Search people..." />}
+      <input className="input" value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="Goal for this placement (optional)" />
+      <button type="button" className="btn-primary" onClick={submit}>Add</button>
+      <button type="button" className="link-btn" onClick={onCancel}>Cancel</button>
+    </div>
+  );
+}
+// "+ Add initiative": title, goal, description.
+function StrategyAddInitiativeForm({ onAdd, onCancel }) {
+  const [title, setTitle] = useState("");
+  const [goal, setGoal] = useState("");
+  const [description, setDescription] = useState("");
+  const submit = () => { if (!title.trim()) return; onAdd({ title: title.trim(), goal: goal.trim(), description: description.trim() }); };
+  return (
+    <div className="exec-track-add strategy-add-form">
+      <input className="input" autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Initiative title, e.g. Get one payer to pilot VBC" />
+      <input className="input" value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="Goal (optional)" />
+      <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description (optional)" />
+      <button type="button" className="btn-primary" onClick={submit}>Add</button>
+      <button type="button" className="link-btn" onClick={onCancel}>Cancel</button>
+    </div>
+  );
+}
+// A route hanging directly off an initiative (no company placement): its own
+// header, track, and branches, exactly like a route on a thread.
+function StrategyDirectRoutesBoard({ routes, readOnly, onUpdateRoute, onDeleteRoute, onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker, onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches, contactOptions, onCreateContact, searchFks, addingBranchFor, setAddingBranchFor }) {
+  const branchCtx = { onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches, contactOptions, onCreateContact,
+    onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones, showToast, onOpenPull,
+    onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker };
+  return (
+    <>
+      {routes.map((route) => (
+        <div key={route.id} className="strategy-route">
+          <RouteHeader route={route} readOnly={readOnly} onUpdate={onUpdateRoute} onDelete={onDeleteRoute} />
+          <RouteTrack route={route} readOnly={readOnly}
+            onAddMilestone={(vals) => onAddMilestone({ route_id: route.id }, vals)}
+            onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+            onReorderMilestones={onReorderMilestones} showToast={showToast}
+            onAddBlocker={(c) => onAddBlocker({ route_id: route.id }, c)}
+            onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+            onOpenPull={readOnly ? null : () => onOpenPull({ route_id: route.id }, searchFks || {}, route.title)} />
+          {((route.branches || []).length > 0 || !readOnly) && (
+            <div className="route-branches">
+              {(route.branches || []).length > 0 && (
+                <StrategyBranchBoardList branches={route.branches} route={route} thread={{ id: route.id }} readOnly={readOnly} ctx={branchCtx} />
+              )}
+              {!readOnly && (addingBranchFor === route.id
+                ? <BranchAddForm contactOptions={contactOptions} onCreateContact={onCreateContact} showToast={showToast}
+                    onAdd={(vals) => { onAddBranch(route.id, vals); setAddingBranchFor(null); }} onCancel={() => setAddingBranchFor(null)} />
+                : <button type="button" className="link-btn route-branch-add" onClick={() => setAddingBranchFor(route.id)}>+ Add branch</button>)}
+            </div>
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+function StrategyInitiativeBoardCard({ initiative, readOnly, expandedIds, onToggleExpand, trackOptions, contactOptions, onCreateContact, showToast, onOpenPull,
+  onUpdateInitiative, onDeleteInitiative, onAddCompany, onUpdateCompany, onDeleteCompany, onAddRoute, onUpdateRoute, onDeleteRoute,
+  onAddMilestone, onUpdateMilestone, onDeleteMilestone, onReorderMilestones,
+  onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
+  onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches,
+  isDragging, onDragStart, onDragOver, onDrop,
+}) {
+  const [addingCompany, setAddingCompany] = useState(false);
+  const [addingRoute, setAddingRoute] = useState(false);
+  const [routeTitle, setRouteTitle] = useState("");
+  const [addingBranchFor, setAddingBranchFor] = useState(null);
+  const allTracks = [...initiative.directRoutes, ...initiative.companies.flatMap((c) => c.routes)].flatMap(routeTracks);
+  const blockedCount = (initiative.blockers || []).filter((b) => !b.is_resolved).length + allTracks.reduce((a, t) => a + (t.blockers || []).filter((b) => !b.is_resolved).length, 0);
+  const movedThisWeek = allTracks.some((tr) => tr.milestones.some((m) => isThisWeek(m.milestone_date)) || (tr.ended_at && isThisWeek(tr.ended_at)));
+  const submitRoute = () => { if (!routeTitle.trim()) return; onAddRoute({ initiative_id: initiative.id }, routeTitle.trim()); setRouteTitle(""); setAddingRoute(false); };
+  return (
+    <div className={`strategy-initiative-card ${isDragging ? "strategy-dragging" : ""}`} onDragOver={onDragOver} onDrop={onDrop}>
+      <div className="strategy-initiative-head">
+        {!readOnly && <span className="strategy-drag-handle" title="Drag to reorder" draggable onDragStart={onDragStart}>⠿</span>}
+        <span className="strategy-initiative-label">Initiative</span>
+        <span className="strategy-initiative-title"><StrategyMentionField value={initiative.title} onSave={(v) => onUpdateInitiative(initiative.id, { title: v })} readOnly={readOnly} placeholder="Initiative title" /></span>
+        {movedThisWeek && <span className="strategy-moved-badge">Moved this week</span>}
+        <StrategyBlockedBadge count={blockedCount} />
+        {!readOnly && <button type="button" className="exec-track-remove" onClick={() => { if (window.confirm("Remove this initiative and everything under it?")) onDeleteInitiative(initiative.id); }} title="Remove initiative">✕</button>}
+      </div>
+      <div className="strategy-thread-goal">
+        <span className="strategy-goal-label">Goal</span>
+        <StrategyMentionField value={initiative.goal || ""} onSave={(v) => onUpdateInitiative(initiative.id, { goal: v })} readOnly={readOnly} placeholder="What is this initiative trying to achieve?" />
+      </div>
+      {(initiative.description || !readOnly) && (
+        <div className="strategy-thread-goal">
+          <span className="strategy-goal-label">Description</span>
+          <StrategyMentionField value={initiative.description || ""} onSave={(v) => onUpdateInitiative(initiative.id, { description: v })} readOnly={readOnly} placeholder="Description (optional)" />
+        </div>
+      )}
+      <StrategyBlockerZone blockers={initiative.blockers || []} readOnly={readOnly}
+        onAdd={(c) => onAddBlocker({ initiative_id: initiative.id }, c)} onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
+
+      <div className="strategy-initiative-companies">
+        {initiative.companies.map((c) => (
+          <StrategyThreadCard key={c.id} thread={c} readOnly={readOnly}
+            expanded={expandedIds.has(c.id)} onToggleExpand={() => onToggleExpand(c.id)}
+            ownerFksKey="initiative_company_id" entityNoun="company placement"
+            onUpdateGoal={(id, v) => onUpdateCompany(id, { goal: v })}
+            onDeleteThread={onDeleteCompany}
+            onAddRoute={(id, title) => onAddRoute({ initiative_company_id: id }, title)}
+            onUpdateRoute={onUpdateRoute} onDeleteRoute={onDeleteRoute}
+            onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onReorderMilestones={onReorderMilestones}
+            showToast={showToast} onOpenPull={onOpenPull}
+            onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+            onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches}
+            contactOptions={contactOptions} onCreateContact={onCreateContact} />
+        ))}
+        {!readOnly && (
+          addingCompany ? (
+            <StrategyAddCompanyForm trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
+              onAdd={async (vals) => { await onAddCompany(initiative.id, vals); setAddingCompany(false); }} onCancel={() => setAddingCompany(false)} />
+          ) : <button type="button" className="btn-sec exec-track-addbtn" onClick={() => setAddingCompany(true)}>+ Add company</button>
+        )}
+      </div>
+
+      {(initiative.directRoutes.length > 0 || !readOnly) && (
+        <div className="strategy-routes strategy-initiative-direct-routes">
+          <div className="strategy-goal-label">Direct routes</div>
+          <StrategyDirectRoutesBoard routes={initiative.directRoutes} readOnly={readOnly}
+            onUpdateRoute={onUpdateRoute} onDeleteRoute={onDeleteRoute}
+            onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onReorderMilestones={onReorderMilestones}
+            showToast={showToast} onOpenPull={onOpenPull}
+            onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+            onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches}
+            contactOptions={contactOptions} onCreateContact={onCreateContact}
+            addingBranchFor={addingBranchFor} setAddingBranchFor={setAddingBranchFor} />
+          {initiative.directRoutes.length === 0 && <div className="empty-small">No direct routes yet.</div>}
+          {!readOnly && (
+            addingRoute ? (
+              <div className="exec-track-add">
+                <input className="input" autoFocus value={routeTitle} onChange={(e) => setRouteTitle(e.target.value)} placeholder="Route name" onKeyDown={(e) => { if (e.key === "Enter") submitRoute(); if (e.key === "Escape") setAddingRoute(false); }} />
+                <button type="button" className="btn-primary" onClick={submitRoute}>Add</button>
+                <button type="button" className="link-btn" onClick={() => setAddingRoute(false)}>Cancel</button>
+              </div>
+            ) : <button type="button" className="btn-sec exec-track-addbtn" onClick={() => setAddingRoute(true)}>+ Add route</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+function StrategyInitiativesBoard({ initiatives, readOnly, strategyId, onAddInitiative, onReorderInitiatives, ...rest }) {
+  const [adding, setAdding] = useState(false);
+  const [expandedIds, setExpandedIds] = useState(() => new Set());
+  const toggleExpand = (id) => setExpandedIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const [dragId, setDragId] = useState(null);
+  const drop = (targetId) => {
+    if (!dragId || dragId === targetId) { setDragId(null); return; }
+    const ids = initiatives.map((i) => i.id);
+    const from = ids.indexOf(dragId), to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) { setDragId(null); return; }
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    onReorderInitiatives(ids);
+    setDragId(null);
+  };
+  if (readOnly && initiatives.length === 0) return null;
+  return (
+    <div className="strategy-initiatives-board">
+      <div className="strategy-goal-label strategy-initiatives-heading">Strategic Initiatives</div>
+      {initiatives.map((init) => (
+        <StrategyInitiativeBoardCard key={init.id} initiative={init} readOnly={readOnly} expandedIds={expandedIds} onToggleExpand={toggleExpand}
+          isDragging={dragId === init.id} onDragStart={() => setDragId(init.id)}
+          onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); drop(init.id); }}
+          {...rest} />
+      ))}
+      {initiatives.length === 0 && <div className="empty-small">No strategic initiatives yet.</div>}
+      {!readOnly && (
+        adding ? (
+          <StrategyAddInitiativeForm onAdd={async (vals) => { await onAddInitiative(strategyId, vals); setAdding(false); }} onCancel={() => setAdding(false)} />
+        ) : <button type="button" className="btn-primary" onClick={() => setAdding(true)}>+ Add initiative</button>
+      )}
     </div>
   );
 }
@@ -9504,14 +9913,19 @@ function groupWeekItemsByThread(items) {
 // planned moment across the strategy's own threads, gated by the range
 // control (which only bounds how far back it goes; it always extends
 // forward through the last planned moment regardless of range).
-function computeStrategyGridWeeks(strategyThreadsList, rangeWeeks) {
+function computeStrategyGridWeeks(strategyThreadsList, rangeWeeks, strategyInitiativesList = []) {
   const todayISO = new Date().toISOString().slice(0, 10);
   const allDates = [];
-  strategyThreadsList.forEach(({ threads }) => threads.forEach((t) => t.routes.forEach((r) => routeTracks(r).forEach((tr) => {
+  const pushRoutes = (routes) => routes.forEach((r) => routeTracks(r).forEach((tr) => {
     tr.milestones.forEach((m) => { if (m.milestone_date) allDates.push(m.milestone_date); });
     if (tr.ended_at) allDates.push(tr.ended_at);
     if (tr !== r && tr.branched_at) allDates.push(tr.branched_at);
-  }))));
+  }));
+  strategyThreadsList.forEach(({ threads }) => threads.forEach((t) => pushRoutes(t.routes)));
+  strategyInitiativesList.forEach(({ initiatives }) => (initiatives || []).forEach((init) => {
+    pushRoutes(init.directRoutes || []);
+    (init.companies || []).forEach((c) => pushRoutes(c.routes || []));
+  }));
   const pastDates = allDates.filter((d) => d <= todayISO);
   const futureDates = allDates.filter((d) => d > todayISO);
   const earliestPast = pastDates.length ? pastDates.reduce((a, b) => (a < b ? a : b)) : todayISO;
@@ -9869,7 +10283,7 @@ function StrategyRouteRows({
       {((route.blockers || []).length > 0 || !readOnly) && (
         <div style={{ gridColumn: "1 / -1" }}>
           <StrategyBlockerZone blockers={route.blockers || []} readOnly={readOnly}
-            onAdd={(c) => onAddBlocker({ thread_id: thread.id, route_id: route.id }, c)}
+            onAdd={(c) => onAddBlocker({ route_id: route.id }, c)}
             onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
         </div>
       )}
@@ -9878,7 +10292,7 @@ function StrategyRouteRows({
         childForks={branches.map((b) => ({ id: b.id, title: mentionsToPlainText(b.title || ""), date: b.branched_at }))}
         onDropWeek={draggingBacklogId ? (w) => { scheduleBacklog(draggingBacklogId, w.key); setDraggingBacklogId(null); } : undefined} />
       <StrategyBacklogZone items={backlog} readOnly={readOnly}
-        onAdd={(title) => onAddMilestone({ thread_id: thread.id, route_id: route.id }, { title, is_planned: true, is_backlog: true, milestone_date: null })}
+        onAdd={(title) => onAddMilestone({ route_id: route.id }, { title, is_planned: true, is_backlog: true, milestone_date: null })}
         onUpdate={onUpdateMilestone} onDelete={onDeleteMilestone}
         onSchedule={scheduleBacklog} onComplete={completeBacklog}
         onReorder={onReorderMilestones}
@@ -10221,6 +10635,134 @@ function StrategyIncubatorZone({ strategyId, items, readOnly, onAdd, onUpdate, o
   );
 }
 
+// One INITIATIVE's grid rows, a merged band like a strategy/institution:
+// full-width head (name, goal, collapse), then either merged week slots
+// (collapsed, mixing its company placements and direct routes) or its own
+// stack of company-placement rows (each an ordinary StrategyInstitutionRows,
+// since a placement is shaped exactly like a thread) plus its direct routes
+// (ordinary StrategyRouteRows, with a synthetic thread-less owner so a
+// route-level milestone/blocker never carries a bogus thread_id).
+function StrategyInitiativeRows({
+  initiative, weeks, collapsed, onToggleCollapse, readOnly, onUpdateInitiative,
+  onUpdateMilestone, onDeleteMilestone, onAddMilestone, onReorderMilestones, showToast,
+  onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
+  onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches,
+  onAddCompany, onUpdateCompany, onReorderCompanies,
+  onAddRoute, onReorderRoutes,
+  trackOptions, contactOptions, onCreateContact,
+  isDragging, onDragStart, onDragOver, onDrop,
+}) {
+  const [collapsedCompanyIds, setCollapsedCompanyIds] = useState(() => new Set());
+  const toggleCompanyCollapse = (id) => setCollapsedCompanyIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const [addingCompany, setAddingCompany] = useState(false);
+  const [addingRouteForCompany, setAddingRouteForCompany] = useState(null);
+  const [addingDirectRoute, setAddingDirectRoute] = useState(false);
+  const asThreadsForBucket = useMemo(() => [
+    ...initiative.companies,
+    { id: initiative.id, name: initiative.title, onOpen: null, routes: initiative.directRoutes },
+  ], [initiative]);
+  const byWeek = useMemo(() => bucketThreadsByWeek(asThreadsForBucket), [asThreadsForBucket]);
+  const [routeTitle, setRouteTitle] = useState("");
+  const submitRoute = () => { if (!routeTitle.trim()) return; onAddRoute({ initiative_id: initiative.id }, routeTitle.trim()); setRouteTitle(""); setAddingDirectRoute(false); };
+  const [companyDragId, setCompanyDragId] = useState(null);
+  const dropCompany = (targetId) => {
+    if (!companyDragId || companyDragId === targetId) { setCompanyDragId(null); return; }
+    const ids = initiative.companies.map((c) => c.id);
+    const from = ids.indexOf(companyDragId), to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) { setCompanyDragId(null); return; }
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    onReorderCompanies(ids);
+    setCompanyDragId(null);
+  };
+  const [routeDragId, setRouteDragId] = useState(null);
+  const dropRoute = (targetId) => {
+    if (!routeDragId || routeDragId === targetId) { setRouteDragId(null); return; }
+    const ids = initiative.directRoutes.map((r) => r.id);
+    const from = ids.indexOf(routeDragId), to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) { setRouteDragId(null); return; }
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    onReorderRoutes(ids);
+    setRouteDragId(null);
+  };
+  const allTracks = [...initiative.directRoutes, ...initiative.companies.flatMap((c) => c.routes)].flatMap(routeTracks);
+  const blockedCount = (initiative.blockers || []).filter((b) => !b.is_resolved).length + allTracks.reduce((a, t) => a + (t.blockers || []).filter((b) => !b.is_resolved).length, 0);
+  const plannedCount = initiative.companies.reduce((a, c) => a + threadBacklogCount(c), 0) + initiative.directRoutes.reduce((a, r) => a + routeBacklog(r).length, 0);
+  return (
+    <>
+      <div className={`strategy-initiative-inst-head ${isDragging ? "strategy-dragging" : ""}`} style={{ gridColumn: "1 / -1" }} onDragOver={onDragOver} onDrop={onDrop}>
+        {!readOnly && <span className="strategy-drag-handle" title="Drag to reorder" draggable onDragStart={onDragStart}>⠿</span>}
+        <button type="button" className="link-btn strategy-tree-toggle" onClick={onToggleCollapse}>{collapsed ? "▸" : "▾"}</button>
+        <span className="strategy-initiative-label">Initiative</span>
+        <span className="strategy-inst-name strategy-initiative-inst-name"><StrategyMentionField value={initiative.title} onSave={(v) => onUpdateInitiative(initiative.id, { title: v })} readOnly={readOnly} placeholder="Initiative title" /></span>
+        <span className="strategy-inst-goal"><StrategyMentionField value={initiative.goal || ""} onSave={(v) => onUpdateInitiative(initiative.id, { goal: v })} readOnly={readOnly} placeholder="Goal" /></span>
+        {collapsed && plannedCount > 0 && <span className="strategy-planned-badge">{plannedCount} planned</span>}
+        <StrategyBlockedBadge count={blockedCount} />
+      </div>
+      {!collapsed && ((initiative.blockers || []).length > 0 || !readOnly) && (
+        <div style={{ gridColumn: "1 / -1" }}>
+          <StrategyBlockerZone blockers={initiative.blockers || []} readOnly={readOnly}
+            onAdd={(c) => onAddBlocker({ initiative_id: initiative.id }, c)} onUpdate={onUpdateBlocker} onDelete={onDeleteBlocker} onResolve={onResolveBlocker} showToast={showToast} />
+        </div>
+      )}
+      {collapsed ? (
+        weeks.map((w, i) => (
+          <div key={w.key} className={weekSlotClass(i, w, null)}>
+            <StrategyBandSlotContent items={byWeek.get(w.key) || []} labelThread readOnly={readOnly}
+              onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} />
+          </div>
+        ))
+      ) : (
+        <>
+          {initiative.companies.map((company) => (
+            <StrategyInstitutionRows key={company.id} thread={company} weeks={weeks}
+              collapsed={collapsedCompanyIds.has(company.id)} onToggleCollapse={() => toggleCompanyCollapse(company.id)}
+              onUpdateGoal={(id, v) => onUpdateCompany(id, { goal: v })} readOnly={readOnly}
+              onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+              onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
+              onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+              onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches}
+              contactOptions={contactOptions} onCreateContact={onCreateContact}
+              addingRoute={addingRouteForCompany === company.id} onStartAddRoute={() => setAddingRouteForCompany(company.id)} onCancelAddRoute={() => setAddingRouteForCompany(null)}
+              onAddRoute={(id, title) => { onAddRoute({ initiative_company_id: id }, title); setAddingRouteForCompany(null); }} onReorderRoutes={onReorderRoutes}
+              isDragging={companyDragId === company.id} onDragStart={() => setCompanyDragId(company.id)}
+              onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); dropCompany(company.id); }} />
+          ))}
+          {!readOnly && (
+            <div className="strategy-inline-add-row" style={{ gridColumn: "1 / -1" }}>
+              {addingCompany ? (
+                <StrategyAddCompanyForm trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
+                  onAdd={async (vals) => { await onAddCompany(initiative.id, vals); setAddingCompany(false); }} onCancel={() => setAddingCompany(false)} />
+              ) : <button type="button" className="link-btn" onClick={() => setAddingCompany(true)}>+ Add company</button>}
+            </div>
+          )}
+          {initiative.directRoutes.map((route) => (
+            <StrategyRouteRows key={route.id} thread={{ id: initiative.id }} route={route} weeks={weeks} readOnly={readOnly}
+              onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+              onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
+              onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+              onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches}
+              contactOptions={contactOptions} onCreateContact={onCreateContact}
+              isDragging={routeDragId === route.id} onDragStart={() => setRouteDragId(route.id)}
+              onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); dropRoute(route.id); }} />
+          ))}
+          {!readOnly && (
+            <div className="strategy-inline-add-row" style={{ gridColumn: "1 / -1" }}>
+              {addingDirectRoute ? (
+                <div className="exec-track-add strategy-inline-add">
+                  <input className="input" autoFocus value={routeTitle} onChange={(e) => setRouteTitle(e.target.value)}
+                    placeholder="Direct route name" onKeyDown={(e) => { if (e.key === "Enter") submitRoute(); if (e.key === "Escape") setAddingDirectRoute(false); }} />
+                  <button type="button" className="btn-primary" onClick={submitRoute}>Add</button>
+                  <button type="button" className="link-btn" onClick={() => setAddingDirectRoute(false)}>Cancel</button>
+                </div>
+              ) : <button type="button" className="link-btn" onClick={() => setAddingDirectRoute(true)}>+ Add direct route</button>}
+            </div>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 // One STRATEGY's self-contained card: a colored header sitting above the
 // grid, then a single CSS Grid (`repeat(weeks.length, 1fr) + one fixed
 // Planned column`) shared by the week-label row and every institution/route
@@ -10239,6 +10781,7 @@ function StrategyCard({
   strategyBlockers, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
   incubatorItems, onAddIncubatorItem, onUpdateIncubatorItem, onDeleteIncubatorItem, onReorderIncubatorItems, onDropIncubatorItem, onActivateIncubatorItem,
   onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches,
+  initiatives, onUpdateInitiative, onReorderInitiatives, onAddCompany, onUpdateCompany, onReorderCompanies, onAddInitiativeRoute, onReorderInitiativeRoutes,
 }) {
   const byWeek = useMemo(() => bucketThreadsByWeek(threads), [threads]);
   const pending = strategyBacklogCount(threads);
@@ -10256,9 +10799,24 @@ function StrategyCard({
     onReorderThreads(ids);
     setThreadDragId(null);
   };
+  const [collapsedInitiativeIds, setCollapsedInitiativeIds] = useState(() => new Set());
+  const toggleInitiativeCollapse = (id) => setCollapsedInitiativeIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const [initiativeDragId, setInitiativeDragId] = useState(null);
+  const dropInitiative = (targetId) => {
+    if (!initiativeDragId || initiativeDragId === targetId) { setInitiativeDragId(null); return; }
+    const ids = (initiatives || []).map((i) => i.id);
+    const from = ids.indexOf(initiativeDragId), to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) { setInitiativeDragId(null); return; }
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    onReorderInitiatives(ids);
+    setInitiativeDragId(null);
+  };
+  const initiativeTracks = (initiatives || []).flatMap((init) => [...init.directRoutes, ...init.companies.flatMap((c) => c.routes)]).flatMap(routeTracks);
   const strategyBlockedCount = (strategyBlockers || []).filter((b) => !b.is_resolved).length
     + threads.reduce((a, t) => a + (t.blockers || []).filter((b) => !b.is_resolved).length
-      + t.routes.reduce((a2, r) => a2 + routeBlockedTotal(r), 0), 0);
+      + t.routes.reduce((a2, r) => a2 + routeBlockedTotal(r), 0), 0)
+    + (initiatives || []).reduce((a, i) => a + (i.blockers || []).filter((b) => !b.is_resolved).length, 0)
+    + initiativeTracks.reduce((a, t) => a + (t.blockers || []).filter((b) => !b.is_resolved).length, 0);
   return (
     <div className={`strategy-card ${isDragging ? "strategy-dragging" : ""}`} style={{ borderColor: (strategy.color || "var(--mango)") + "55" }}
       onDragOver={onDragOverSelf} onDrop={onDropSelf}>
@@ -10304,6 +10862,20 @@ function StrategyCard({
           ))
         ) : (
           <>
+            {(initiatives || []).map((init) => (
+              <StrategyInitiativeRows key={init.id} initiative={init} weeks={weeks}
+                collapsed={collapsedInitiativeIds.has(init.id)} onToggleCollapse={() => toggleInitiativeCollapse(init.id)}
+                readOnly={readOnly} onUpdateInitiative={onUpdateInitiative}
+                onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone}
+                onAddMilestone={onAddMilestone} onReorderMilestones={onReorderMilestones} showToast={showToast}
+                onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+                onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches}
+                onAddCompany={onAddCompany} onUpdateCompany={onUpdateCompany} onReorderCompanies={onReorderCompanies}
+                onAddRoute={onAddInitiativeRoute} onReorderRoutes={onReorderInitiativeRoutes}
+                trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact}
+                isDragging={initiativeDragId === init.id} onDragStart={() => setInitiativeDragId(init.id)}
+                onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); dropInitiative(init.id); }} />
+            ))}
             {threads.map((thread) => (
               <StrategyInstitutionRows key={thread.id} thread={thread} weeks={weeks}
                 collapsed={collapsedInstitutionIds.has(thread.id)} onToggleCollapse={() => onToggleInstitutionCollapse(thread.id)}
@@ -10350,6 +10922,7 @@ function StrategyCardsTimeline({
   routeBlockersFor, onAddBlocker, onUpdateBlocker, onDeleteBlocker, onResolveBlocker,
   incubatorFor = () => [], onAddIncubatorItem, onUpdateIncubatorItem, onDeleteIncubatorItem, onReorderIncubatorItems, onDropIncubatorItem, onActivateIncubatorItem,
   onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches,
+  strategyInitiativesList = [], onUpdateInitiative, onReorderInitiatives, onAddCompany, onUpdateCompany, onReorderCompanies,
   presenting = false, focusedStrategyId = null, onFocusStrategy,
 }) {
   const [rangeId, setRangeId] = useState("8w");
@@ -10375,7 +10948,8 @@ function StrategyCardsTimeline({
   // A single shared week axis for every card (unified timeline), rather than
   // each strategy computing its own: this is what lets a node line up under
   // the same week's header/shading regardless of which card it is in.
-  const weeks = useMemo(() => computeStrategyGridWeeks(strategyThreadsList, range.weeks), [strategyThreadsList, range.weeks]);
+  const weeks = useMemo(() => computeStrategyGridWeeks(strategyThreadsList, range.weeks, strategyInitiativesList), [strategyThreadsList, range.weeks, strategyInitiativesList]);
+  const initiativesByStrategy = (strategyId) => strategyInitiativesList.find((x) => x.strategy.id === strategyId)?.initiatives || [];
 
   return (
     <div className="strategy-cards-outer">
@@ -10433,7 +11007,10 @@ function StrategyCardsTimeline({
               incubatorItems={incubatorFor(strategy.id)} onAddIncubatorItem={onAddIncubatorItem} onUpdateIncubatorItem={onUpdateIncubatorItem}
               onDeleteIncubatorItem={onDeleteIncubatorItem} onReorderIncubatorItems={onReorderIncubatorItems}
               onDropIncubatorItem={onDropIncubatorItem} onActivateIncubatorItem={onActivateIncubatorItem}
-              onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches} />
+              onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches}
+              initiatives={initiativesByStrategy(strategy.id)} onUpdateInitiative={onUpdateInitiative} onReorderInitiatives={onReorderInitiatives}
+              onAddCompany={onAddCompany} onUpdateCompany={onUpdateCompany} onReorderCompanies={onReorderCompanies}
+              onAddInitiativeRoute={onAddRoute} onReorderInitiativeRoutes={onReorderRoutes} />
           ))}
         </div>
       )}
@@ -10535,6 +11112,9 @@ function StrategyTab({
   onBuildStrategyDigest,
   incubatorFor, onAddIncubatorItem, onUpdateIncubatorItem, onDeleteIncubatorItem, onReorderIncubatorItems, onDropIncubatorItem, onActivateIncubatorItem,
   onAddBranch, onUpdateBranch, onDeleteBranch, onReorderBranches,
+  initiativesForStrategy, resolveInitiativeCard, onAddInitiative, onUpdateInitiative, onDeleteInitiative, onReorderInitiatives,
+  onAddInitiativeCompany, onUpdateInitiativeCompany, onDeleteInitiativeCompany, onReorderInitiativeCompanies,
+  strategyDeepLink, onConsumeDeepLink,
   trackOptions, contactOptions, onCreateContact, showToast,
 }) {
   const readOnly = useReadOnly();
@@ -10575,11 +11155,23 @@ function StrategyTab({
 
   const threads = strategy ? threadsForStrategy(strategy.id).map(resolveThreadCard) : [];
   const week = strategyWeekSummary(threads);
+  const initiatives = strategy ? initiativesForStrategy(strategy.id).map(resolveInitiativeCard) : [];
+  // "In Strategies" on a company profile jumps here: land on that strategy,
+  // switch to Board (where an initiative and its placements are visible at
+  // once), then clear the link so a later plain visit does not re-trigger it.
+  useEffect(() => {
+    if (!strategyDeepLink) return;
+    if (strategyDeepLink.strategyId) setActiveStrategyId(strategyDeepLink.strategyId);
+    setMode("board");
+    onConsumeDeepLink();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategyDeepLink]);
   // The Timeline shows every strategy at once, as its own card, so it needs
   // every strategy's threads resolved, not just the selected one; sorted by
   // sort_order so a drag reorder is reflected immediately.
   const sortedStrategies = [...strategies].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   const allStrategyThreadsList = sortedStrategies.map((s) => ({ strategy: s, threads: threadsForStrategy(s.id).map(resolveThreadCard) }));
+  const allStrategyInitiativesList = sortedStrategies.map((s) => ({ strategy: s, initiatives: initiativesForStrategy(s.id).map(resolveInitiativeCard) }));
 
   // Every open blocker across every strategy, for the top-level summary:
   // strategy-level ones plus each thread's and each route's, oldest first.
@@ -10602,7 +11194,30 @@ function StrategyTab({
       });
     });
     return rows;
-  }).sort((a, b) => (a.blocker.raised_at || "").localeCompare(b.blocker.raised_at || ""));
+  }).concat(allStrategyInitiativesList.flatMap(({ strategy: s, initiatives: inits }) => {
+    const rows = [];
+    inits.forEach((init) => {
+      (init.blockers || []).filter((b) => !b.is_resolved).forEach((blocker) => {
+        rows.push({ blocker, strategyName: s.name, threadName: init.title, routeTitle: null, onOpen: null });
+      });
+      init.directRoutes.forEach((r) => {
+        (r.blockers || []).filter((b) => !b.is_resolved).forEach((blocker) => {
+          rows.push({ blocker, strategyName: s.name, threadName: init.title, routeTitle: r.title, onOpen: null });
+        });
+      });
+      init.companies.forEach((c) => {
+        (c.blockers || []).filter((b) => !b.is_resolved).forEach((blocker) => {
+          rows.push({ blocker, strategyName: s.name, threadName: `${init.title} > ${c.name}`, routeTitle: null, onOpen: c.onOpen });
+        });
+        c.routes.forEach((r) => {
+          (r.blockers || []).filter((b) => !b.is_resolved).forEach((blocker) => {
+            rows.push({ blocker, strategyName: s.name, threadName: `${init.title} > ${c.name}`, routeTitle: r.title, onOpen: c.onOpen });
+          });
+        });
+      });
+    });
+    return rows;
+  })).sort((a, b) => (a.blocker.raised_at || "").localeCompare(b.blocker.raised_at || ""));
 
   const submitStrategy = async () => {
     if (!newStratName.trim()) return;
@@ -10689,7 +11304,9 @@ function StrategyTab({
               incubatorFor={incubatorFor} onAddIncubatorItem={onAddIncubatorItem} onUpdateIncubatorItem={onUpdateIncubatorItem}
               onDeleteIncubatorItem={onDeleteIncubatorItem} onReorderIncubatorItems={onReorderIncubatorItems}
               onDropIncubatorItem={onDropIncubatorItem} onActivateIncubatorItem={onActivateIncubatorItem}
-              onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches} />
+              onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches}
+              strategyInitiativesList={allStrategyInitiativesList} onUpdateInitiative={onUpdateInitiative} onReorderInitiatives={onReorderInitiatives}
+              onAddCompany={onAddInitiativeCompany} onUpdateCompany={onUpdateInitiativeCompany} onReorderCompanies={onReorderInitiativeCompanies} />
           ) : (
             <>
               {strategies.length > 1 && (
@@ -10720,6 +11337,16 @@ function StrategyTab({
                 <span className="strategy-week-dead"><b>{week.deadEnded}</b> dead-ended this week</span>
                 {week.succeeded > 0 && <span className="strategy-week-success"><b>{week.succeeded}</b> succeeded this week</span>}
               </div>
+
+              <StrategyInitiativesBoard initiatives={initiatives} readOnly={readOnly} strategyId={strategy.id}
+                onAddInitiative={onAddInitiative} onReorderInitiatives={onReorderInitiatives}
+                onUpdateInitiative={onUpdateInitiative} onDeleteInitiative={onDeleteInitiative}
+                onAddCompany={onAddInitiativeCompany} onUpdateCompany={onUpdateInitiativeCompany} onDeleteCompany={onDeleteInitiativeCompany}
+                onAddRoute={onAddRoute} onUpdateRoute={onUpdateRoute} onDeleteRoute={onDeleteRoute}
+                onAddMilestone={onAddMilestone} onUpdateMilestone={onUpdateMilestone} onDeleteMilestone={onDeleteMilestone} onReorderMilestones={onReorderMilestones}
+                onAddBlocker={onAddBlocker} onUpdateBlocker={onUpdateBlocker} onDeleteBlocker={onDeleteBlocker} onResolveBlocker={onResolveBlocker}
+                onAddBranch={onAddBranch} onUpdateBranch={onUpdateBranch} onDeleteBranch={onDeleteBranch} onReorderBranches={onReorderBranches}
+                trackOptions={trackOptions} contactOptions={contactOptions} onCreateContact={onCreateContact} showToast={showToast} onOpenPull={openPull} />
 
               {!readOnly && (
                 addingThread ? (
@@ -12952,6 +13579,37 @@ function NoteCard({ note, onOpen, badge }) {
   );
 }
 
+// The "mother record" roll-up: every place this company (or person) has
+// been placed under a strategic initiative, across every strategy, read-only
+// (the tracking itself happens in the Strategy view). Each row names its
+// Strategy > Initiative, its own per-placement goal, and a quick status
+// (active routes, last movement, any dead ends), and jumps into the
+// Strategy tab on click via `placement.onOpen`.
+function StrategicPlacementsSection({ placements }) {
+  if (!placements || placements.length === 0) return null;
+  return (
+    <div className="people-section">
+      <div className="section-label">In Strategies</div>
+      <div className="strategic-placements-list">
+        {placements.map(({ placement, initiative, strategy, activeRoutes, deadEnds, lastMovement, onOpen }) => (
+          <button key={placement.id} type="button" className="strategic-placement-row" onClick={onOpen}>
+            <div className="strategic-placement-path">
+              <span className="strategic-placement-strategy">{strategy.name}</span>
+              <span className="strategic-placement-sep">›</span>
+              <span className="strategic-placement-initiative">{initiative.title}</span>
+            </div>
+            {placement.goal && <div className="strategic-placement-goal">{mentionsToPlainText(placement.goal)}</div>}
+            <div className="strategic-placement-status">
+              <span>{activeRoutes} active route{activeRoutes === 1 ? "" : "s"}</span>
+              {lastMovement && <span>Last movement {formatDate(lastMovement)}</span>}
+              {deadEnds > 0 && <span className="strategic-placement-deadend">{deadEnds} dead end{deadEnds === 1 ? "" : "s"}</span>}
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 function LinkedNotesSection({ notes, onOpenNote }) {
   if (!notes || notes.length === 0) return null;
   const sorted = [...notes].sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
@@ -13401,7 +14059,7 @@ function ContactConnectPicker({ contacts, value, onChange, onCreateContact, plac
   );
 }
 
-function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onUpdateActivity, onDeleteActivity, onAddTimelineEntry, activityLinkOptions = {}, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, discussionPoints = [], onAddDiscussionPoint, onUpdateDiscussionPoint, onToggleDiscussed, onTogglePriority, onDeleteDiscussionPoint, onAddRole, onRemoveRole, onConnectPerson, onAddIntroducedPerson, onCreateBareContact, onRemoveConnection, onSwapConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot }) {
+function PersonSheet({ contact, activities, deals, enablers, organizations, contacts, dealContacts, enablerContacts, networkEdges, contactRoles, institutions, customOptions = [], onAddCustomOption = () => {}, onCreateInstitution, onUpdate, onDelete, onCompose, onAddActivity, onSummarizeEmail, summarizingActivityId, onUpdateActivity, onDeleteActivity, onAddTimelineEntry, activityLinkOptions = {}, onAddTodo, todos = [], todoContacts = [], taskInitial = {}, onToggleTodo, onUpdateTodo, onNavigateTask, linkedNotes = [], onOpenNote, discussionPoints = [], onAddDiscussionPoint, onUpdateDiscussionPoint, onToggleDiscussed, onTogglePriority, onDeleteDiscussionPoint, onAddRole, onRemoveRole, onConnectPerson, onAddIntroducedPerson, onCreateBareContact, onRemoveConnection, onSwapConnection, onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot, strategicPlacements = [] }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
   const [addingRole, setAddingRole] = useState(false);
@@ -13768,6 +14426,8 @@ function PersonSheet({ contact, activities, deals, enablers, organizations, cont
       )}
 
       <DiscussionPointsSection points={discussionPoints} onAdd={onAddDiscussionPoint} onUpdate={onUpdateDiscussionPoint} onToggleDiscussed={onToggleDiscussed} onTogglePriority={onTogglePriority} onDelete={onDeleteDiscussionPoint} showToast={showToast} />
+
+      <StrategicPlacementsSection placements={strategicPlacements} />
 
       <LinkedNotesSection notes={linkedNotes} onOpenNote={onOpenNote} />
 
@@ -14716,6 +15376,7 @@ function InstitutionSheet({
   onChangeStage, onChangeTier, onUpdateDeal, todos = [], todoContacts = [], taskInitial = {}, onAddTodo, onToggleTodo, onUpdateTodo, onNavigate,
   materials = [], materialLinks = [], onAttachMaterial, onRemoveMaterialLink, onDownloadMaterial,
   onGenerateSummary, onSaveSummary, summarizing, showToast, onOpenInstitution, onOpenPerson, onOpenCalendarEvent, onBack, backLabel = "Back to Ecosystem", bossNotesSlot,
+  strategicPlacements = [],
 }) {
   const readOnly = useReadOnly();
   const [filter, setFilter] = useState("all");
@@ -15138,6 +15799,8 @@ function InstitutionSheet({
           )}
         </div>
       )}
+
+      <StrategicPlacementsSection placements={strategicPlacements} />
 
       <MaterialsSection materials={materials} links={materialLinks} onAttach={onAttachMaterial} onRemoveLink={onRemoveMaterialLink} onDownload={onDownloadMaterial} />
 

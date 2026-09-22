@@ -2641,6 +2641,40 @@ body.strategy-presenting-body { overflow: hidden; }
 .strategy-lane-fork-glyph { position: absolute; top: -2px; left: 4px; font-size: 13px; color: var(--muted-2); background: var(--surface); line-height: 1; }
 .strategy-lane-childfork { position: absolute; bottom: 1px; font-size: 12px; color: var(--muted-2); transform: translateX(-50%); pointer-events: auto; z-index: 1; line-height: 1; }
 
+/* ---------- STRATEGIC INITIATIVES ---------- */
+/* An organizing layer inside a strategy: it can group company placements
+   (the same institution placed under several initiatives, each tracked
+   separately) and/or carry its own direct routes. Board: a distinct card
+   nested inside the strategy, itself containing the reused thread-card look
+   for each placement. Timeline: a merged band like a strategy/institution
+   row, one level up from a company placement. */
+.strategy-initiatives-board { display: flex; flex-direction: column; gap: 14px; margin: 10px 0; }
+.strategy-initiatives-heading { margin-bottom: -4px; }
+.strategy-initiative-card { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--card); display: flex; flex-direction: column; gap: 8px; }
+.strategy-initiative-card.strategy-dragging { opacity: .5; }
+.strategy-initiative-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; }
+.strategy-initiative-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); background: var(--surface-2); border-radius: 5px; padding: 2px 6px; }
+.strategy-initiative-title { font-size: 14px; font-weight: 700; color: var(--text); flex: 1; min-width: 140px; }
+.strategy-initiative-companies { display: flex; flex-direction: column; gap: 10px; margin-left: 4px; padding-left: 10px; border-left: 2px solid var(--border); }
+.strategy-initiative-companies .strategy-thread { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--surface); }
+.strategy-initiative-direct-routes { margin-left: 4px; padding-left: 10px; border-left: 2px dashed var(--border); }
+.strategy-initiative-inst-head { position: relative; }
+.strategy-initiative-inst-name { color: var(--text); }
+
+/* "In Strategies": the company/person profile's read-only roll-up of every
+   place it has been placed under a strategic initiative, across every
+   strategy, each clickable through to that placement in the Strategy tab. */
+.strategic-placements-list { display: flex; flex-direction: column; gap: 8px; }
+.strategic-placement-row { display: flex; flex-direction: column; gap: 4px; text-align: left; width: 100%; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--card); cursor: pointer; }
+.strategic-placement-row:hover { border-color: var(--mango); }
+.strategic-placement-path { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 650; }
+.strategic-placement-strategy { color: var(--text); }
+.strategic-placement-sep { color: var(--muted); }
+.strategic-placement-initiative { color: var(--text-2); }
+.strategic-placement-goal { font-size: 12px; color: var(--muted-2); }
+.strategic-placement-status { display: flex; gap: 12px; font-size: 11px; color: var(--muted); }
+.strategic-placement-deadend { color: #B0392E; }
+
 /* ---------- STRATEGY INCUBATOR ("In Preparation") ---------- */
 /* Strategy-level work in preparation: not yet a route, not yet on the week
    axis at all, so it gets a visually muted panel clearly separate from the
